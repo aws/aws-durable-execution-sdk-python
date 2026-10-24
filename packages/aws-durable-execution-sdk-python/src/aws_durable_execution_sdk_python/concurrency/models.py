@@ -42,26 +42,6 @@ ResultType = TypeVar("ResultType")
 
 # region Result models
 
-_MISSING_FAILED_ITEM_ERROR_MESSAGE = (
-    "Unknown error. No ErrorObject exists on the Checkpoint Operation."
-)
-
-
-def _generic_failed_item_error() -> ErrorObject:
-    """ErrorObject for a FAILED batch item that carried no checkpoint error.
-
-    Matches ``_failed_checkpoint_error_object`` when the child-context
-    checkpoint has no ErrorObject: the same generic ChildContextError
-    replaying that child would raise.
-    """
-    err = ChildContextError(message=_MISSING_FAILED_ITEM_ERROR_MESSAGE)
-    return ErrorObject(
-        message=err.message,
-        type=err.error_type,
-        data=err.data,
-        stack_trace=err.stack_trace,
-    )
-
 
 class CompletionReason(Enum):
     ALL_COMPLETED = "ALL_COMPLETED"
@@ -421,10 +401,6 @@ class BatchItem(Generic[R]):
     result: R | None = None
     error: ErrorObject | None = None
 
-    def __post_init__(self) -> None:
-        if self.status is BatchItemStatus.FAILED and self.error is None:
-            object.__setattr__(self, "error", _generic_failed_item_error())
-
     def to_dict(self) -> dict:
         return {
             "index": self.index,
@@ -534,28 +510,44 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         return any(item.status is BatchItemStatus.FAILED for item in self.all)
 
     def throw_if_error(self) -> None:
-        first_error = next(
-            (item.error for item in self.all if item.status is BatchItemStatus.FAILED),
+        first_failed = next(
+            (item for item in self.all if item.status is BatchItemStatus.FAILED),
             None,
         )
-        if first_error is not None:
+        if first_failed is not None:
+            first_error = first_failed.error
+            if first_error is None:
+                raise ChildContextError(
+                    message=(
+                        f"Batch item {first_failed.index} failed "
+                        "without an ErrorObject."
+                    )
+                )
+
             # Each item runs in a child context, so a failed item surfaces as a
             # ChildContextError wrapping the escaping error (reconstructed as its
             # typed form where possible, with __cause__ set). Remaining errors
             # stay in get_errors().
             first_error.raise_as_operation_error(ChildContextError)
         if self.completion_reason is CompletionReason.CUSTOM_COMPLETION_FAILED:
-            # A custom decision marked the batch failed with no item error.
+            # A custom decision marked the batch failed with no failed item.
             raise BatchCompletionError(self.completion_reason)
 
     def get_results(self) -> list[R]:
         # None is a valid result for a branch that returns nothing.
-        return [cast("R", item.result) for item in self.succeeded()]
-
-    def get_errors(self) -> list[ErrorObject]:
         return [
-            item.error if item.error is not None else _generic_failed_item_error()
-            for item in self.failed()
+            cast(R, item.result)
+            for item in self.all
+            if item.status is BatchItemStatus.SUCCEEDED
+        ]
+
+    def get_errors(self) -> list[ErrorObject | None]:
+        """Return one entry per FAILED item, in branch order.
+
+        An entry may be None when a deserialized BatchItem contained no error.
+        """
+        return [
+            item.error for item in self.all if item.status is BatchItemStatus.FAILED
         ]
 
     @property

@@ -90,21 +90,6 @@ def _branch_error_object(err: Exception) -> ErrorObject:
     return ErrorObject.from_exception(err)
 
 
-def _failed_checkpoint_error_object(checkpoint: CheckpointedResult) -> ErrorObject:
-    """Return the error of a branch whose child context checkpoint FAILED.
-
-    The checkpoint error is optional. Without one, record the generic
-    ChildContextError that replaying the child context raises, so every
-    FAILED item carries an error.
-    """
-    if checkpoint.error is not None:
-        return checkpoint.error
-    try:
-        checkpoint.raise_operation_error(ChildContextError)
-    except ChildContextError as e:
-        return _branch_error_object(e)
-
-
 @dataclass
 class ResumeWave(Generic[CallableType, ResultType]):
     """Branches suspended until one time, and the refresh that resumes them.
@@ -815,7 +800,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             return BatchItem(
                 executable.index,
                 BatchItemStatus.FAILED,
-                error=_failed_checkpoint_error_object(checkpoint),
+                error=checkpoint.to_error_object(ChildContextError),
             )
         if self.nesting_type is NestingType.FLAT:
             try:
@@ -868,7 +853,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 )
 
             elif checkpoint.is_failed():
-                error = _failed_checkpoint_error_object(checkpoint)
+                error = checkpoint.to_error_object(ChildContextError)
                 status = BatchItemStatus.FAILED
             else:
                 status = BatchItemStatus.STARTED

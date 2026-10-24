@@ -63,7 +63,6 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
     TimedSuspendExecution,
 )
-from aws_durable_execution_sdk_python.serdes import ExtendedTypeSerDes
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableServiceClient,
     ErrorObject,
@@ -85,6 +84,7 @@ from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     PluginExecutor,
 )
+from aws_durable_execution_sdk_python.serdes import ExtendedTypeSerDes
 from aws_durable_execution_sdk_python.state import (
     CheckpointedResult,
     ExecutionState,
@@ -311,6 +311,96 @@ def test_batch_result_get_errors():
     assert len(errors) == 2
     assert error1 in errors
     assert error2 in errors
+
+
+def test_batch_result_preserves_missing_errors_through_serdes():
+    """Deserialization preserves one optional error per FAILED item."""
+    real_error = ErrorObject("real error", "RealError", "data", ["line"])
+    wire = {
+        "all": [
+            {"index": 2, "status": "FAILED", "result": None, "error": None},
+            {
+                "index": 5,
+                "status": "FAILED",
+                "result": None,
+                "error": real_error.to_dict(),
+            },
+        ],
+        "completionReason": "ALL_COMPLETED",
+    }
+
+    restored = BatchResult.from_dict(wire)
+    assert restored.get_errors() == [None, real_error]
+    assert len(restored.get_errors()) == restored.failure_count == 2
+
+    serdes = ExtendedTypeSerDes()
+    round_tripped = serdes.deserialize(serdes.serialize(restored))
+
+    assert isinstance(round_tripped, BatchResult)
+    assert round_tripped.get_errors() == [None, real_error]
+    assert len(round_tripped.get_errors()) == round_tripped.failure_count == 2
+
+
+def test_batch_result_throw_if_error_without_error_uses_item_index():
+    """A FAILED item without an ErrorObject raises a deterministic error."""
+    result = BatchResult(
+        [BatchItem(7, BatchItemStatus.FAILED)],
+        CompletionReason.ALL_COMPLETED,
+    )
+
+    with pytest.raises(ChildContextError) as exc_info:
+        result.throw_if_error()
+
+    assert exc_info.value.message == "Batch item 7 failed without an ErrorObject."
+    assert exc_info.value.error_type == (
+        "aws_durable_execution_sdk_python.exceptions.ChildContextError"
+    )
+    assert exc_info.value.__cause__ is None
+
+
+def test_batch_result_throw_if_error_uses_first_failed_item():
+    """A later real error does not replace the first FAILED item."""
+    later_error = ErrorObject("later error", "LaterError", None, None)
+    result = BatchResult(
+        [
+            BatchItem(3, BatchItemStatus.FAILED),
+            BatchItem(4, BatchItemStatus.FAILED, error=later_error),
+        ],
+        CompletionReason.ALL_COMPLETED,
+    )
+
+    assert result.get_errors() == [None, later_error]
+    with pytest.raises(
+        ChildContextError,
+        match=r"Batch item 3 failed without an ErrorObject\.",
+    ):
+        result.throw_if_error()
+
+
+def test_batch_result_throw_if_error_preserves_real_first_error():
+    """A real error on the first FAILED item retains all error fields."""
+    first_error = ErrorObject(
+        "first error",
+        "OriginalError",
+        "error data",
+        ["stack line"],
+    )
+    result = BatchResult(
+        [
+            BatchItem(3, BatchItemStatus.FAILED, error=first_error),
+            BatchItem(4, BatchItemStatus.FAILED),
+        ],
+        CompletionReason.ALL_COMPLETED,
+    )
+
+    assert result.get_errors()[0] is first_error
+    with pytest.raises(ChildContextError) as exc_info:
+        result.throw_if_error()
+
+    assert exc_info.value.message == first_error.message
+    assert exc_info.value.error_type == first_error.type
+    assert exc_info.value.data == first_error.data
+    assert exc_info.value.stack_trace == first_error.stack_trace
 
 
 def test_batch_result_keeps_succeeded_items_with_none_result():
@@ -613,77 +703,6 @@ def test_executable_creation():
     executable = Executable(index=5, func=test_func)
     assert executable.index == 5
     assert executable.func == test_func
-
-
-def test_batch_result_failed_with_none_error():
-    """FAILED items without an error normalize to ChildContextError.
-
-    Construction and deserialization both fill the same generic error the
-    executor records for a FAILED child-context checkpoint with no
-    ErrorObject, so get_errors() never returns None.
-    """
-    child_context_type = (
-        "aws_durable_execution_sdk_python.exceptions.ChildContextError"
-    )
-    items = [
-        BatchItem(0, BatchItemStatus.FAILED, error=None),
-        BatchItem(
-            1, BatchItemStatus.FAILED, error=ErrorObject("msg", "Error", None, None)
-        ),
-    ]
-    result = BatchResult(items, CompletionReason.ALL_COMPLETED)
-
-    failed = result.failed()
-    assert len(failed) == result.failure_count == 2
-    assert failed[0].error is not None
-    assert failed[0].error.type == child_context_type
-    assert failed[0].error.message == (
-        "Unknown error. No ErrorObject exists on the Checkpoint Operation."
-    )
-
-    errors = result.get_errors()
-    assert len(errors) == 2
-    assert errors[0].type == child_context_type
-    assert errors[1].type == "Error"
-
-    # Wire payload may still omit error; from_dict must normalize too.
-    wire = {
-        "all": [
-            {"index": 0, "status": "FAILED", "result": None, "error": None},
-            {
-                "index": 1,
-                "status": "FAILED",
-                "result": None,
-                "error": ErrorObject("msg", "Error", None, None).to_dict(),
-            },
-        ],
-        "completionReason": "ALL_COMPLETED",
-    }
-    round_tripped = BatchResult.from_dict(wire)
-    round_trip_errors = round_tripped.get_errors()
-    assert len(round_trip_errors) == 2
-    assert round_trip_errors[0].type == child_context_type
-    assert all(error is not None for error in round_trip_errors)
-    assert round_trip_errors[0].type is not None
-    # Accessing error.type must not raise after deserialization.
-    assert [error.type for error in round_trip_errors] == [
-        child_context_type,
-        "Error",
-    ]
-
-    # Same gap after ExtendedTypeSerDes round-trip of a wire payload with
-    # error=null (the path that previously yielded AttributeError on .type).
-    serdes_payload = (
-        '{"t":"br","v":{"all":{"t":"l","v":[{"t":"m","v":{"index":{"t":"i","v":0},'
-        '"status":{"t":"s","v":"FAILED"},"result":{"t":"n","v":null},'
-        '"error":{"t":"n","v":null}}}]},"completionReason":{"t":"s","v":"ALL_COMPLETED"}}}'
-    )
-    serdes_result = ExtendedTypeSerDes().deserialize(serdes_payload)
-    assert isinstance(serdes_result, BatchResult)
-    serdes_errors = serdes_result.get_errors()
-    assert len(serdes_errors) == 1
-    assert serdes_errors[0].type == child_context_type
-
 
 
 def test_concurrent_executor_nesting_type_parameter():
@@ -1156,6 +1175,7 @@ def test_replay_failed_checkpoint_without_error_records_child_context_error(
     assert [item.index for item in result.failed()] == [0]
     errors = result.get_errors()
     assert len(errors) == 1
+    assert errors[0] is not None
     assert errors[0].type == (
         "aws_durable_execution_sdk_python.exceptions.ChildContextError"
     )
@@ -1742,6 +1762,7 @@ def test_failed_branch_error_type_matches_across_execute_and_replay():
     failed_checkpoint.error = ErrorObject(
         message="Test error", type="ValueError", data=None, stack_trace=None
     )
+    failed_checkpoint.to_error_object.return_value = failed_checkpoint.error
     replay_state = Mock()
     replay_state.get_checkpoint_result = Mock(return_value=failed_checkpoint)
     replay_context = Mock()
@@ -4112,7 +4133,7 @@ def test_replay_round_trip_matches_live_result():
     # (a terminal checkpoint can land after the completion decision).
     replay_state, replay_context = _make_replay_mocks(
         {
-            "op_0": _succeeded_checkpoint('"replayed_0"'),
+            "op_0": _succeeded_checkpoint("null"),
             "op_1": _succeeded_checkpoint('"raced_1"'),
             "op_2": _succeeded_checkpoint('"replayed_2"'),
         }
@@ -4130,9 +4151,12 @@ def test_replay_round_trip_matches_live_result():
         (i.index, i.status) for i in live.all
     ]
     assert replayed.completion_reason is live.completion_reason
-    assert replayed.all[0].result == "replayed_0"
+    assert replayed.all[0].result is None
     assert replayed.all[1].result is None
     assert replayed.all[2].result == "replayed_2"
+    assert replayed.success_count == 2
+    assert [item.index for item in replayed.succeeded()] == [0, 2]
+    assert replayed.get_results() == [None, "replayed_2"]
 
 
 def test_execute_keeps_branches_that_return_none():
