@@ -55,6 +55,9 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
 from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
 )
+from aws_durable_execution_sdk_python_otel.exception_events import (
+    record_error_object_exception,
+)
 from aws_durable_execution_sdk_python_otel.execution_root import ExecutionRoot
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
@@ -962,9 +965,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
-            span.record_exception(
-                Exception(info.error.message or info.error.type or "Unknown error")
-            )
+            record_error_object_exception(span, info.error)
         elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
@@ -1087,13 +1088,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
-                span.record_exception(
-                    Exception(
-                        (info.error.message or info.error.type)
-                        if info.error
-                        else "Unknown error"
-                    )
-                )
+                record_error_object_exception(span, info.error)
             else:
                 span.set_status(StatusCode.OK)
 
