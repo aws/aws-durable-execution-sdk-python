@@ -80,7 +80,7 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
     assert TEST_OTEL_DEPENDENCIES <= set(environments["types"]["extra-dependencies"])
 
 
-def test_core_dependency_requires_worker_lifecycle_release() -> None:
+def test_core_dependency_requires_coordinated_major_release() -> None:
     dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
         "dependencies"
     ]
@@ -93,6 +93,7 @@ def test_core_dependency_requires_worker_lifecycle_release() -> None:
     assert not requirement.specifier.contains("2.0.1")
     assert not requirement.specifier.contains("2.1.0")
     assert requirement.specifier.contains("3.0.0")
+    assert requirement.specifier.contains("3.1.0")
 
     assert CORE_DEPENDENCY in dependencies
 
