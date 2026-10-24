@@ -62,7 +62,7 @@ config = dataclasses.replace(CONFIG, request=MicrovmRequestConfig(path="/clone-b
 microvm(context, "build", job_input=job_input, config=config)
 ```
 
-A `path` sends every job over HTTP, whatever its size. The route must answer with a 2xx status at once and run the job in the background. `port` names a port other than 8080. Pass it as an `int`. `retry_window` sets how long the request step retries inside one attempt, 60 seconds by default.
+A `path` sends every job over HTTP, whatever its size. The route must answer with a 2xx status at once and run the job in the background. `port` names a port other than 8080. `retry_window` sets how long the request step retries inside one attempt, 60 seconds by default.
 
 The same job can arrive again, also after it ended, so ignore a second request for a callback ID that you already ran. The worker package does this. A route served without it must do it itself. A job arrives again in these cases:
 
@@ -240,7 +240,7 @@ A failed `vm.invoke` raises its MicroVM error inside the handler. The handler ca
 1. A MicroVM error that the handler raises itself reaches the caller with its own class, such as `MicrovmJobFailedError`.
 2. Any other error reaches the caller as the SDK's `ChildContextError`, as from `run_in_child_context`. This includes a MicroVM error that leaves a child context that the handler created: that child context records `ChildContextError` as its error type. The caller then gets the MicroVM error's message, but not its class. Inside the handler, the `ChildContextError` of that child context has the MicroVM error as its `__cause__`. An SDK error that leaves the handler, such as the `StepError` of a failed step, also reaches the caller as `ChildContextError`, with the SDK error as its `__cause__`. This rule matches `run_in_child_context`. The JavaScript operation differs here: it passes an SDK error to the caller with its own class.
 
-An invalid job raises `ValidationError` or `TypeError` from `vm.invoke`, before the job's durable operations start. The handler can catch it too. A first argument that is not a durable context, as in `vm.invoke("build", ...)`, raises Python's `AttributeError` at the same point.
+An invalid job raises `ValidationError` or `TypeError` from `vm.invoke`, before the job's durable operations start. The handler can catch it too. A call without the context, `vm.invoke("build", job_input=..., options=...)`, raises Python's `TypeError`. A first argument that is not a durable context, as in `vm.invoke("build", "build", ...)`, raises `AttributeError`.
 
 The handler's return value is checkpointed as the session's result. So it must be serializable by the SDK, and it counts toward the checkpoint size limit.
 

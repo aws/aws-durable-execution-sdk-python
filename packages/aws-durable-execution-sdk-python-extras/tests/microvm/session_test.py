@@ -329,6 +329,12 @@ def test_fails_with_the_handlers_own_error_and_still_terminates(
     ("call", "error", "message"),
     [
         (
+            # Python binds "build" to context, so name is missing.
+            lambda vm, ctx: vm.invoke("build", job_input=1, options=job()),  # type: ignore[call-arg, arg-type]
+            "TypeError",
+            "missing 1 required positional argument: 'name'",
+        ),
+        (
             # Python raises AttributeError at context.run_in_child_context.
             lambda vm, ctx: vm.invoke("build", "build", job_input=1, options=job()),  # type: ignore[arg-type]
             "AttributeError",

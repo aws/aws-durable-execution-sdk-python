@@ -145,8 +145,8 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
     - ``error`` has no request ID.
 
     A class of ``error`` can build ``str()`` from something other than
-    ``args``. Then ``str()`` of the copy lacks the request ID, as ``str()``
-    of ``error`` does. The step records the same message either way, and the
+    ``args``. Then neither ``str()`` of the copy nor ``str()`` of ``error``
+    contains the request ID. The step records the same message either way, and the
     strategy still receives ``error``. So the function returns the copy.
     """
     if not is_microvms_service_error(operation, error):
