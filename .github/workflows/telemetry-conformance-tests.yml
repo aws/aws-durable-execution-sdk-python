@@ -42,10 +42,10 @@ jobs:
       contents: read
       id-token: write
     # The pinned SHA also selects the runner and telemetry-extension revision the shared
-    # workflow installs, so it must be reachable from a branch. It is the head of
-    # aws-durable-execution-conformance-tests PR #150, which exports PYTHON_SDK_REF and installs
-    # pip for the SAM makefile build; re-pin to that PR's merge commit once it lands.
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/telemetry-suite.yml@c3d9c9922c067fed8275c20962dca4f8b5ab5d60
+    # workflow installs, so it must be reachable from a branch. It is the merge commit of
+    # aws-durable-execution-conformance-tests PR #150 on that repository's main branch. That
+    # commit exports PYTHON_SDK_REF and installs pip for the SAM makefile build.
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/telemetry-suite.yml@d4b7df927ea7eb7022bcca339d2cddd387d3d650
     with:
       language: python
       resource_prefix: python
