@@ -38,10 +38,8 @@ from aws_durable_execution_sdk_python_extras.microvm.operation import (
     _validate_timeout,
     create_job_callback,
     job_error,
+    step_retry_strategy,
     unknown_delivery_error,
-)
-from aws_durable_execution_sdk_python_extras.microvm.retry import (
-    default_microvm_retry_strategy,
 )
 
 
@@ -251,8 +249,10 @@ class MicrovmSession:
                 context that ``microvm_session`` was called with, or
                 ``job_input`` is not JSON-serializable.
             ValidationError: When ``name`` or ``options`` is not valid.
-            MicrovmNotRunningError: When the session's MicroVM has ended, and
-                the session checks the MicroVM state before each job.
+            MicrovmNotRunningError: When the session's MicroVM has ended. The
+                session reports it when it checks the MicroVM state before
+                each job, and for every job when ``CreateMicrovmAuthToken``
+                reports the MicroVM removed.
             MicrovmDeliveryError: When the delivery fails after all retries,
                 or the route rejects the job.
             MicrovmJobFailedError: When the MicroVM reports a failure, or
@@ -370,7 +370,7 @@ class _SessionScope(_MicrovmScope):
             partition=partition,
             region=region,
             timeout_seconds=timeout_seconds,
-            retry_strategy=config.retry_strategy or default_microvm_retry_strategy,
+            retry_strategy=step_retry_strategy(config),
             auto_suspend_idle_seconds=auto_suspend_idle_seconds,
             idle_policy=config.idle_policy,
             outer_context=context,

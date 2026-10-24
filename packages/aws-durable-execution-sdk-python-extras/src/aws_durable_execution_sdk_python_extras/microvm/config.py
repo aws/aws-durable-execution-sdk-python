@@ -112,12 +112,13 @@ class MicrovmBaseConfig:
     1. ``NO_INGRESS`` when the job goes in the ``run`` hook. The job then
        needs no inbound connection.
     2. ``ALL_INGRESS`` when the job goes over HTTP. The request must reach
-       the MicroVM's endpoint. Every job of a session goes over HTTP.
+       the MicroVM's endpoint.
 
     An empty tuple sends no ingress connector. Connectors that you set must
-    allow ingress whenever a job goes over HTTP: for :func:`microvm`,
-    whenever an input can exceed the ``run`` hook limit, and for a session,
-    always.
+    allow ingress for every job that goes over HTTP. A :func:`microvm` job
+    goes over HTTP when its ``run`` hook payload is over 4,096 code points,
+    or when its config sets ``request.path``. Every job of a session goes
+    over HTTP.
     """
 
     egress_network_connectors: tuple[str, ...] | None = None
@@ -138,6 +139,22 @@ class MicrovmBaseConfig:
     It is the second retry tier. The first tier retries inside one step
     attempt: the boto3 client retries each call, and the request step retries
     the POST. Defaults to :func:`default_microvm_retry_strategy`.
+
+    For a failed Lambda MicroVMs call, the strategy receives the
+    ``ClientError`` that botocore raised, with its class, its ``response``,
+    and its message. The step records a copy whose message ends with the
+    request ID. So a strategy that matches the message, such as
+    ``create_retry_strategy(RetryStrategyConfig(retryable_errors=[...]))``,
+    decides on the message of the service. An error that the operation
+    creates itself, such as "RunMicrovm returned no microvmId", has the
+    request ID in its message when the strategy receives it.
+
+    A ``ResourceNotFoundException`` from ``GetMicrovm``, ``ResumeMicrovm``,
+    or ``CreateMicrovmAuthToken`` is the exception. It means that the
+    MicroVM no longer exists. So the operation raises ``MicrovmStateError``
+    of ``aws_durable_execution_sdk_python_extras.microvm.lifecycle``
+    instead, and the strategy receives that error. Its ``__cause__`` is the
+    ``ClientError``, and its message ends with the request ID.
     """
 
     opener: urllib.request.OpenerDirector | None = None

@@ -149,9 +149,35 @@ def _resolve_sampling_rate(rate: float | None) -> float:
     return float(rate)
 
 
+def _format_record_timestamp(ts: datetime.datetime) -> str:
+    """Format a record timestamp as ``YYYY-MM-DDTHH:MM:SS.sssZ`` in UTC.
+
+    Stores such as DynamoDB compare these values as text. Text order equals
+    time order only when every value has the same width. Plain ``isoformat()``
+    writes 6 fraction digits, and no fraction when microseconds are 0. So this
+    always writes exactly 3 fraction digits and a literal ``Z``. JavaScript's
+    ``Date.prototype.toISOString()`` writes the same format.
+    ``timespec="milliseconds"`` truncates the microseconds; it does not round.
+    """
+    return (
+        ts.astimezone(datetime.UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)
+_ONE_MS = datetime.timedelta(milliseconds=1)
+
+
+def _utc_now_ms() -> int:
+    """Return the current UTC time in whole epoch milliseconds, truncated."""
+    return (datetime.datetime.now(datetime.UTC) - _EPOCH) // _ONE_MS
+
+
 def _iso(ts: Any) -> str | None:
     if isinstance(ts, datetime.datetime):
-        return ts.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
+        return _format_record_timestamp(ts)
     return None
 
 
@@ -382,6 +408,7 @@ class _EmissionSnapshot:
     operations: Mapping[str, OperationInfo]
     revision: int
     closing: bool
+    emitted_at: str
 
 
 class _HookFrames(threading.local):
@@ -428,9 +455,10 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
     Two locks, disjoint field sets, and neither is ever taken to reach the
     other's fields:
 
-    * ``_lock`` guards ``_closed``, ``_build_revision``, the ``_operations``
-      rebind and the snapshot-admission/scheduler-handoff boundaries. Record
-      building and customer transforms run outside this lock.
+    * ``_lock`` guards ``_closed``, ``_build_revision``, ``_last_emitted_ms``,
+      the ``_operations`` rebind and the snapshot-admission/scheduler-handoff
+      boundaries. Record building and customer transforms run outside this
+      lock.
     * ``_ExportScheduler._condition``'s lock guards the export bookkeeping this
       instance carries for the scheduler; nothing outside the scheduler reads or
       writes those fields, and the scheduler never touches the fields above.
@@ -480,6 +508,9 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         # operation snapshot. Customer callbacks can start a newer build on this
         # or another thread, so the hand-off must reject an overtaken snapshot.
         self._build_revision = 0
+        # The epoch milliseconds of the last emittedAt this instance assigned.
+        # None until the first admitted build.
+        self._last_emitted_ms: int | None = None
         # Only snapshot admission and the checked scheduler hand-off are locked.
         # Holding this lock across a customer callback deadlocks two invocations
         # whose transforms synchronously call each other's plugin hooks.
@@ -506,7 +537,34 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         if not closing:
             self._build_revision += 1
             revision = self._build_revision
-        return _EmissionSnapshot(self._operations, revision, closing)
+        return _EmissionSnapshot(
+            self._operations, revision, closing, self._next_emitted_at_locked()
+        )
+
+    def _next_emitted_at_locked(self) -> str:
+        """Return the emittedAt for the build being admitted.
+
+        1. ``emittedAt`` has millisecond precision.
+        2. In ``on-change`` mode, one invocation can admit two builds in the
+           same millisecond. An example is RUNNING, then the terminal record.
+        3. The SQS FIFO deduplication id is ``executionArn:emittedAt``. The
+           default DynamoDB sort key is ``emittedAt``, under the partition key
+           ``executionArn``.
+        4. So two records with an equal ``emittedAt`` make SQS drop the second
+           message, and make DynamoDB overwrite the first item.
+        5. So ``emittedAt`` strictly increases within this instance. This
+           instance serves one invocation.
+
+        The value is the current time when it is later than the last value.
+        Otherwise it is the last value plus 1 millisecond. Builds on different
+        threads can be admitted concurrently. So callers hold ``self._lock``,
+        which serializes the admissions that read and write the last value.
+        """
+        now_ms = _utc_now_ms()
+        last = self._last_emitted_ms
+        ms = now_ms if last is None or now_ms > last else last + 1
+        self._last_emitted_ms = ms
+        return _format_record_timestamp(_EPOCH + ms * _ONE_MS)
 
     # -- hooks ----------------------------------------------------------------
 
@@ -746,9 +804,7 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         record: dict[str, Any] = {
             "recordType": "DurableExecutionTelemetry",
             "schemaVersion": "1.0",
-            "emittedAt": datetime.datetime.now(datetime.UTC)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            "emittedAt": snapshot.emitted_at,
             "executionArn": self._execution_arn,
         }
         if arn.get("executionName"):
