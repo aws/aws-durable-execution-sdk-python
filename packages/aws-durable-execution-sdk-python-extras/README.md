@@ -85,7 +85,7 @@ The terminate step runs only when the operation sees the job's outcome. In these
 
 - A `map` or `parallel` completes early, for example with `min_successful`, while an item still waits for its MicroVM. The SDK never runs that item again.
 - The execution fails, times out, or is stopped while the operation waits.
-- Every launch attempt timed out or lost its connection, but the service created the MicroVM anyway. The operation never learned the MicroVM's ID.
+- A launch attempt timed out or lost its connection, but the service created the MicroVM anyway. No later attempt returned the MicroVM's ID: each one timed out too, or `RunMicrovm` rejected it, as [Deploys and versions](#deploys-and-versions) describes. So the operation never learned the ID.
 
 ### Errors
 
