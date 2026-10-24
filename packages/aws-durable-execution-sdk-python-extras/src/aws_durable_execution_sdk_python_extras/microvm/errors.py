@@ -86,16 +86,16 @@ class MicrovmLaunchError(MicrovmError):
     """``RunMicrovm`` failed after all retries.
 
     A launch attempt that timed out or lost its connection can still have
-    created a MicroVM. Every later attempt can fail too: it times out, or
-    ``RunMicrovm`` rejects its reused client token because the parameters
-    changed. The operation then never learned the MicroVM's ID. So it cannot
-    terminate the MicroVM, and the MicroVM ends at its maximum duration.
+    created a MicroVM. When the launch step still fails, the operation never
+    learns that MicroVM's ID. So it cannot terminate that MicroVM. The
+    MicroVM ends at its maximum duration.
 
     1. With ``run`` hook delivery, the launch request holds the job. So that
        MicroVM runs the job. A caller that runs the job again after this
        error can run it twice.
     2. With HTTP delivery, the launch request holds no job. The request step
-       starts only after a launch succeeds. So no MicroVM runs the job.
+       starts only after a launch succeeds. So when you invoke through a
+       version or an alias, no MicroVM runs the job.
     3. When no attempt created a MicroVM, no MicroVM runs the job.
 
     When the service answered, the message ends with

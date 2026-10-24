@@ -115,9 +115,10 @@ class MicrovmBaseConfig:
        the MicroVM's endpoint. Every job of a session goes over HTTP.
 
     An empty tuple sends no ingress connector. Connectors that you set must
-    allow ingress whenever a job goes over HTTP: for :func:`microvm`,
-    whenever an input can exceed the ``run`` hook limit, and for a session,
-    always.
+    allow ingress for every job that goes over HTTP. A :func:`microvm` job
+    goes over HTTP when its ``run`` hook payload is over 4,096 code points,
+    or when its config sets ``request.path``. Every job of a session goes
+    over HTTP.
     """
 
     egress_network_connectors: tuple[str, ...] | None = None
