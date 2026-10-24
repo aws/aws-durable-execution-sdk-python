@@ -112,7 +112,7 @@ class MicrovmBaseConfig:
     1. ``NO_INGRESS`` when the job goes in the ``run`` hook. The job then
        needs no inbound connection.
     2. ``ALL_INGRESS`` when the job goes over HTTP. The request must reach
-       the MicroVM's endpoint. Every job of a session goes over HTTP.
+       the MicroVM's endpoint.
 
     An empty tuple sends no ingress connector. Connectors that you set must
     allow ingress for every job that goes over HTTP. A :func:`microvm` job
