@@ -29,6 +29,23 @@ rejected 4,097. A Python ``str`` has one item per code point. So ``len()``
 counts what the service counts.
 """
 
+MAX_JOB_INPUT_BYTES = 6 * 1024 * 1024 - 8 * 1024
+"""The largest job input, in UTF-8 bytes of its JSON, that ``microvm`` and
+``vm.invoke`` accept.
+
+1. The worker accepts a job request body of at most 6 MiB.
+2. The body holds the input as the same JSON that :func:`dumps` writes.
+3. The body also holds the version, the Region, the MicroVM ID, the callback
+   ID, and the heartbeat timeout. Their names and the JSON punctuation take
+   at most 92 bytes.
+4. A callback ID has at most 1,024 characters. JSON writes a character in at
+   most 6 bytes. The Region and the MicroVM ID are short AWS identifiers.
+5. So these fields take less than 8 KiB. With a 1,024-character ASCII
+   callback ID, they take about 1.2 KB.
+
+So an input whose JSON has at most 6 MiB minus 8 KiB fits in the body.
+"""
+
 
 @dataclass(frozen=True, kw_only=True)
 class RunHookPayload:

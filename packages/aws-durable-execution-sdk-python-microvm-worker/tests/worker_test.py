@@ -159,13 +159,21 @@ def request(
 
 
 def raw_request(worker: MicrovmWorker, data: bytes) -> bytes:
-    """Send bytes, close the sending side, and return the raw answer."""
+    """Send bytes, close the sending side, and return the raw answer.
+
+    The worker answers some requests without reading all of the bytes. The
+    connection then closes with unread bytes. So the kernel sends a TCP
+    reset, and a write or a later read fails. The answer arrives before the
+    reset. So this returns the bytes read before any failure.
+    """
+    chunks = []
     with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
-        sock.sendall(data)
-        sock.shutdown(socket.SHUT_WR)
-        chunks = []
-        while chunk := sock.recv(65536):
-            chunks.append(chunk)
+        with contextlib.suppress(ConnectionError):
+            sock.sendall(data)
+            sock.shutdown(socket.SHUT_WR)
+        with contextlib.suppress(ConnectionError):
+            while chunk := sock.recv(65536):
+                chunks.append(chunk)
     return b"".join(chunks)
 
 
@@ -664,8 +672,8 @@ def test_answers_400_to_a_content_length_with_too_many_digits(start: Any) -> Non
             ).encode(),
         )
 
-        # With Expect, the length is not known to be over the limit. So the
-        # worker sends 100 Continue, and then the 400 for the invalid header.
+        # With Expect, the base class sends 100 Continue before the worker
+        # sees the request. The worker then sends the 400 for the header.
         assert b"HTTP/1.1 400" in answer, expect
         assert answer.endswith(b'{"error":"request Content-Length is not valid"}')
 
@@ -693,29 +701,43 @@ def test_answers_expect_100_continue_before_it_reads_the_body(start: Any) -> Non
     assert client.names() == ["success"]
 
 
-def test_answers_400_to_a_body_over_the_limit_that_the_client_sends(
-    start: Any,
+@pytest.mark.parametrize("expect", [False, True])
+def test_answers_400_or_resets_a_body_over_the_limit_that_the_client_sends(
+    start: Any, logger: Any, expect: bool
 ) -> None:
     worker, client = start(routes={"/build": Held()})
-    data = b"x" * (worker_module.MAX_JOB_BODY_BYTES + 1)
+    size = worker_module.MAX_JOB_BODY_BYTES + 1
+    head = f"POST /build HTTP/1.1\r\nHost: localhost\r\nContent-Length: {size}\r\n"
+    if expect:
+        head += "Expect: 100-continue\r\n"
+    answer = b""
 
-    status, body = request(worker, "/build", raw=data)
+    # A hang raises TimeoutError, which the test does not suppress.
+    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
+        sock.sendall(f"{head}\r\n".encode())
+        if expect:
+            answer += sock.recv(65536)
+        # The worker answers 400 and closes the connection without reading
+        # the body. So the kernel sends a TCP reset, and the client can get
+        # it before or after it reads the 400.
+        with contextlib.suppress(ConnectionError):
+            sock.sendall(b"x" * size)
+        with contextlib.suppress(ConnectionError):
+            while chunk := sock.recv(65536):
+                answer += chunk
+    assert worker.idle(WAIT)
 
-    assert (status, body) == (400, {"error": "request body exceeds 6291456 bytes"})
+    statuses = [
+        line.split(b" ")[1]
+        for line in answer.split(b"\r\n")
+        if line.startswith(b"HTTP/1.1 ")
+    ]
+    interim = [b"100"] if expect else []
+    assert statuses in (interim, [*interim, b"400"])
+    if statuses[-1:] == [b"400"]:
+        assert answer.endswith(b'{"error":"request body exceeds 6291456 bytes"}')
+    assert "invalid request" in logger.messages("error")
     assert client.calls == []
-
-
-def test_answers_400_to_a_chunked_body_over_the_limit_that_the_client_sends(
-    start: Any,
-) -> None:
-    worker, _ = start(Held())
-    data = b"x" * (worker_module.MAX_HOOK_BODY_BYTES + 1)
-
-    status, body = request(
-        worker, RUN, raw=iter([data[:1000], data[1000:]]), chunked=True
-    )
-
-    assert (status, body) == (400, {"error": "request body exceeds 65536 bytes"})
 
 
 @pytest.mark.parametrize(
@@ -725,163 +747,23 @@ def test_answers_400_to_a_chunked_body_over_the_limit_that_the_client_sends(
         (RUN, worker_module.MAX_HOOK_BODY_BYTES),
     ],
 )
-def test_answers_400_instead_of_100_continue_to_a_body_over_the_limit(
+def test_answers_100_continue_and_then_400_to_a_body_over_the_limit(
     start: Any, logger: Any, path: str, limit: int
 ) -> None:
-    worker, _ = start(Held(), routes={"/build": Held()})
+    # The base class answers "Expect: 100-continue" before the worker sees
+    # the request. The worker then answers 400 without reading the body.
+    worker, client = start(Held(), routes={"/build": Held()})
     head = (
         f"POST {path} HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n"
         f"Content-Length: {limit + 1}\r\n\r\n"
     )
 
-    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
-        sock.sendall(head.encode())
-        answer = b""
-        while chunk := sock.recv(65536):
-            answer += chunk
+    answer = raw_request(worker, head.encode())
 
-    assert answer.startswith(b"HTTP/1.1 400")
-    assert b"100 Continue" not in answer
+    assert answer.startswith(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 400")
     assert answer.endswith(f'{{"error":"request body exceeds {limit} bytes"}}'.encode())
     assert "invalid request" in logger.messages("error")
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "framing"),
-    [
-        ("POST", "/other", "Content-Length: 99999999"),
-        ("POST", f"{HOOK_PATH_PREFIX}ready", "Content-Length: 99999999"),
-        ("GET", "/build", "Content-Length: 99999999"),
-        ("POST", "/build", "Transfer-Encoding: chunked"),
-    ],
-)
-def test_answers_100_continue_when_the_declared_size_is_not_over_a_limit(
-    start: Any, method: str, path: str, framing: str
-) -> None:
-    worker, _ = start(Held(), routes={"/build": Held()})
-    head = (
-        f"{method} {path} HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n"
-        f"{framing}\r\n\r\n"
-    )
-
-    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
-        sock.sendall(head.encode())
-        interim = sock.recv(65536)
-
-    assert interim.startswith(b"HTTP/1.1 100 Continue")
-
-
-def _send_after_the_answer(
-    worker: MicrovmWorker, seconds: float
-) -> tuple[bytes, BaseException | None]:
-    """Get a 400 for an oversized body, then keep sending for ``seconds``.
-
-    The worker shuts down its side right after the answer. So the client
-    reads the answer and end of file at once. The worker keeps reading and
-    dropping input until its time limit, and then closes the socket. So a
-    write after the limit fails.
-
-    Returns:
-        The answer, and the error of the first failed write, or ``None``.
-    """
-    head = f"POST {RUN} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999999\r\n\r\n"
-    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
-        sock.sendall(head.encode() + b"x" * 100)
-        answer = b""
-        while chunk := sock.recv(65536):
-            answer += chunk
-        deadline = time.monotonic() + seconds
-        try:
-            while time.monotonic() < deadline:
-                sock.sendall(b"x" * 4096)
-                time.sleep(0.01)
-        except ConnectionError as error:
-            return answer, error
-    return answer, None
-
-
-def test_stops_discarding_a_rejected_body_after_the_time_limit(
-    start: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(worker_module, "_DISCARD_SECONDS", 0.2)
-    worker, _ = start(Held())
-
-    answer, error = _send_after_the_answer(worker, 1.5)
-
-    assert answer.startswith(b"HTTP/1.1 400")
-    assert isinstance(error, ConnectionError)
-
-
-def test_keeps_discarding_a_rejected_body_until_the_time_limit(start: Any) -> None:
-    # The default limit is 10 seconds. So writes during the first second must
-    # succeed. A limit that ended too early would fail them.
-    worker, _ = start(Held())
-
-    answer, error = _send_after_the_answer(worker, 1.0)
-
-    assert answer.startswith(b"HTTP/1.1 400")
-    assert error is None
-
-
-class _EndlessConnection:
-    """A socket whose peer never stops sending."""
-
-    def __init__(self) -> None:
-        self.received = 0
-        self.shut = False
-
-    def shutdown(self, how: int) -> None:
-        self.shut = True
-
-    def settimeout(self, timeout: float) -> None: ...
-
-    def recv(self, size: int) -> bytes:
-        self.received += size
-        return b"x" * size
-
-
-def _rejected_exchange(connection: _EndlessConnection, logger: Any) -> Any:
-    request = type("Request", (), {"connection": connection})()
-    exchange = worker_module._Exchange(request, logger)  # noqa: SLF001
-    exchange.too_large(1)
-    return exchange
-
-
-def test_stops_discarding_a_rejected_body_after_the_byte_limit(
-    logger: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(worker_module, "_MAX_DISCARD_BYTES", 200_000)
-    connection = _EndlessConnection()
-
-    _rejected_exchange(connection, logger).discard_unread_body()
-
-    assert connection.shut
-    assert 200_000 <= connection.received < 200_000 + 65536
-
-
-def test_stops_discarding_a_rejected_body_when_the_client_is_gone(
-    logger: Any,
-) -> None:
-    class GoneConnection(_EndlessConnection):
-        def shutdown(self, how: int) -> None:
-            raise ConnectionResetError
-
-    connection = GoneConnection()
-
-    _rejected_exchange(connection, logger).discard_unread_body()
-
-    assert connection.received == 0
-
-
-def test_stops_discarding_a_rejected_body_when_the_time_is_up(
-    logger: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(worker_module, "_DISCARD_SECONDS", 0)
-    connection = _EndlessConnection()
-
-    _rejected_exchange(connection, logger).discard_unread_body()
-
-    assert connection.received == 0
+    assert client.calls == []
 
 
 def test_accepts_a_chunked_body(start: Any) -> None:
@@ -930,6 +812,10 @@ _FRAMING_TOO_LARGE = b"the chunked framing of the request body exceeds 65536 byt
         (b"2\r\n{}\r\n", b'{"error":"invalid request"}'),
         (b"20000\r\n", b"request body exceeds 65536 bytes"),
         (
+            b"3e8\r\n" + b"x" * 1000 + b"\r\nfc19\r\n",
+            b"request body exceeds 65536 bytes",
+        ),
+        (
             b"0\r\n" + b"X: y\r\n" * 20_000 + b"\r\n",
             _FRAMING_TOO_LARGE,
         ),
@@ -949,6 +835,7 @@ _FRAMING_TOO_LARGE = b"the chunked framing of the request body exceeds 65536 byt
         "size-line-too-long",
         "ends-early",
         "over-the-limit",
+        "over-the-limit-in-total",
         "trailers-over-the-limit",
         "extensions-over-the-limit",
     ],

@@ -36,6 +36,7 @@ from aws_durable_execution_sdk_python_testing.runner import (
 from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
+    MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,
     MicrovmError,
@@ -364,6 +365,33 @@ def test_fails_a_launch_without_a_microvm_id(run: Any, fake_client: Any) -> None
     error = outcome(result)
     assert error["error"] == "MicrovmLaunchError"
     assert "RunMicrovm returned no microvmId" in error["message"]
+
+
+def test_rejects_a_job_input_over_the_size_limit_before_the_launch(
+    run: Any, fake_client: Any
+) -> None:
+    client = fake_client()
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        # The JSON of the input is the limit plus 1 byte, with the 2 quotes.
+        job_input = "x" * (MAX_JOB_INPUT_BYTES - 1)
+        try:
+            microvm(context, "build", job_input=job_input, config=config_with(client))
+        except ValueError as error:
+            return str(error)
+        return None
+
+    result = run(handler, {})
+
+    assert outcome(result) == (
+        f'MicroVM "build": the job input is {MAX_JOB_INPUT_BYTES + 1} bytes as '
+        f"JSON. The limit is {MAX_JOB_INPUT_BYTES} bytes, because the worker "
+        "accepts a job body of at most 6 MiB. Pass larger data by reference, "
+        "for example as an S3 key."
+    )
+    assert client.calls == []
+    assert result.operations == []
 
 
 def test_sends_a_job_too_large_for_the_run_hook_over_http(

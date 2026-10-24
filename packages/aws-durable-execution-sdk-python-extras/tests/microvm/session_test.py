@@ -38,6 +38,7 @@ from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
     DEFAULT_MICROVM_JOB_PATH,
+    MAX_JOB_INPUT_BYTES,
     MicrovmError,
     MicrovmInvokeOptions,
     MicrovmJobFailedError,
@@ -396,6 +397,68 @@ def test_rejects_an_invalid_job_inside_the_handler_where_it_can_be_caught(
         "pipeline.launch",
         "pipeline.terminate",
     ]
+
+
+def test_rejects_a_job_input_over_the_size_limit_before_the_job_starts(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        # The JSON of the input is the limit plus 1 byte, with the 2 quotes.
+        job_input = "x" * (MAX_JOB_INPUT_BYTES - 1)
+        try:
+            vm.invoke(ctx, "build", job_input=job_input, options=job())
+        except ValueError as error:
+            return str(error)
+        return None
+
+    result = run(session_handler(session_config(client), body))
+
+    assert outcome(result) == {
+        "result": (
+            f'MicroVM "build": the job input is {MAX_JOB_INPUT_BYTES + 1} bytes '
+            f"as JSON. The limit is {MAX_JOB_INPUT_BYTES} bytes, because the "
+            "worker accepts a job body of at most 6 MiB. Pass larger data by "
+            "reference, for example as an S3 key."
+        )
+    }
+    # Only the session's own launch ran. No job operation started, and no
+    # request reached the MicroVM.
+    assert len(client.requests("run_microvm")) == 1
+    assert client.requests("create_microvm_auth_token") == []
+    assert endpoint.requests == []
+    session = result.get_context("pipeline")
+    assert [operation.name for operation in session.child_operations] == [
+        "pipeline.session",
+        "pipeline.launch",
+        "pipeline.terminate",
+    ]
+
+
+def test_sends_a_job_input_at_the_size_limit(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    # The JSON of the input is the limit, with the 2 quotes. Each "é" takes
+    # 2 bytes.
+    job_input = "é" * ((MAX_JOB_INPUT_BYTES - 2) // 2)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return vm.invoke(ctx, "build", job_input=job_input, options=job())
+
+    result = run(
+        session_handler(session_config(client), body),
+        None,
+        [("build", succeed_with("done"))],
+    )
+
+    assert outcome(result) == {"result": "done"}
+    [posted] = endpoint.requests
+    assert posted["body"]["input"] == job_input
+    assert int(posted["headers"]["content-length"]) <= 6 * 1024 * 1024
 
 
 def test_retries_a_throttled_launch_with_the_same_client_token(
