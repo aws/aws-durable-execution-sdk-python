@@ -805,9 +805,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
           on such a thread is still correlated to this finished invocation's
           spans.
         * ``_tracing_enabled`` is cleared so a hook that arrives after the
-          invocation end -- one dispatched off the checkpointing path, for
-          instance -- cannot start a span after the invocation span was ended and
-          the provider flushed.
+          invocation end cannot start a span after the invocation span was ended
+          and the provider flushed. The SDK dispatches no operation hook after
+          the end hook; this guard covers a caller that does.
         """
         self._detach_remaining_contexts()
         unbind_invocation(self)
