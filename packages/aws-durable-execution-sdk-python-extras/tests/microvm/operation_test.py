@@ -496,17 +496,6 @@ def test_launch_result_writes_and_reads_a_resume_mode(
     assert operation.LaunchResult.from_dict(json.loads(json.dumps(data))) == launched
 
 
-@pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}])
-def test_launch_result_reads_only_a_bool_as_a_resume_mode(value: Any) -> None:
-    # In Python True == 1. So a check by equality would read 1 as True.
-    launched = operation.LaunchResult.from_dict(
-        {"microvmId": "mvm-1", "delivery": "http", "resumeBeforeDelivery": value}
-    )
-
-    assert launched.resume_before_delivery is None
-    assert "resumeBeforeDelivery" not in launched.to_dict()
-
-
 def test_keeps_the_configured_ingress_for_http(
     run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:

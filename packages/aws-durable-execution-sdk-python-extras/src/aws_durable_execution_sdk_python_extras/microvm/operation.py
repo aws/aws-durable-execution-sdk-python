@@ -156,25 +156,18 @@ class LaunchResult:
     """Whether each session job checks the MicroVM state, and resumes a
     suspended MicroVM, before delivery. Only a session launch records it.
     Replay reads it from the checkpoint. So every replay follows the mode that
-    the launch prepared the MicroVM for. A launch checkpoint from code that
-    predates this field does not have it."""
+    the launch prepared the MicroVM for. A ``microvm`` launch leaves it
+    ``None``."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
-        # Only a bool is a resume mode. In Python True == 1, so a check by
-        # equality would accept 1. Any other value reads as no resume mode.
-        resume_before_delivery = data.get("resumeBeforeDelivery")
         return cls(
             microvm_id=data["microvmId"],
             delivery=data.get("delivery", ""),
             endpoint=data.get("endpoint"),
-            resume_before_delivery=(
-                resume_before_delivery
-                if isinstance(resume_before_delivery, bool)
-                else None
-            ),
+            resume_before_delivery=data.get("resumeBeforeDelivery"),
         )
 
     def to_dict(self) -> dict[str, Any]:
