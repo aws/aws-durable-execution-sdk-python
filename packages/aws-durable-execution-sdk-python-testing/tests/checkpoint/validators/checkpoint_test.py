@@ -127,29 +127,103 @@ def test_validate_execution_update_as_last():
     CheckpointValidator.validate_input(updates, execution)
 
 
-def test_validate_payload_sizes_error_too_large():
-    """Test validation fails when error payload is too large."""
-    execution = _create_test_execution()
+_ERROR_LIMIT_BYTES = 1048576
+_STEP_FAIL_ENVELOPE = (
+    '{"Id":"step-1","Type":"STEP","Action":"FAIL","Error":{"ErrorMessage":""}}'
+)
+_ERROR_TOO_LARGE_MESSAGE = (
+    f"Error object size must be less than or equal to {_ERROR_LIMIT_BYTES} bytes."
+)
 
-    large_message = "x" * (MAX_ERROR_PAYLOAD_SIZE_BYTES + 1)
-    large_error = ErrorObject(
-        message=large_message, type="TestError", data=None, stack_trace=None
+
+def _step_fail(message: str, name: str | None = None) -> OperationUpdate:
+    return OperationUpdate(
+        operation_id="step-1",
+        operation_type=OperationType.STEP,
+        action=OperationAction.FAIL,
+        name=name,
+        error=ErrorObject.from_message(message),
     )
 
-    updates = [
-        OperationUpdate(
-            operation_id="step-1",
-            operation_type=OperationType.STEP,
-            action=OperationAction.FAIL,
-            error=large_error,
-        )
-    ]
 
-    with pytest.raises(
-        InvalidParameterValueException,
-        match=f"Error object size must be less than {MAX_ERROR_PAYLOAD_SIZE_BYTES} bytes",
-    ):
-        CheckpointValidator.validate_input(updates, execution)
+def test_error_size_limit_is_one_mebibyte():
+    assert MAX_ERROR_PAYLOAD_SIZE_BYTES == _ERROR_LIMIT_BYTES
+
+
+def test_validate_payload_sizes_error_at_limit_is_accepted():
+    """The whole update, serialized compactly, may be exactly the limit."""
+    execution = _create_test_execution()
+    message = "x" * (_ERROR_LIMIT_BYTES - len(_STEP_FAIL_ENVELOPE))
+    CheckpointValidator.validate_input([_step_fail(message)], execution)
+
+
+def test_validate_payload_sizes_error_over_limit_is_rejected():
+    execution = _create_test_execution()
+    message = "x" * (_ERROR_LIMIT_BYTES - len(_STEP_FAIL_ENVELOPE) + 1)
+    with pytest.raises(InvalidParameterValueException) as exc_info:
+        CheckpointValidator.validate_input([_step_fail(message)], execution)
+    assert str(exc_info.value) == _ERROR_TOO_LARGE_MESSAGE
+
+
+def test_validate_payload_sizes_error_multibyte_at_limit_is_accepted():
+    """Non-ASCII is counted as raw UTF-8 bytes, not as escaped characters."""
+    execution = _create_test_execution()
+    remaining = _ERROR_LIMIT_BYTES - len(_STEP_FAIL_ENVELOPE)
+    message = "\u00e9" * (remaining // 2) + "x" * (remaining % 2)
+    assert len(message.encode("utf-8")) == remaining
+    CheckpointValidator.validate_input([_step_fail(message)], execution)
+
+
+def test_validate_payload_sizes_error_multibyte_over_limit_is_rejected():
+    """A message under the limit in characters is rejected when over it in bytes."""
+    execution = _create_test_execution()
+    remaining = _ERROR_LIMIT_BYTES - len(_STEP_FAIL_ENVELOPE)
+    message = "\u00e9" * (remaining // 2 + 1)
+    assert len(message) < remaining
+    with pytest.raises(InvalidParameterValueException) as exc_info:
+        CheckpointValidator.validate_input([_step_fail(message)], execution)
+    assert str(exc_info.value) == _ERROR_TOO_LARGE_MESSAGE
+
+
+def test_validate_payload_sizes_error_counts_whole_update():
+    """Fields outside the Error object count toward the limit."""
+    execution = _create_test_execution()
+    name_field = ',"Name":""'
+    name = "n" * (_ERROR_LIMIT_BYTES - len(_STEP_FAIL_ENVELOPE))
+    with pytest.raises(InvalidParameterValueException) as exc_info:
+        CheckpointValidator.validate_input([_step_fail("", name=name)], execution)
+    assert str(exc_info.value) == _ERROR_TOO_LARGE_MESSAGE
+
+    within = name[: -len(name_field)]
+    CheckpointValidator.validate_input(
+        [_step_fail("", name=within)], _create_test_execution()
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation_type", "action"),
+    [
+        (OperationType.STEP, OperationAction.RETRY),
+        (OperationType.CONTEXT, OperationAction.FAIL),
+        (OperationType.WAIT, OperationAction.CANCEL),
+        (OperationType.CALLBACK, OperationAction.START),
+        (OperationType.CHAINED_INVOKE, OperationAction.START),
+        (OperationType.EXECUTION, OperationAction.FAIL),
+    ],
+)
+def test_validate_payload_sizes_error_limit_applies_to_every_type(
+    operation_type, action
+):
+    execution = _create_test_execution()
+    update = OperationUpdate(
+        operation_id="op-1",
+        operation_type=operation_type,
+        action=action,
+        error=ErrorObject.from_message("x" * _ERROR_LIMIT_BYTES),
+    )
+    with pytest.raises(InvalidParameterValueException) as exc_info:
+        CheckpointValidator.validate_input([update], execution)
+    assert str(exc_info.value) == _ERROR_TOO_LARGE_MESSAGE
 
 
 def test_validate_payload_sizes_error_within_limit():
