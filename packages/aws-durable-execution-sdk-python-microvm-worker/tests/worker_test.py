@@ -5,17 +5,15 @@
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import http.client
-import inspect
 import io
 import json
 import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Iterator
 from http.server import ThreadingHTTPServer
 from typing import Any
 
@@ -1550,62 +1548,22 @@ class _AsyncCallable:
         return None  # pragma: no cover
 
 
-class _Awaitable:
-    def __await__(self) -> Generator[None, None, None]:
-        yield None
-
-
-def test_fails_a_job_whose_handler_returns_a_coroutine_and_closes_it(
-    start: Any,
-) -> None:
+def test_fails_a_job_whose_handler_returns_a_coroutine(start: Any) -> None:
+    """The coroutine is the job's result. It is not JSON-serializable, so the
+    report fails the job at once."""
     coroutine = _async_handler(None, None)  # type: ignore[arg-type]
     worker, client = start(lambda job_input, context: coroutine)
 
     request(worker, RUN, run_body(run_payload()))
     assert worker.idle(WAIT)
 
-    # A closed coroutine does not warn that it was never awaited.
-    assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
     [(name, kwargs)] = completions(client)
     assert name == "failure"
-    assert kwargs["Error"]["ErrorType"] == "TypeError"
-    assert "returned an awaitable" in kwargs["Error"]["ErrorMessage"]
-
-
-def test_fails_a_job_whose_handler_returns_another_awaitable(start: Any) -> None:
-    worker, client = start(lambda job_input, context: _Awaitable())
-
-    request(worker, RUN, run_body(run_payload()))
-    assert worker.idle(WAIT)
-
-    assert completions(client)[0][1]["Error"]["ErrorType"] == "TypeError"
-
-
-async def _ignores_generator_exit() -> None:
-    try:
-        await _Awaitable()
-    finally:
-        await _Awaitable()
-
-
-def test_fails_a_job_whose_started_coroutine_cannot_be_closed(start: Any) -> None:
-    # The coroutine has started and awaits in a finally block. So close()
-    # raises RuntimeError: coroutine ignored GeneratorExit. The job must still
-    # report its TypeError.
-    coroutine = _ignores_generator_exit()
-    coroutine.send(None)
-    worker, client = start(lambda job_input, context: coroutine)
-
-    request(worker, RUN, run_body(run_payload()))
-    assert worker.idle(WAIT)
-
-    [(name, kwargs)] = completions(client)
-    assert name == "failure"
-    assert kwargs["Error"]["ErrorType"] == "TypeError"
-    # Run the finally block to its end, so the coroutine closes before the
-    # garbage collector meets it.
-    with contextlib.suppress(GeneratorExit, StopIteration):
-        coroutine.send(None)
+    assert kwargs["Error"]["ErrorType"] == "ResultSerializationError"
+    assert "not JSON serializable" in kwargs["Error"]["ErrorMessage"]
+    # Without close(), Python warns that the coroutine was never awaited when
+    # the garbage collector frees it.
+    coroutine.close()
 
 
 @pytest.mark.parametrize(

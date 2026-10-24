@@ -11,7 +11,6 @@ outcome to its callback.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import json
 import os
@@ -1853,30 +1852,16 @@ class _Outcome:
         raises ``SystemExit``, which would otherwise end the job thread
         without a report.
 
-        A handler can still return an awaitable, for example a plain function
-        that calls an async function and returns its coroutine. The worker
-        cannot run it. So the outcome is a ``TypeError`` that names the
-        cause, and a coroutine is closed, so that Python does not warn that
-        it was never awaited.
+        A plain function can return a coroutine, for example by calling an
+        async function without ``await``. The coroutine is kept as the
+        value. It is not JSON-serializable, so the report fails the job with
+        ``ResultSerializationError``. Python then warns that the coroutine was
+        never awaited.
         """
         try:
-            value = run()
+            return cls(value=run())
         except BaseException as error:  # noqa: BLE001
             return cls(error=error)
-        if inspect.isawaitable(value):
-            if inspect.iscoroutine(value):
-                # close() raises when the coroutine has started and ignores
-                # GeneratorExit, for example with an await in a finally
-                # block. The TypeError below must still be reported.
-                with contextlib.suppress(Exception):
-                    value.close()
-            return cls(
-                error=TypeError(
-                    "the job handler returned an awaitable. A job handler must "
-                    "be a plain function that returns its result."
-                )
-            )
-        return cls(value=value)
 
 
 class _RequestHandler(BaseHTTPRequestHandler):

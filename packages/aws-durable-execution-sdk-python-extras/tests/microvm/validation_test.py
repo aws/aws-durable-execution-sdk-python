@@ -47,8 +47,6 @@ def config(**fields: Any) -> MicrovmConfig:
     ("name", "fields", "message"),
     [
         ("", {}, "requires a non-empty name"),
-        ("build", {"image_identifier": ""}, "image_identifier is required"),
-        ("build", {"execution_role_arn": ""}, "execution_role_arn is required"),
         ("build", {"timeout": Duration(0)}, "timeout must be between 1 second"),
         (
             "build",
