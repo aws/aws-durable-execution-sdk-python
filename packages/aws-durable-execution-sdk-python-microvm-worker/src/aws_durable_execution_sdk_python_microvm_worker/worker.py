@@ -2012,8 +2012,11 @@ def _too_large(
     4. A client that is still sending can get the reset before it reads
        the 400.
 
-    The extras operations check the job input size before they send a job.
-    So only another sender can get the reset.
+    The MicroVM operations of both SDK extras packages, JS
+    (``@aws/durable-execution-sdk-js-extras``) and Python
+    (``aws-durable-execution-sdk-python-extras``), reject a job input that
+    does not fit before they send the job. So only another sender can get
+    the reset.
     """
     return InvalidRunHookPayloadError(f"{part} exceeds {max_bytes} bytes")
 
