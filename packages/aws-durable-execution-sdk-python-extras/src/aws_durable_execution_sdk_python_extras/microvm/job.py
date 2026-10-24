@@ -35,13 +35,17 @@ MAX_JOB_INPUT_BYTES = 6 * 1024 * 1024 - 8 * 1024
 
 1. The worker accepts a job request body of at most 6 MiB.
 2. The body holds the input as the same JSON that :func:`dumps` writes.
-3. The body also holds the version, the Region, the MicroVM ID, the callback
-   ID, and the heartbeat timeout. Their names and the JSON punctuation take
-   at most 92 bytes.
-4. A callback ID has at most 1,024 characters. JSON writes a character in at
-   most 6 bytes. The Region and the MicroVM ID are short AWS identifiers.
-5. So these fields take less than 8 KiB. With a 1,024-character ASCII
-   callback ID, they take about 1.2 KB.
+3. The body also holds fixed fields: the version, the Region, the MicroVM
+   ID, the callback ID, and the heartbeat timeout. Their names and the JSON
+   punctuation take 92 bytes.
+4. The botocore ``lambda-microvms`` model allows a MicroVM ID of 1 to 256
+   characters, with no pattern. JSON writes a character in at most 6 bytes,
+   as a ``\\u00XX`` escape. So the MicroVM ID takes at most 1,536 bytes.
+5. The Lambda model allows a callback ID of at most 1,024 characters of
+   ``[A-Za-z0-9+/]+={0,2}``. JSON writes each of these characters in 1 byte.
+   So the callback ID takes at most 1,024 bytes.
+6. The Region is short ASCII. The heartbeat timeout is a few digits.
+7. So the fixed fields take less than 3 KiB. So 8 KiB covers them.
 
 So an input whose JSON has at most 6 MiB minus 8 KiB fits in the body.
 """
