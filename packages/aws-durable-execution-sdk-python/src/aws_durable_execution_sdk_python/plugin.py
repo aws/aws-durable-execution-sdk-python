@@ -6,7 +6,8 @@ import datetime
 import functools
 import inspect
 import logging
-from collections.abc import Iterator, Mapping, Sequence
+import threading
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, MutableMapping, Protocol, cast
@@ -393,7 +394,106 @@ class PropagationMetadata:
 
 
 class DurableInstrumentationPlugin:
-    """Base class for plugins. Override only the methods you need."""
+    """Base class for plugins. Override only the methods you need.
+
+    **Every hook is a synchronous call on the thread named below, and that
+    thread waits for it to return.** No hook runs on the checkpoint thread,
+    the one thread that sends every checkpoint of the invocation and applies
+    every response. So a slow hook delays the thread it runs on, and never a
+    checkpoint of another thread. A plugin that needs slow work, such as a
+    network export, does it on its own thread and finishes it in
+    ``on_invocation_end``.
+
+    **Where each hook runs.**
+
+    - ``on_invocation_start``, ``on_invocation_end``: the handler thread,
+      before the handler starts, and after every operation thread has ended
+      and every other hook has returned.
+    - ``on_operation_start``, ``on_user_function_start``,
+      ``on_user_function_end``: the thread that runs the operation.
+    - ``on_operation_end``: the thread that observes the operation's terminal
+      result, before the operation returns to user code. For an operation this
+      invocation completes, that is the thread that ran it, after its terminal
+      checkpoint is confirmed. For an operation completed outside this
+      invocation (a wait that elapsed, a callback, a child execution), it is
+      the thread that replays the operation when the completion arrived before
+      this invocation, or the thread that reads the result when the completion
+      arrives in a checkpoint response during it: a branch resumed after a
+      refresh, a callback result read. A second thread that observes the same
+      result while the hook runs waits for it, so no thread acts on a result
+      whose end hook has not returned. The one exception is a read made from
+      inside any plugin hook, on the hook's own thread: it neither runs nor
+      waits for an end hook. So a result read cannot make the hook that
+      makes it wait for another end hook, and a lock a plugin holds across a
+      hook cannot be needed by an end hook that read starts. A child context
+      that writes no terminal checkpoint (a virtual context, or one in
+      ReplayChildren mode) gets it on its thread when its body returns.
+    - ``on_operation_end`` for a terminal operation no thread reads in this
+      invocation, such as a completion that arrives after the thread that
+      would have read it stopped: the handler thread, before
+      ``on_invocation_end``. A completed descendant no thread read, such as a
+      callback created and never awaited, runs with its ancestor's end hook,
+      before it, on the thread that observes the ancestor's result. Within one
+      invocation an operation's end hook runs at most once, whichever of
+      these threads runs it.
+    - ``on_operation_change``: the invocation's plugin change thread.
+
+    **Order.** For one operation, on its thread: ``on_operation_start``
+    returns before ``on_user_function_start`` is called;
+    ``on_user_function_end`` returns before the terminal checkpoint is sent;
+    ``on_operation_end`` returns before the operation returns to user code. So
+    on one thread an operation's end hook returns before the next operation's
+    start hook is called, and a child's end hook returns before its parent's
+    is called. Threads are not ordered with each other: parallel and map
+    branches run their hooks concurrently, so a plugin guards state shared
+    between hooks with a lock. ``on_operation_change`` is not ordered with the
+    end hooks of the same response.
+
+    Exception to child before parent: a map or parallel with an early
+    completion policy completes while a branch still runs. A FLAT branch
+    whose body then returns runs its end hook on its own thread, after the
+    parent's. A branch that attempts another durable operation after the
+    parent completed is stopped there and gets no end hook; so is a NESTED
+    branch, whose terminal checkpoint is rejected.
+
+    **Change notifications.** ``on_operation_change`` runs on the plugin
+    change thread, in response order. One call may cover several checkpoint
+    responses: while the plugins are still in the hook, the responses that
+    arrive merge into one pending notification. ``updated_operations`` then
+    holds the newest state of every operation whose status changed since the
+    previous call, and ``operations`` the newest full map. Intermediate
+    states and the number of calls are not guaranteed. The pending
+    notification is delivered before ``on_invocation_end``. The single pending
+    slot bounds the backlog: whatever a plugin's speed, one notification is
+    being delivered and at most one is pending. A slow plugin also delays the
+    plugins after it in the list for that call, because the thread runs the
+    plugins one at a time. If the process cannot start the thread, the SDK
+    logs a warning and delivers the one merged notification on the handler
+    thread before ``on_invocation_end``.
+
+    **Repeats.** An operation whose result is replayed from its terminal
+    checkpoint gets one end hook, in the first invocation that sees the
+    terminal checkpoint, and is not reported in a later invocation that
+    replays it. The service decides which operations an invocation sees as
+    updated; a retried invocation sees the same ones again. A child context
+    whose body runs again on replay reports its end on every run: a
+    ReplayChildren context (its checkpoint holds a summary, not the result, so
+    the body re-runs) with ``is_replayed`` true; a virtual context (no
+    checkpoint at all) with ``is_replayed`` false, because it has no
+    checkpoint to derive it from.
+
+    **Failures.** An exception a hook raises is logged and ignored, so a
+    plugin cannot fail the execution. ``KeyboardInterrupt``, ``SystemExit``
+    and ``GeneratorExit`` are the exceptions. On an operation thread and on
+    the handler thread, the fallback delivery of a change notification
+    included, they propagate from the SDK call that ran the hook. One raised
+    by an end hook the handler thread runs before ``on_invocation_end`` does
+    not stop the other such hooks; ``on_invocation_end`` is dispatched to
+    every plugin before it re-raises. On the plugin change thread they are
+    logged, the other plugins still receive the notification, and the next
+    notification is still delivered; nothing is carried to another thread.
+    No hook runs while the SDK holds a lock.
+    """
 
     def provide_propagation_metadata(
         self,
@@ -427,8 +527,8 @@ class DurableInstrumentationPlugin:
         """
         Called before an operation's START checkpoint is queued, or when a
         prior non-terminal operation is replayed. This guarantees that it
-        strictly precedes ``on_user_function_start``. This is called NOT within
-        the thread that runs operation.
+        strictly precedes ``on_user_function_start``. This is called within
+        the thread that runs the operation.
 
         Args:
             info: Information about the operation.
@@ -438,9 +538,18 @@ class DurableInstrumentationPlugin:
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         """
-        Called when an operation reaches a terminal status. Terminal operations
-        are not emitted again during replay. Child contexts without a terminal
-        checkpoint may emit this from the thread that runs the operation.
+        Called when an operation reaches a terminal status, or when a child
+        context without a terminal checkpoint returns. An operation with a
+        terminal checkpoint is not reported again on replay; a child context
+        without one is reported on every replay.
+
+        Runs on the thread that observes the terminal result, before the
+        operation returns to user code: the thread that ran the operation, or
+        the thread that replays, or reads the result of, an operation
+        completed outside this invocation. So a slow hook delays that thread
+        only. A terminal operation no thread reads in this invocation gets it
+        on the handler thread before ``on_invocation_end``. See the class
+        docstring.
 
         Args:
             info: Information about the operation.
@@ -449,8 +558,14 @@ class DurableInstrumentationPlugin:
 
     def on_operation_change(self, info: OperationChangeInfo) -> None:
         """
-        Called when checkpointed operations change after a checkpoint response is merged.
-        This is called NOT within the thread that runs operation.
+        Called when checkpointed operations change after a checkpoint response
+        is merged. Runs on the invocation's plugin change thread, in response
+        order, never on the checkpoint thread, so it delays no checkpoint. One
+        call may cover several responses: ``updated_operations`` holds the
+        newest state of every operation changed since the previous call, and
+        ``operations`` the newest full map. It is not ordered with the
+        ``on_operation_end`` hooks of the same response. See the class
+        docstring.
 
         Args:
             info: Updated operations and the full operation map for the invocation.
@@ -646,6 +761,181 @@ def _contain_plugin_failure(
     return control
 
 
+class _RecordedEndHook:
+    """One recorded end hook and who may run it.
+
+    ``done`` is None while no thread owns the hook. It is an event once a
+    thread owns it: the synchronous waiter the checkpoint loop reserved it
+    for (``reserved`` True until that waiter arrives), or the thread running
+    it. The event completes
+    when the hook has run, or when the entry is retired unrun after a
+    thread-control exception in an earlier hook of the same claim, so another
+    thread that observes the same result waits for it instead of running it
+    again or going on without it.
+
+    Internal to the SDK. Not part of the public API.
+    """
+
+    __slots__ = ("done", "info", "reserved")
+
+    def __init__(self, info: OperationEndInfo, *, reserved: bool = False) -> None:
+        self.info = info
+        self.reserved = reserved
+        self.done: threading.Event | None = threading.Event() if reserved else None
+
+
+class _EndHookClaim:
+    """What a thread must do after it observed a terminal result: run or wait.
+
+    Built under the registry lock by :meth:`PluginExecutor.take_end_hook`,
+    acted on by :meth:`run` outside every lock. ``to_run`` holds the entries
+    this thread now owns, descendants first; ``to_wait`` the event of a hook
+    another thread owns. Both empty means there is nothing to do.
+
+    Internal to the SDK. Not part of the public API.
+    """
+
+    __slots__ = ("_executor", "to_run", "to_wait")
+
+    def __init__(
+        self,
+        executor: PluginExecutor,
+        to_run: list[_RecordedEndHook],
+        to_wait: threading.Event | None,
+    ) -> None:
+        self._executor = executor
+        self.to_run = to_run
+        self.to_wait = to_wait
+
+    def run(self) -> None:
+        if self.to_wait is not None:
+            self.to_wait.wait()
+        if self.to_run:
+            self._executor._run_claimed(self.to_run)  # noqa: SLF001 - same module
+
+
+def _merge_change_infos(
+    pending: OperationChangeInfo, latest: OperationChangeInfo
+) -> OperationChangeInfo:
+    """Merge a newer change notification into the pending one.
+
+    The result describes both checkpoint responses as one. ``updated_operations``
+    holds every operation either notification reported, each in the state of
+    the newest full map, so a plugin sees the latest state and never an older
+    one after a newer. ``operations`` is the newest full map. The map only
+    grows, so it holds every operation the pending notification reported; the
+    pending state is used only for an operation the map lacks.
+    """
+    updated_operations = {
+        operation_id: latest.operations.get(operation_id, info)
+        for reported in (pending.updated_operations, latest.updated_operations)
+        for operation_id, info in reported.items()
+    }
+    return OperationChangeInfo(
+        execution_arn=latest.execution_arn,
+        updated_operations=updated_operations,
+        operations=latest.operations,
+    )
+
+
+class _ChangeDispatcher:
+    """One invocation's thread for ``on_operation_change``, with one pending slot.
+
+    The checkpoint thread submits one notification per response and runs none.
+    This thread delivers them in order. A submission that arrives while a
+    delivery is in progress merges into the single pending notification
+    (:func:`_merge_change_infos`), so a slow plugin holds at most two
+    notifications in memory, the one being delivered and the pending one,
+    rather than a growing queue. A thread-control exception a hook raises
+    here is logged, the other plugins still receive the notification, and the
+    next notification is still delivered: this thread has no caller to stop,
+    and the SDK has no channel that carries an exception from this thread to
+    the handler thread.
+
+    Built by :meth:`start`, which also starts the thread, because starting a
+    thread can fail. An instance built directly has no running thread:
+    :meth:`join` then delivers the pending notification on the calling thread.
+    That is the fallback when the process cannot start a thread.
+
+    Internal to the SDK. Not part of the public API.
+    """
+
+    def __init__(self, executor: PluginExecutor) -> None:
+        self._executor = executor
+        self._pending: OperationChangeInfo | None = None
+        self._stopping = False
+        self._condition = threading.Condition()
+        self._thread = threading.Thread(
+            target=self._run, name="plugin-change", daemon=True
+        )
+        self._thread_started = False
+
+    @classmethod
+    def start(cls, executor: PluginExecutor) -> _ChangeDispatcher:
+        """Create a dispatcher and start its thread. Raises RuntimeError when it cannot start."""
+        dispatcher = cls(executor)
+        dispatcher._thread.start()
+        dispatcher._thread_started = True
+        return dispatcher
+
+    def submit(self, info: OperationChangeInfo) -> None:
+        """Queue a notification; merge it into the pending one if there is one."""
+        with self._condition:
+            self._pending = (
+                info
+                if self._pending is None
+                else _merge_change_infos(self._pending, info)
+            )
+            self._condition.notify()
+
+    def join(self) -> None:
+        """Deliver what is pending, stop the thread, return once nothing is pending.
+
+        Without a running thread, the pending notification is delivered here,
+        on the calling thread, and a thread-control exception a hook raises
+        propagates to the caller.
+        """
+        with self._condition:
+            self._stopping = True
+            self._condition.notify()
+        if self._thread_started:
+            self._thread.join()
+        info = self._take()
+        if info is not None:
+            # On the calling thread, the handler's: a thread-control exception
+            # propagates here, as every hook on that thread does.
+            self._executor.execute_plugins(info, finish_fan_out=True)
+
+    def _take(self) -> OperationChangeInfo | None:
+        with self._condition:
+            info, self._pending = self._pending, None
+            return info
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while self._pending is None and not self._stopping:
+                    self._condition.wait()
+                info, self._pending = self._pending, None
+            if info is None:
+                # Stopping, and nothing left to deliver.
+                return
+            self._deliver(info)
+
+    def _deliver(self, info: OperationChangeInfo) -> None:
+        try:
+            # finish_fan_out: the other plugins still receive this notification.
+            self._executor.execute_plugins(info, finish_fan_out=True)
+        except BaseException:  # noqa: BLE001 - only thread control reaches here
+            # execute_plugins contains every other failure. Nothing on this
+            # thread can be stopped by the interrupt, so it is logged and the
+            # next notification is still delivered.
+            logger.exception(
+                "Plugin on_operation_change hook raised on the plugin change "
+                "thread; ignored"
+            )
+
+
 class PluginExecutor:
     """One invocation's plugin instances, metadata and dispatch.
 
@@ -677,6 +967,32 @@ class PluginExecutor:
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
         self._run_entered = False
+        # End hooks recorded by the checkpoint thread and not yet finished,
+        # keyed by operation id, in recording order. The thread that observes
+        # an operation's terminal result claims and runs its hook; a second
+        # thread that observes the result meanwhile waits for that hook. What
+        # no thread claims runs on the handler thread before on_invocation_end.
+        self._end_hooks: dict[str, _RecordedEndHook] = {}
+        # Operations whose end hook this invocation has run or retired, by any
+        # path. The replay path reports a terminal operation the invocation
+        # input carried, and a checkpoint response can list that operation
+        # too; the set keeps the end hook to one per operation per invocation.
+        self._ended: set[str] = set()
+        # Held while recording end hooks and while deciding which thread runs
+        # one. A reader holds it across its read of the operation state and
+        # its decision, so no other thread's claim comes between the two.
+        self.claim_lock = threading.Lock()
+        # Per thread: how many plugin hooks the thread is inside right now.
+        # execute_plugins and provide_propagation_metadata, the two calls
+        # into a plugin's hook methods, count their call. A claim decision
+        # made by a thread inside a hook returns at once, so a read a plugin
+        # makes from any hook neither runs nor waits for an end hook. See
+        # take_end_hook.
+        self._hook_depth = threading.local()
+        # The thread for on_operation_change. Created by the first change
+        # notification, joined before on_invocation_end.
+        self._dispatcher: _ChangeDispatcher | None = None
+        self._dispatcher_lock = threading.Lock()
 
     def provide_propagation_metadata(
         self, info: PropagationInput
@@ -703,7 +1019,8 @@ class PluginExecutor:
             except Exception:
                 pass
             try:
-                metadata = plugin.provide_propagation_metadata(info)
+                with self._in_hook_scope():
+                    metadata = plugin.provide_propagation_metadata(info)
                 if metadata is None:
                     continue
                 if inspect.iscoroutine(metadata):
@@ -780,13 +1097,295 @@ class PluginExecutor:
         try:
             yield
         finally:
+            # on_invocation_end has run the leftover hooks on every path that
+            # reaches it. This covers a scope that ends before it is called.
+            self._finish_hooks()
             self._invocation_status = None
             self._operations_provider = None
             # Drop this invocation's plugin instances: nothing outlives the
-            # invocation. Every dispatch is synchronous, so there is no queued
-            # work still holding one.
+            # invocation, and the change thread has exited.
             self._plugins = []
             self._started = []
+
+    def record_end_hooks(
+        self, operations: Sequence[Operation], waited_for: Collection[str] = ()
+    ) -> None:
+        """Record the end hook of every terminal operation a checkpoint response reports.
+
+        The checkpoint thread calls this right before the response's
+        operations become readable, and runs no hook.
+        Recording before publishing is what makes a later claim reliable: a
+        thread that reads a terminal operation finds its hook recorded.
+
+        ``waited_for`` names the operations whose synchronous waiter the
+        response is about to wake. Their hooks are reserved for that waiter,
+        which claims them in ``create_checkpoint`` before the operation
+        returns; a thread that reads such a result meanwhile waits for the
+        hook, and an ancestor's claim leaves it alone. Every other hook is
+        unowned: the thread that reads the result claims it, or the handler
+        thread at the end of the invocation (:meth:`drain_end_hooks`).
+
+        An operation reported again while its hook is unowned keeps one entry,
+        with the newest state; one reported while its hook is owned, or after
+        it ran, is not recorded again.
+        """
+        if not self._plugin_factories:
+            return
+        infos = [
+            self._end_info(operation)
+            for operation in operations
+            if self._is_terminal_status(operation.status)
+        ]
+        if not infos:
+            return
+        with self.claim_lock:
+            for info in infos:
+                if info.operation_id in self._ended:
+                    continue
+                recorded = self._end_hooks.get(info.operation_id)
+                if recorded is None:
+                    self._end_hooks[info.operation_id] = _RecordedEndHook(
+                        info, reserved=info.operation_id in waited_for
+                    )
+                elif recorded.done is None:
+                    recorded.info = info
+
+    def claim_end_hook(self, operation_id: str, *, waiter: bool = False) -> None:
+        """Run the recorded end hook of one operation on the calling thread, if any.
+
+        Called by a thread that observes the operation's terminal result,
+        before it acts on the result: ``waiter`` is True for the synchronous
+        waiter in ``create_checkpoint``, False for a reader. An unowned hook
+        runs here; so does one reserved for this waiter. A hook another
+        thread owns is waited for, so no thread acts on the result before the
+        hook has returned. A call from inside any plugin hook returns at
+        once, running and waiting for nothing: a read a plugin makes from a
+        hook inspects the result and takes no part in the ordering, so a
+        hook that reads its own operation does not wait for itself, and
+        hooks cannot wait on each other. No entry means nothing happens:
+        that is every read of an operation completed before this invocation,
+        and of one whose hook already ran.
+
+        Unowned terminal descendants of the operation run first, deepest
+        first. A response can carry a completed descendant no thread read,
+        such as a callback created and not awaited, together with its
+        parent's completion; running it here keeps a child's end hook before
+        its parent's, as on the thread that reads each result.
+        """
+        with self.claim_lock:
+            claim = self.take_end_hook(operation_id, waiter=waiter)
+        if claim is not None:
+            claim.run()
+
+    def take_end_hook(
+        self, operation_id: str, *, waiter: bool = False
+    ) -> _EndHookClaim | None:
+        """Decide, under ``claim_lock``, what the calling thread does for an operation.
+
+        The caller holds ``claim_lock`` and calls :meth:`_EndHookClaim.run`
+        after releasing it. ``get_checkpoint_result`` holds the lock from its
+        read of the operation state through this decision, and every other
+        claim is made under the same lock, so no claim is decided between a
+        read and the decision that follows it. Returns None when there is
+        nothing to do.
+
+        None also for a thread that is inside any plugin hook. Such a
+        thread must not wait: an end hook completes its event only when it
+        returns, so two hooks that read each other's operations would wait
+        on each other forever, and a change hook that waits for an end hook
+        while holding a lock that hook needs would do the same. It must not
+        run a hook either, which would nest one hook in another. The hook
+        stays recorded for the read that consumes the result, or for the
+        drain.
+        """
+        if not self._plugin_factories or self._in_hook():
+            return None
+        recorded = self._end_hooks.get(operation_id)
+        if recorded is None:
+            return None
+        if recorded.done is not None and not (waiter and recorded.reserved):
+            return _EndHookClaim(self, [], recorded.done)
+        return _EndHookClaim(self, self._claim_tree_locked(recorded), None)
+
+    def _in_hook(self) -> bool:
+        """True when the calling thread is inside a plugin hook this executor dispatched."""
+        return getattr(self._hook_depth, "value", 0) > 0
+
+    @contextlib.contextmanager
+    def _in_hook_scope(self) -> Iterator[None]:
+        """Mark the calling thread as inside a plugin hook for the duration."""
+        self._hook_depth.value = getattr(self._hook_depth, "value", 0) + 1
+        try:
+            yield
+        finally:
+            self._hook_depth.value -= 1
+
+    def drain_end_hooks(self) -> None:
+        """Run every recorded end hook no thread ran, here, on the calling thread.
+
+        Called on the handler thread once every operation thread has ended
+        and the checkpoint thread has stopped, so nothing is recorded after
+        it and no owner is still coming. These are terminal operations no
+        thread observed in this invocation: a completion that arrived after
+        the thread that would have read it stopped, or a branch stopped by
+        its parent's early completion. The earliest recorded entry goes
+        first, with its unowned descendants before it, then the next.
+
+        A thread-control exception from one hook is held, the other trees
+        still run (the entries of its own tree not reached are retired, see
+        :meth:`_run_claimed`), and the first one raised is re-raised once
+        nothing is left. Stopping at the first would leave the other trees
+        recorded, and the executor's scope exit would then run them after
+        ``on_invocation_end``.
+        """
+        held_control: BaseException | None = None
+        while True:
+            with self.claim_lock:
+                recorded = next(
+                    (
+                        entry
+                        for entry in self._end_hooks.values()
+                        if entry.done is None or entry.reserved
+                    ),
+                    None,
+                )
+                if recorded is None:
+                    break
+                claimed = self._claim_tree_locked(recorded)
+            try:
+                self._run_claimed(claimed)
+            except BaseException as control:  # noqa: BLE001 - execute_plugins contains the rest
+                if held_control is None:
+                    held_control = control
+        if held_control is not None:
+            raise held_control
+
+    def _claim_tree_locked(self, root: _RecordedEndHook) -> list[_RecordedEndHook]:
+        """Take an entry and its unowned descendants for this thread. Caller holds the lock.
+
+        Returns them in the order to run: every descendant before its
+        ancestor, the root last. Descendants are found through the recorded
+        parent ids, so only a descendant whose recorded ancestors are all
+        unowned is reached. A descendant another thread owns is left to that
+        thread: the two threads are not ordered with each other.
+        """
+        unowned = [entry for entry in self._end_hooks.values() if entry.done is None]
+        ordered = [root]
+        taken = {root.info.operation_id}
+        index = 0
+        while index < len(ordered):
+            parent_id = ordered[index].info.operation_id
+            for entry in unowned:
+                if (
+                    entry.info.parent_id == parent_id
+                    and entry.info.operation_id not in taken
+                ):
+                    taken.add(entry.info.operation_id)
+                    ordered.append(entry)
+            index += 1
+        for entry in ordered:
+            if entry.done is None:
+                entry.done = threading.Event()
+            entry.reserved = False
+        ordered.reverse()
+        return ordered
+
+    def _run_claimed(self, claimed: list[_RecordedEndHook]) -> None:
+        """Run the hooks this thread took, then retire each entry and release its waiters.
+
+        A thread-control exception from one hook propagates at once; the
+        entries not reached are retired without running, so no thread waits
+        on them forever, and they are not reported later either.
+        """
+        for index, entry in enumerate(claimed):
+            try:
+                self.execute_plugins(entry.info)
+            except BaseException:
+                for skipped in claimed[index + 1 :]:
+                    self._retire(skipped)
+                raise
+            finally:
+                self._retire(entry)
+
+    def _retire(self, entry: _RecordedEndHook) -> None:
+        with self.claim_lock:
+            self._end_hooks.pop(entry.info.operation_id, None)
+            self._ended.add(entry.info.operation_id)
+        if entry.done is not None:
+            entry.done.set()
+
+    def _run_end_hook_once(self, info: OperationEndInfo) -> None:
+        """Run an end hook on the calling thread unless this invocation already ran one for the operation.
+
+        The replay path uses this: it reports an operation the invocation
+        input listed as updated, which a checkpoint response may also have
+        recorded. Both paths go through the registry, so the operation ends
+        once, and a thread on either path waits for a hook the other is
+        running.
+        """
+        with self.claim_lock:
+            if info.operation_id in self._ended:
+                return
+            if info.operation_id not in self._end_hooks:
+                self._end_hooks[info.operation_id] = _RecordedEndHook(info)
+            claim = self.take_end_hook(info.operation_id)
+        if claim is not None:
+            claim.run()
+
+    def _submit_change(self, info: OperationChangeInfo) -> None:
+        """Queue a change notification for the plugin change thread. Runs nothing here."""
+        with self._dispatcher_lock:
+            dispatcher = self._dispatcher_locked()
+        dispatcher.submit(info)
+
+    def record_change(
+        self,
+        updated_operations: Sequence[Operation],
+        operations: Mapping[str, Operation],
+        previous_operations: Mapping[str, Operation],
+    ) -> None:
+        """Queue one checkpoint response's change hook for the plugin change thread.
+
+        The checkpoint thread calls this after the response's operations are
+        published and before it wakes the waiters, and runs no hook. Nothing
+        is queued when no operation changed status.
+        """
+        info = self._change_info(updated_operations, operations, previous_operations)
+        if info is not None:
+            self._submit_change(info)
+
+    def _dispatcher_locked(self) -> _ChangeDispatcher:
+        """The invocation's change dispatcher, created on first use. Caller holds the lock."""
+        if self._dispatcher is None:
+            try:
+                self._dispatcher = _ChangeDispatcher.start(self)
+            except RuntimeError:
+                # The process cannot start a thread. Observability must not
+                # fail the execution, so the notifications merge into one that
+                # on_invocation_end delivers on the handler thread.
+                logger.warning(
+                    "Plugin change thread could not be started; "
+                    "on_operation_change runs once on the handler thread "
+                    "before on_invocation_end",
+                    exc_info=True,
+                )
+                self._dispatcher = _ChangeDispatcher(self)
+        return self._dispatcher
+
+    def _finish_hooks(self) -> None:
+        """Run the unclaimed end hooks, then deliver every pending change notification.
+
+        Called on the handler thread once the checkpoint thread has stopped,
+        so nothing is recorded or submitted after this returns. The change
+        thread is joined even if a drained hook raises.
+        """
+        try:
+            self.drain_end_hooks()
+        finally:
+            with self._dispatcher_lock:
+                dispatcher, self._dispatcher = self._dispatcher, None
+            if dispatcher is not None:
+                dispatcher.join()
 
     def _create_plugins(self, info: InvocationStartInfo) -> None:
         """Build this invocation's plugin instances from its start info.
@@ -881,7 +1480,7 @@ class PluginExecutor:
             if control is not None:
                 raise control from None
 
-    def execute_plugins(self, info):
+    def execute_plugins(self, info, *, finish_fan_out: bool = False):
         """Dispatch one hook to this invocation's plugins.
 
         A plugin receives a hook only once it has received the invocation-start
@@ -902,10 +1501,12 @@ class PluginExecutor:
         started, so cutting the loop short costs a plugin its only chance to
         finish: Telemetry would not drain, and OTel would leave spans unended. The
         first such exception is held and re-raised once every plugin has been
-        called, so the thread still stops and nothing is swallowed. No other hook
-        defers: stopping a start-hook loop early leaves later plugins with nothing
-        to clean up, because the pairing rule above then withholds their end hook
-        too.
+        called, so the thread still stops and nothing is swallowed. A caller
+        passes ``finish_fan_out=True`` to get the same treatment for another
+        hook; the change thread does, so that one plugin's interrupt does not
+        cost the other plugins a notification. No other hook defers: stopping a
+        start-hook loop early leaves later plugins with nothing to clean up,
+        because the pairing rule above then withholds their end hook too.
 
         Anything :meth:`_dispatch_plugin` raises is already a thread-control
         failure -- it contains everything else -- so the end path catches
@@ -921,27 +1522,38 @@ class PluginExecutor:
         raised there would be swallowed and the end-hook fan-out could not hold
         it. An earlier ``sync`` parameter offered the pool path; no caller ever
         passed it, and it is removed rather than left as a way to opt out of
-        those rules.
+        those rules. The hooks built on the checkpoint thread are not dispatched
+        there: the checkpoint loop records them, and the thread that claims an
+        end hook, or the plugin change thread, makes this call, so that thread
+        is the caller and the pairing and re-raise rules above hold there.
+
+        The calling thread is marked as inside a plugin hook for the whole
+        fan-out, so a result read a hook makes neither runs nor waits for an
+        end hook (see :meth:`take_end_hook`). This and
+        :meth:`provide_propagation_metadata` are the two calls into a
+        plugin's hook methods.
         """
         if not self._plugin_factories:
             return
         starting = isinstance(info, InvocationStartInfo)
-        ending = isinstance(info, InvocationEndInfo)
+        ending = finish_fan_out or isinstance(info, InvocationEndInfo)
         deferred_control: BaseException | None = None
-        for plugin in self._plugins if starting else self._started:
-            if starting:
-                # Count a hook before dispatch: even a failed Start can own state
-                # that only its End hook can release. All lifecycle hooks share
-                # the invocation worker's Context, including after a failure.
-                self._started.append(plugin)
-            if not ending:
-                self._dispatch_plugin(plugin, info)
-                continue
-            try:
-                self._dispatch_plugin(plugin, info)
-            except BaseException as control:  # noqa: BLE001 - held and re-raised below
-                if deferred_control is None:
-                    deferred_control = control
+        with self._in_hook_scope():
+            for plugin in self._plugins if starting else self._started:
+                if starting:
+                    # Count a hook before dispatch: even a failed Start can own
+                    # state that only its End hook can release. All lifecycle
+                    # hooks share the invocation worker's Context, including
+                    # after a failure.
+                    self._started.append(plugin)
+                if not ending:
+                    self._dispatch_plugin(plugin, info)
+                    continue
+                try:
+                    self._dispatch_plugin(plugin, info)
+                except BaseException as control:  # noqa: BLE001 - held and re-raised below
+                    if deferred_control is None:
+                        deferred_control = control
         if deferred_control is not None:
             raise deferred_control
 
@@ -1059,6 +1671,17 @@ class PluginExecutor:
             # on_invocation_start not called, skip
             return
 
+        # Every other hook of this invocation has run before the end hook: the
+        # operation threads have ended, the end hooks no thread claimed run
+        # here, and the change thread is joined. A thread-control exception a
+        # drained hook raises on this thread is held, so every plugin still
+        # receives its end hook, and re-raised after it.
+        held_control: BaseException | None = None
+        try:
+            self._finish_hooks()
+        except BaseException as control:  # noqa: BLE001 - execute_plugins contains the rest
+            held_control = control
+
         # Re-read the operation map so the end hook sees the state as of the end
         # of this invocation, not the snapshot taken at its start.
         invocation_end_info = (
@@ -1068,7 +1691,16 @@ class PluginExecutor:
                 operations=self._snapshot_operation_infos(self._operations_provider),
             )
         )
-        self.execute_plugins(invocation_end_info)
+        try:
+            self.execute_plugins(invocation_end_info)
+        except BaseException:
+            if held_control is not None:
+                # Both are thread control. The drained hook's came first; the
+                # end hook's is chained as its context.
+                raise held_control  # noqa: B904 - chained below as __context__
+            raise
+        if held_control is not None:
+            raise held_control
 
     def on_user_function_start(
         self,
@@ -1181,7 +1813,14 @@ class PluginExecutor:
         operations: Mapping[str, Operation] | None = None,
         previous_operations: Mapping[str, Operation] | None = None,
     ):
-        """Execute any registered plugins for operation updates.
+        """Run the end hooks for operation updates here, and queue the change hook.
+
+        Called for an operation that changed while the execution was suspended,
+        by the thread that replays it; the end hook runs on that thread. The
+        change hook, built only when both operation maps are given, goes to
+        the plugin change thread. Checkpoint responses during the invocation
+        take the other path: the checkpoint thread records their hooks with
+        :meth:`record_end_hooks` and :meth:`record_change`, and runs none.
 
         Updates such as STARTED might be omitted because START and completion action (e.g. SUCCEED/FAIL) may be
         checkpointed in batch and the backend returns only the terminal status (e.g. SUCCEEDED/PENDING/FAILED).
@@ -1205,33 +1844,44 @@ class PluginExecutor:
         )
         for operation in updated_operations:
             if self._is_terminal_status(operation.status):
-                self.execute_plugins(
-                    OperationEndInfo(
-                        operation_id=operation.operation_id,
-                        operation_type=_to_operation_type(operation.operation_type),
-                        sub_type=operation.sub_type,
-                        name=operation.name,
-                        parent_id=operation.parent_id,
-                        start_time=operation.start_timestamp,
-                        end_time=operation.end_timestamp,
-                        result=_extract_result(operation),
-                        status=operation.status,
-                        error=self._extract_error(operation),
-                        attempt=(
-                            operation.step_details.attempt
-                            if operation.step_details
-                            else None
-                        ),
-                        is_replayed=False,
-                    ),
-                )
+                self._run_end_hook_once(self._end_info(operation))
 
+        change_info = self._change_info(
+            updated_operations, operations, previous_operations
+        )
+        if change_info is not None:
+            self._submit_change(change_info)
+
+    def _end_info(self, operation: Operation) -> OperationEndInfo:
+        return OperationEndInfo(
+            operation_id=operation.operation_id,
+            operation_type=_to_operation_type(operation.operation_type),
+            sub_type=operation.sub_type,
+            name=operation.name,
+            parent_id=operation.parent_id,
+            start_time=operation.start_timestamp,
+            end_time=operation.end_timestamp,
+            result=_extract_result(operation),
+            status=operation.status,
+            error=self._extract_error(operation),
+            attempt=(
+                operation.step_details.attempt if operation.step_details else None
+            ),
+            is_replayed=False,
+        )
+
+    def _change_info(
+        self,
+        updated_operations: Sequence[Operation],
+        operations: Mapping[str, Operation] | None,
+        previous_operations: Mapping[str, Operation] | None,
+    ) -> OperationChangeInfo | None:
         if (
             operations is None
             or previous_operations is None
             or self._invocation_status is None
         ):
-            return
+            return None
 
         changed_operations = [
             operation
@@ -1240,17 +1890,15 @@ class PluginExecutor:
             or previous_operations[operation.operation_id].status != operation.status
         ]
         if not changed_operations:
-            return
+            return None
 
-        self.execute_plugins(
-            OperationChangeInfo(
-                execution_arn=self._invocation_status.execution_arn,
-                updated_operations={
-                    operation.operation_id: OperationInfo.from_operation(operation)
-                    for operation in changed_operations
-                },
-                operations=_to_operation_info_map(operations),
-            ),
+        return OperationChangeInfo(
+            execution_arn=self._invocation_status.execution_arn,
+            updated_operations={
+                operation.operation_id: OperationInfo.from_operation(operation)
+                for operation in changed_operations
+            },
+            operations=_to_operation_info_map(operations),
         )
 
     @staticmethod

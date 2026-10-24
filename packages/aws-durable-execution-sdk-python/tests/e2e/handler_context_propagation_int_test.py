@@ -77,9 +77,9 @@ def _event() -> dict:
 def _tracking_checkpoint():
     """Checkpoint mock that accumulates operations, as the service would.
 
-    SUCCEED actions are recorded as SUCCEEDED so the SDK dispatches
-    operation-end hooks, which is how a hook reaches the background
-    checkpointing thread.
+    SUCCEED actions are recorded as SUCCEEDED so the checkpoint responses
+    carry terminal operations, which is what makes the SDK record and run
+    operation-end hooks.
     """
     operations: dict[str, Operation] = {}
 
@@ -140,16 +140,24 @@ class _ContextvarSettingPlugin(DurableInstrumentationPlugin):
     def __init__(self, value: str) -> None:
         self._value = value
         self.operation_end_observations: list[tuple[str, str]] = []
+        self.operation_change_observations: list[tuple[str, str]] = []
         self._lock = threading.Lock()
 
     def on_invocation_start(self, info) -> None:  # noqa: ARG002
         _probe.set(self._value)
 
     def on_operation_end(self, info) -> None:  # noqa: ARG002
-        # Dispatched from the background checkpointing thread, which reads back
-        # the terminal status of a checkpointed operation.
+        # Runs on the thread that waited for the operation's checkpoint.
         with self._lock:
             self.operation_end_observations.append(
+                (threading.current_thread().name, _probe.get())
+            )
+
+    def on_operation_change(self, info) -> None:  # noqa: ARG002
+        # Runs on the invocation's plugin change thread, after the checkpoint
+        # response is merged.
+        with self._lock:
+            self.operation_change_observations.append(
                 (threading.current_thread().name, _probe.get())
             )
 
@@ -229,13 +237,12 @@ def test_handler_body_contextvar_writes_do_not_leak_to_the_caller():
     assert after == "set-by-caller"
 
 
-def test_checkpointing_thread_does_not_carry_the_invocation_context():
-    """The background checkpointing thread is submitted without the context.
+def test_plugin_change_thread_does_not_carry_the_invocation_context():
+    """The plugin change thread, like the checkpoint thread, starts from an empty context.
 
-    It runs SDK checkpointing rather than user code, so it is left starting from
-    an empty context. This test pins that choice: a plugin hook dispatched from
-    that thread sees the contextvar's default, not the value the invocation
-    thread set.
+    Both run SDK work rather than user code. This test verifies that: the
+    change hook, which runs on the plugin change thread, sees the contextvar's
+    default, not the value the invocation thread set at invocation start.
     """
     plugin = _ContextvarSettingPlugin("claimed-by-plugin")
     handler_thread_names: list[str] = []
@@ -254,8 +261,36 @@ def test_checkpointing_thread_does_not_carry_the_invocation_context():
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     off_handler_thread = [
         value
-        for thread_name, value in plugin.operation_end_observations
+        for thread_name, value in plugin.operation_change_observations
         if thread_name not in handler_thread_names
     ]
-    assert off_handler_thread, plugin.operation_end_observations
+    assert off_handler_thread, plugin.operation_change_observations
     assert set(off_handler_thread) == {UNSET}
+
+
+def test_operation_end_hook_runs_on_the_operation_thread_with_its_context():
+    """A step's end hook runs on the thread that ran the step, in its context.
+
+    The checkpoint thread records the end hook; the thread waiting for the
+    step's checkpoint claims and runs it. So the hook sees what that thread
+    sees, including the contextvar the plugin set at invocation start.
+    """
+    plugin = _ContextvarSettingPlugin("claimed-by-plugin")
+    handler_thread_names: list[str] = []
+
+    @durable_step
+    def a_step(_step_context) -> str:
+        return "stepped"
+
+    @durable_execution(plugins=[plugin_factory(plugin)])
+    def my_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
+        handler_thread_names.append(threading.current_thread().name)
+        return context.step(a_step(), name="a-step")
+
+    result = _run(my_handler)
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert plugin.operation_end_observations
+    assert plugin.operation_end_observations == [
+        (handler_thread_names[0], "claimed-by-plugin")
+    ]

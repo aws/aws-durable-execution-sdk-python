@@ -509,8 +509,15 @@ class DurableContext(DurableContextProtocol):
         )
 
     def _peek_next_checkpoint(self) -> CheckpointedResult:
-        """Return the checkpoint for this context's next operation, without consuming it."""
-        return self.state.get_checkpoint_result(self._peek_next_operation_id())
+        """Return the checkpoint for this context's next operation, without consuming it.
+
+        The read takes no plugin end hook: the hook of an operation a
+        checkpoint response completed during this invocation belongs to the
+        read that consumes the result, the operation's own.
+        """
+        return self.state.get_checkpoint_result(
+            self._peek_next_operation_id(), claim_end_hook=False
+        )
 
     def _next_operation_exists(self) -> bool:
         """True if a checkpoint exists for this context's next operation."""
@@ -548,9 +555,14 @@ class DurableContext(DurableContextProtocol):
         # Only look up a checkpoint when replaying. Operation call sites pass
         # their atomically allocated identifier so concurrent callers inspect
         # the checkpoint for their own ID rather than peeking at shared state.
+        # Both reads inspect: neither consumes the result, so neither takes
+        # the plugin end hook a checkpoint response may have recorded for the
+        # operation. The operation's own read, which consumes the result, does.
         next_checkpoint: CheckpointedResult | None = (
             (
-                self.state.get_checkpoint_result(operation_identifier.operation_id)
+                self.state.get_checkpoint_result(
+                    operation_identifier.operation_id, claim_end_hook=False
+                )
                 if operation_identifier is not None
                 else self._peek_next_checkpoint()
             )
