@@ -48,6 +48,7 @@ class _PayloadRecordingPlugin(DurableInstrumentationPlugin):
 
 def _lambda_context() -> Mock:
     ctx = Mock()
+    ctx.get_remaining_time_in_millis.return_value = 900000
     ctx.aws_request_id = "test-request-id"
     ctx.client_context = None
     ctx.identity = None

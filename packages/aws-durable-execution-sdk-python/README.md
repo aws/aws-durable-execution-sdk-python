@@ -193,6 +193,50 @@ instances. Upgrade both packages together; core 3 rejects OTel 1.x registrations
 and the removed provider API version 1 contract. The independent registration
 API remains unchanged.
 
+### Invocation deadlines and Lambda Managed Instances
+
+The SDK captures `LambdaContext.get_remaining_time_in_millis()` at invocation
+entry and uses one monotonic budget, reserving 100 ms before the platform
+deadline for cooperative cleanup. An already-expired invocation starts no user
+handler. Once the budget is exhausted, new user operations and checkpoint/state
+requests are rejected with `InvocationDeadlineExceeded`, a retryable
+`InvocationError`. Step retry strategies do not turn this interruption into a
+persisted step failure. Completed checkpoints retain their stored results and
+errors for replay.
+
+Synchronous checkpoint waits, scheduled refresh waits, checkpoint queue reads,
+and map/parallel coordinator waits share that budget. In particular, a losing
+branch parked in an SDK refresh wait after early parallel completion unwinds at
+the cutoff, allowing invocation cleanup to join it. A newly created descendant
+of a completed context is rejected before its body, START hook, or checkpoint
+runs, even if it did not exist when its ancestor completed.
+
+Saved checkpoint reads and `ReplayChildren` reconstruction, including virtual
+children, remain available when a concurrent branch resumes in the same
+invocation. Reconstructing a saved result does not permit new durable work
+under that completed context.
+
+This is cooperative interruption, **not a guarantee of bounded invocation
+shutdown or LMI worker reclamation**. Python cannot safely terminate arbitrary
+running threads. The SDK still joins invocation-owned workers before returning:
+user code or I/O that does not cooperate, an already-running synchronous service
+client call (including its retries), or a blocked plugin hook can delay those
+joins indefinitely. The shared service client is not reconfigured or closed to
+interrupt one invocation. Give application I/O explicit finite timeouts and keep
+plugin hooks bounded. A runtime-supported worker-retirement strategy is still
+required for non-cooperative work; [issue #741](https://github.com/aws/aws-durable-execution-sdk-python/issues/741)
+tracks that remaining work, with real-LMI coverage in [test PR #743](https://github.com/aws/aws-durable-execution-sdk-python/pull/743).
+
+An expired invocation does not report an unacknowledged result as `SUCCEEDED` or
+`PENDING`. If the service has already acknowledged this invocation's terminal
+execution success/failure checkpoint, that outcome remains authoritative while
+local delivery hooks finish. A terminal checkpoint already in flight at the
+cutoff is settled before reporting the invocation outcome, including an
+acknowledgment received during cleanup. At the cutoff, further response metadata
+pages are skipped for that accepted terminal checkpoint; inline and already-read
+operations are retained. Already-running side effects cannot be undone;
+interrupted work continues to require the documented retry/idempotency strategy.
+
 ### Chained-invoke propagation
 
 A new invoke START collects synchronous plugin metadata after resolving its

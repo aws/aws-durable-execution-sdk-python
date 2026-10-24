@@ -127,6 +127,7 @@ def test_replaced_sampler_carrier_and_public_replay(
         invoked_function_arn="parent:1",
         tenant_id=None,
     )
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     service = Mock(checkpoint=checkpoint)
     before = context.get_current()
     try:

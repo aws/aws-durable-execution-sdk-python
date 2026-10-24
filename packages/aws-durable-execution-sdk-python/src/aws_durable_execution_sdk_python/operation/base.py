@@ -109,6 +109,7 @@ class OperationExecutor(ABC, Generic[T]):
 
     state: ExecutionState
     operation_identifier: OperationIdentifier
+    is_virtual: bool = False
 
     def _get_checkpoint_result(self) -> CheckpointedResult:
         """Return this operation's checkpoint after validating replay identity."""
@@ -179,6 +180,9 @@ class OperationExecutor(ABC, Generic[T]):
             InvalidStateError: If the check result is in an invalid state
             May raise operation-specific errors from check_result_status() or execute()
         """
+        self.state.check_operation_active(
+            self.operation_identifier, allow_replay=True, is_virtual=self.is_virtual
+        )
         # Check 1: Entry (handles replay and existing checkpoints)
         result = self.check_result_status()
 

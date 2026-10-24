@@ -124,6 +124,7 @@ def test_end_to_end_step_operation_with_double_check():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -187,6 +188,7 @@ def test_end_to_end_multiple_operations_execute_sequentially():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -243,6 +245,7 @@ def test_end_to_end_wait_operation_with_double_check():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -302,6 +305,7 @@ def test_end_to_end_checkpoint_synchronization_with_operations_list():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -415,6 +419,7 @@ def test_callback_deferred_error_handling_to_result():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -467,6 +472,7 @@ def test_end_to_end_invoke_operation_with_double_check():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -526,6 +532,7 @@ def test_end_to_end_child_context_with_async_checkpoint():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -627,6 +634,7 @@ def test_end_to_end_child_context_replay_children_mode():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -694,6 +702,7 @@ def test_end_to_end_child_context_error_handling():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -755,6 +764,7 @@ def test_end_to_end_child_context_invocation_error_reraised():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -833,6 +843,7 @@ def test_parallel_and_child_context_agree_on_custom_error_type():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None

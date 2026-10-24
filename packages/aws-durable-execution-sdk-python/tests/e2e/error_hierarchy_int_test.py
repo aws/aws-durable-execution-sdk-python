@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 def _lambda_context() -> Mock:
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request-id"
     lambda_context.client_context = None
     lambda_context.identity = None

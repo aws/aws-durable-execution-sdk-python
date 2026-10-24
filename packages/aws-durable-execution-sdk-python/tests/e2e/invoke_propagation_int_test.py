@@ -44,6 +44,7 @@ START = datetime(2026, 10, 5, tzinfo=UTC)
 
 def lambda_context() -> Mock:
     context = Mock()
+    context.get_remaining_time_in_millis.return_value = 900000
     context.aws_request_id = "request"
     context.client_context = None
     context.identity = None

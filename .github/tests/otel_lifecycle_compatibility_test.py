@@ -125,6 +125,7 @@ def test_installed_factory_pair_preserves_worker_context(view, order, ambient_pr
             },
         }
         lambda_context = SimpleNamespace(
+            get_remaining_time_in_millis=lambda: 900000,
             aws_request_id="installed",
             client_context=None,
             identity=None,

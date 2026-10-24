@@ -14,6 +14,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.deadline import InvocationDeadline
+
 from aws_durable_execution_sdk_python.concurrency.executor import (
     ConcurrentExecutor,
 )
@@ -699,6 +701,7 @@ def test_concurrent_executor_full_execution_path():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     # Mock ChildConfig from the config module
@@ -755,6 +758,7 @@ def test_concurrent_executor_create_result_with_early_exit():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -1011,6 +1015,7 @@ def test_flat_replay_rejects_failed_nested_container_checkpoint(replay_path):
     executor_context = Mock()
     executor_context._parent_id = "parallel-op"  # noqa: SLF001
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.get_checkpoint_result.return_value = (
         CheckpointedResult.create_from_operation(
             Operation(
@@ -1062,6 +1067,7 @@ def test_replay_started_branch_validates_existing_checkpoint(
     executor_context = Mock()
     executor_context._parent_id = "parallel-op"  # noqa: SLF001
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.get_checkpoint_result.return_value = (
         CheckpointedResult.create_from_operation(
             Operation(
@@ -1104,6 +1110,7 @@ def test_replay_started_nested_branch_allows_missing_checkpoint():
     executor_context = Mock()
     executor_context._parent_id = "parallel-op"  # noqa: SLF001
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.get_checkpoint_result.return_value = (
         CheckpointedResult.create_not_found()
     )
@@ -1220,6 +1227,7 @@ def test_concurrent_executor_create_result_failure_tolerance_exceeded():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     def mock_run_in_child_context(func, name, config):
@@ -1258,6 +1266,7 @@ def test_single_task_suspend_bubbles_up():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -1307,6 +1316,7 @@ def test_multiple_tasks_one_suspends_execution_continues():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -1355,6 +1365,7 @@ def test_concurrent_executor_with_single_task_resubmit():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -1415,6 +1426,7 @@ def test_concurrent_executor_resume_checkpoint_failure_propagates():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
 
     # The coordinator requests the refresh when task 1 suspends and waits on
     # the returned event when task 1 is due. Fail the wait. The branches' own
@@ -1498,6 +1510,7 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -1550,6 +1563,7 @@ def test_concurrent_executor_create_result_with_failed_status():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -1599,6 +1613,7 @@ def test_failed_branch_error_type_matches_across_execute_and_replay():
 
     # First run: execute() runs the branch and builds the result live.
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
@@ -1657,6 +1672,7 @@ def test_concurrent_executor_execute_with_failing_task():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -1701,6 +1717,7 @@ def test_create_result_no_failed_executables():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     # wrap_user_function must return the real function so the branch result is
@@ -1724,6 +1741,7 @@ def test_create_result_no_failed_executables():
 def _serdes_branch_test_context() -> tuple[Mock, Mock]:
     """Build (execution_state, executor_context) mocks for a single-branch run."""
     execution_state: Mock = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     child_context: Mock = Mock()
     child_context.is_replaying.return_value = False
@@ -1836,6 +1854,7 @@ def test_replay_flat_branch_retryable_serdes_error_escapes_batch():
     checkpoint.is_succeeded.return_value = False
     checkpoint.is_failed.return_value = False
     execution_state: Mock = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.get_checkpoint_result = Mock(return_value=checkpoint)
     executor_context: Mock = Mock()
 
@@ -1868,6 +1887,7 @@ def test_replay_flat_branch_nondeterminism_escapes_batch():
     checkpoint.is_succeeded.return_value = False
     checkpoint.is_failed.return_value = False
     execution_state: Mock = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.get_checkpoint_result.return_value = checkpoint
     executor_context: Mock = Mock()
 
@@ -1907,6 +1927,7 @@ def test_create_result_with_suspended_executable():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
@@ -2091,6 +2112,7 @@ def test_operation_id_determinism_across_shuffles():
         return result
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
 
     completion_config = CompletionConfig(min_successful=num_executables)
@@ -2406,6 +2428,7 @@ def test_executor_does_not_deadlock_when_all_tasks_terminal_but_completion_confi
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
@@ -2447,6 +2470,7 @@ def test_executor_terminates_quickly_when_impossible_to_succeed():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
@@ -2506,6 +2530,7 @@ def test_executor_exits_early_with_min_successful():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"
@@ -2581,6 +2606,7 @@ def test_executor_returns_with_incomplete_branches():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context = Mock()
@@ -2643,6 +2669,7 @@ def test_executor_returns_before_slow_branch_completes():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context = Mock()
@@ -2838,6 +2865,7 @@ def test_flat_mode_stamps_grandparent_as_inner_op_parent_id():
             return executable.func(child_context)
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
 
@@ -2895,6 +2923,7 @@ def test_nested_mode_stamps_branch_op_as_inner_op_parent_id():
             return executable.func(child_context)
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
 
@@ -2970,6 +2999,7 @@ def test_flat_mode_produces_deterministic_step_ids_across_runs():
 
     def make_run():
         execution_state = Mock()
+        execution_state.invocation_deadline = InvocationDeadline()
         execution_state.create_checkpoint = Mock()
 
         mock_checkpoint = Mock()
@@ -3344,6 +3374,7 @@ def test_completion_config_should_complete_mutually_exclusive_with_thresholds():
 def _make_executor_mocks():
     """Build the execution_state / executor_context mock pair used by executor tests."""
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
     # Default: no branch has a prior checkpoint (fresh run).
@@ -3547,6 +3578,7 @@ def test_branches_sharing_a_resume_time_request_one_refresh():
         operation_id_namespace=_StubNamespace(),
     )
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
@@ -3613,6 +3645,7 @@ def test_wave_resumes_branches_in_index_order():
         operation_id_namespace=_StubNamespace(),
     )
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
@@ -3659,6 +3692,7 @@ def test_early_completion_cancels_unused_refresh():
     )
 
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     refresh = Mock()
 
     def schedule_refresh(_resume_at):
@@ -3912,6 +3946,7 @@ def test_summary_index_fields_records_smaller_side():
 def _make_replay_mocks(branch_checkpoints: dict):
     """Mocks for replay: op id 'op_{index}', checkpoints per index."""
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
@@ -4633,6 +4668,7 @@ def test_operation_id_namespace_derivation_is_stable():
 def _fresh_execution_state():
     """Mock execution_state for fresh runs (no prior checkpoints)."""
     execution_state = Mock()
+    execution_state.invocation_deadline = InvocationDeadline()
     execution_state.create_checkpoint = Mock()
     _absent = Mock()
     _absent.is_succeeded.return_value = False
@@ -5310,6 +5346,7 @@ def test_instrumented_executor_isolates_bindings_on_a_reused_worker() -> None:
         operation_id_namespace=_StubNamespace(),
     )
     state = Mock(spec=ExecutionState)
+    state.invocation_deadline = InvocationDeadline()
     state._plugin_executor = PluginExecutor(
         [plugin_factory(DurableInstrumentationPlugin())]
     )

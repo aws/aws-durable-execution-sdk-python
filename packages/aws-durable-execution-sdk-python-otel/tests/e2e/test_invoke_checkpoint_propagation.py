@@ -191,6 +191,7 @@ def test_parallel_invokes_carry_distinct_actual_operation_parents(
         },
     }
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "request"
     lambda_context.client_context = None
     lambda_context.identity = None

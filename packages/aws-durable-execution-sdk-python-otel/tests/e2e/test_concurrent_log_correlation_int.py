@@ -61,6 +61,7 @@ def _execution_operation_id(owner: str) -> str:
 
 def _lambda_context(owner: str) -> Mock:
     context = Mock()
+    context.get_remaining_time_in_millis.return_value = 900000
     context.aws_request_id = f"request-{owner}"
     context.client_context = None
     context.identity = None

@@ -155,6 +155,7 @@ def test_step_different_ways_to_pass_args():
 
         # Create mock lambda context
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -241,6 +242,7 @@ def test_step_with_logger():
 
         # Create mock lambda context
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -328,6 +330,7 @@ def test_wait_inside_run_in_childcontext():
 
         # Create mock lambda context
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -429,6 +432,7 @@ def test_step_checkpoint_failure_propagates_error():
 
         # Create mock lambda context
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -483,6 +487,7 @@ def test_wait_not_caught_by_exception():
 
         # Create mock lambda context
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -582,6 +587,7 @@ def test_durable_wait_for_callback_decorator():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None

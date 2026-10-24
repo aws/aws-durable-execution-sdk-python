@@ -204,6 +204,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier,
                 checkpointed_result.is_replay_children(),
                 attempt=None if checkpointed_result.is_existent() else 1,
+                is_virtual=self.is_virtual,
             )
             raw_result: T = wrapped_user_func()
 
