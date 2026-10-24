@@ -409,19 +409,14 @@ class _SessionScope(_MicrovmScope):
         #    502. The request step retries a 502 until both retry tiers end.
         # 5. So each job follows the resume mode that the launch recorded,
         #    not the current config.
-        # A launch checkpoint from code that predates the resumeBeforeDelivery
-        # field has no such field. That code computed the mode from the
-        # current config on every replay. So the session does the same for
-        # such a checkpoint.
-        resume_before_delivery = (
-            launched.resume_before_delivery
-            if launched.resume_before_delivery is not None
-            else self.resume_from_config
-        )
+        # Every session launch records a boolean. So only `True` turns the
+        # state check on. A missing field, or any other value, reads as False.
         try:
             result = handler(
                 MicrovmSession(
-                    self, launched, resume_before_delivery=resume_before_delivery
+                    self,
+                    launched,
+                    resume_before_delivery=launched.resume_before_delivery is True,
                 ),
                 child,
             )

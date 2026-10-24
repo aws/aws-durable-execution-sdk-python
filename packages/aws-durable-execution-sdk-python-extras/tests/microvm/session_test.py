@@ -1242,13 +1242,13 @@ def two_jobs_with_a_wait_between(
 
 def checkpoint_launch_as(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None:
     """Make the launch step checkpoint the MicroVM fields of a real launch,
-    plus ``fields``, and no resume mode of its own. So a test controls the
-    launch checkpoint that every replay reads."""
+    plus ``fields``, and no resume mode of its own. Every replay then reads
+    that checkpoint."""
     original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def launch(self: Any, *args: Any) -> Any:
         data = original(self, *args).to_dict()
-        data.pop("resumeBeforeDelivery", None)
+        del data["resumeBeforeDelivery"]
         data.update(fields)
         return SimpleNamespace(to_dict=lambda: data)
 
@@ -1352,24 +1352,24 @@ def test_makes_no_state_check_when_a_deploy_turns_suspending_on(
 
 
 @pytest.mark.parametrize(
-    ("suspend", "state_checks"),
-    [(True, 2), (False, 0)],
-    ids=["current-config-can-suspend", "current-config-cannot-suspend"],
+    "fields",
+    [{}, {"resumeBeforeDelivery": "true"}, {"resumeBeforeDelivery": 1}],
+    ids=["missing", "string-true", "one"],
 )
-def test_follows_the_current_config_for_a_launch_checkpoint_without_a_resume_mode(
+def test_makes_no_state_check_for_a_launch_checkpoint_without_a_bool_resume_mode(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
     monkeypatch: pytest.MonkeyPatch,
-    suspend: bool,  # noqa: FBT001 - a pytest parameter
-    state_checks: int,
+    fields: dict[str, Any],
 ) -> None:
-    # Code that predates the field checkpointed the launch without
-    # resumeBeforeDelivery. That code computed the mode from the current
-    # config on every replay.
-    checkpoint_launch_as(monkeypatch)
+    # The current config asks for suspending. So only the checkpoint can make
+    # these jobs skip the state check. In Python "true" and 1 are truthy. So a
+    # truthiness check would turn the state check on. A read of `is True`
+    # keeps it off.
+    checkpoint_launch_as(monkeypatch, **fields)
     client = fake_client(endpoint=fake_endpoint().url)
-    config = session_config(client, auto_suspend_on_idle=suspend)
+    config = session_config(client, auto_suspend_on_idle=True)
 
     result = run(
         session_handler(config, two_jobs),
@@ -1378,39 +1378,10 @@ def test_follows_the_current_config_for_a_launch_checkpoint_without_a_resume_mod
     )
 
     assert outcome(result)["result"]["test"] == 2
-    assert "resumeBeforeDelivery" not in launch_checkpoint(result)
-    assert len(client.requests("get_microvm")) == state_checks
-
-
-@pytest.mark.parametrize(
-    ("recorded", "suspend", "state_checks"),
-    [("false", False, 0), (1, False, 0), (0, True, 2)],
-    ids=["string-false", "one", "zero"],
-)
-def test_follows_the_current_config_for_a_resume_mode_that_is_not_a_bool(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    recorded: Any,
-    suspend: bool,  # noqa: FBT001 - a pytest parameter
-    state_checks: int,
-) -> None:
-    # Only a bool is a resume mode. A truthy or falsy value of another type
-    # must not decide whether a job checks the MicroVM state. In Python
-    # True == 1, so a check by equality would read 1 as True and 0 as False.
-    checkpoint_launch_as(monkeypatch, resumeBeforeDelivery=recorded)
-    client = fake_client(endpoint=fake_endpoint().url)
-    config = session_config(client, auto_suspend_on_idle=suspend)
-
-    result = run(
-        session_handler(config, two_jobs),
-        None,
-        [("build", succeed_with(1)), ("test", succeed_with(2))],
-    )
-
-    assert outcome(result)["result"]["test"] == 2
-    checkpointed = launch_checkpoint(result)["resumeBeforeDelivery"]
-    assert type(checkpointed) is type(recorded)
-    assert checkpointed == recorded
-    assert len(client.requests("get_microvm")) == state_checks
+    assert launch_checkpoint(result) == {
+        "microvmId": "mvm-1",
+        "endpoint": client.endpoint,
+        "delivery": "http",
+        **fields,
+    }
+    assert client.requests("get_microvm") == []

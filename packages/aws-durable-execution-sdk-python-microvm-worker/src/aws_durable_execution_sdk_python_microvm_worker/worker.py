@@ -178,135 +178,26 @@ def _start_timer(delay: float, action: Callable[[], None]) -> Callable[[], None]
     return timer.cancel
 
 
-def _failed_call_warning(
-    outcome: SuspendOutcome,
-    *,
-    terminating: bool,
-    closed: bool,
-    suspend_hook_arrived: bool,
-    suspending: bool,
-) -> str:
-    """Return the warning for a failed SuspendMicrovm call.
-
-    The text depends on the outcome and on the listener state when the
-    outcome is handled. The caller reads that state under the lock, before
-    it changes it. The conditions, their order, and the texts match the
-    JavaScript worker's ``failedCallWarning``.
-
-    1. A terminate hook during the call: ``_start_idle_time`` starts no
-       idle time. So the listener never calls again. A rejection keeps its
-       permission hint. For an unknown outcome, the text also says that the
-       listener refuses jobs, because a terminating listener refuses jobs
-       for good.
-    2. A rejection with a suspend hook during the call, while the hook's
-       refusal is still in effect: the MicroVM is suspending anyway. So the
-       refusal stays until the resume hook, or 30 seconds after the last
-       suspend hook. The text keeps the permission hint.
-    3. A rejection otherwise: the MicroVM keeps running.
-    4. A refusal for now after ``close()`` during the call:
-       ``_start_idle_time`` starts no idle time. So the listener never
-       calls again.
-    5. A refusal for now with a suspend hook during the call, while the
-       hook's refusal is still in effect: the refusal stays, as in item 2.
-    6. A refusal for now with a suspend hook during the call, after the
-       hook's refusal ended: the listener accepts jobs, and calls again one
-       idle time after the call and every job end.
-    7. A refusal for now otherwise: the next idle time lasts at least 30
-       seconds, unless a job or a resume hook starts the idle time again.
-    8. An unknown outcome after the refusal of jobs ended during the call:
-       a resume hook ended it, or the 30-second limit of a suspend hook's
-       refusal. The listener starts no new refusal after an unknown outcome
-       when ``suspending`` is false. So it accepts jobs. It calls again one
-       idle time after the call and every job end.
-    9. The same after ``close()`` during the call: the listener accepts
-       jobs. ``_start_idle_time`` starts no idle time. So the listener never
-       calls again.
-    10. An unknown outcome otherwise: the refusal continues until the resume
-        hook, or for 30 seconds.
-    """
-    if outcome is SuspendOutcome.UNKNOWN:
-        if terminating:
-            return (
-                "the suspend call for the idle MicroVM had an unknown outcome. "
-                "The MicroVM is terminating, so the worker refuses jobs and "
-                "does not try the call again."
-            )
-        if not suspending:
-            if closed:
-                return (
-                    "the suspend call for the idle MicroVM had an unknown "
-                    "outcome. The refusal of jobs already ended during the "
-                    "call, on a resume hook or after 30 seconds. So the worker "
-                    "accepts jobs. The worker is closed, so it does not try "
-                    "the call again."
-                )
-            return (
-                "the suspend call for the idle MicroVM had an unknown outcome. "
-                "The refusal of jobs already ended during the call, on a "
-                "resume hook or after 30 seconds. So the worker accepts jobs. "
-                "It tries the call again one idle time after the call and "
-                "every job end."
-            )
-        return (
-            "the suspend call for the idle MicroVM had an unknown outcome. The "
-            "worker refuses jobs until the MicroVM resumes, or for 30 seconds."
-        )
-    if outcome is SuspendOutcome.REJECTED:
-        if terminating:
-            return (
-                "could not suspend the idle MicroVM, because the service "
-                "rejected the call. The MicroVM is terminating, so the worker "
-                "does not try the call again. A missing permission needs "
-                "lambda:SuspendMicrovm on the MicroVM image in its execution "
-                "role."
-            )
-        if suspend_hook_arrived and suspending:
-            return (
-                "could not suspend the idle MicroVM, because the service "
-                "rejected the call. A suspend hook arrived during the call, so "
-                "the MicroVM is suspending anyway. The hook's refusal of jobs "
-                "stays until the resume hook, or 30 seconds after the last "
-                "suspend hook. A missing permission needs lambda:SuspendMicrovm "
-                "on the MicroVM image in its execution role."
-            )
-        return (
-            "could not suspend the idle MicroVM, because the service rejected "
-            "the call. It keeps running. A missing permission needs "
-            "lambda:SuspendMicrovm on the MicroVM image in its execution role."
-        )
-    if terminating:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. The MicroVM is terminating, so the worker does "
-            "not try the call again."
-        )
-    if closed:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. The worker is closed, so it does not try the "
-            "call again."
-        )
-    if suspend_hook_arrived and suspending:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. A suspend hook arrived during the call, so this "
-            "call does not end the hook's refusal. The idle time starts again "
-            "after the resume hook, or 30 seconds after the last suspend hook."
-        )
-    if suspend_hook_arrived:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. A suspend hook arrived during the call, and the "
-            "hook's refusal of jobs ended before the call ended. So the worker "
-            "accepts jobs. It tries the call again one idle time after the "
-            "call and every job end."
-        )
-    return (
+# The warning after a failed SuspendMicrovm call. Each outcome has one name
+# and one message. The listener state goes into the warning's fields. The
+# names and the messages match the JavaScript worker word for word.
+_FAILED_CALL_WARNINGS: Mapping[SuspendOutcome, tuple[str, str]] = {
+    SuspendOutcome.REJECTED: (
+        "rejected",
+        "could not suspend the idle MicroVM, because the service rejected the "
+        "call. A missing permission needs lambda:SuspendMicrovm on the MicroVM "
+        "image in its execution role.",
+    ),
+    SuspendOutcome.REFUSED_FOR_NOW: (
+        "refusedForNow",
         "could not suspend the idle MicroVM, because the service refused the "
-        "call for now. It keeps running. The worker tries the call again after "
-        "the next idle time. That idle time lasts at least 30 seconds, unless a "
-        "job or a resume hook starts the idle time again."
-    )
+        "call for now.",
+    ),
+    SuspendOutcome.UNKNOWN: (
+        "unknown",
+        "the suspend call for the idle MicroVM had an unknown outcome.",
+    ),
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -460,6 +351,18 @@ class MicrovmWorkerListener:
        seconds during the call, has already ended the refusal. The worker
        then accepts jobs at once, and tries the call again one idle time
        after the call and every job end.
+    9. The listener logs one warning for each failed call. The message
+       names the outcome. The fields are, in order, ``microvmId``,
+       ``error``, ``outcome``, ``suspendHookArrived``, ``terminating``,
+       ``closed``, and ``refusingJobs``. ``microvmId`` is the MicroVM ID of
+       the call. ``error`` holds the name and the message of the error.
+       ``outcome`` is ``rejected``, ``refusedForNow``, or ``unknown``.
+       ``suspendHookArrived`` states whether a ``suspend`` hook arrived
+       since the idle time ended. ``terminating`` states whether a
+       ``terminate`` hook came before the listener acted on the outcome.
+       ``closed`` states whether ``close()`` came before the listener acted
+       on the outcome. ``refusingJobs`` states whether the listener answers
+       jobs with HTTP 503 after it has acted on the outcome.
 
     When the image enables the ``suspend`` and ``terminate`` hooks, the
     listener acts on them:
@@ -1613,52 +1516,50 @@ class MicrovmWorkerListener:
                 "waitedSeconds": waited_seconds,
             },
         )
+        # The block after the client is closed decides whether the refusal
+        # continues after an unknown outcome. The warning reads its fields in
+        # that block. So for an unknown outcome, the warning comes after
+        # close().
+        unknown_described: object | None = None
         try:
             suspend_microvm(client, target, SUSPEND_CALL_TIMEOUT_SECONDS)
         except Exception as error:  # noqa: BLE001
             outcome = classify_suspend_error(error)
-            deferred = []
-            with self._lock:
-                # The warning depends on this state. The block reads it
-                # before it changes it. For a rejection and a refusal for
-                # now, this block also makes the decision. So for these two
-                # outcomes, the text matches the decision, whatever another
-                # thread does after the lock is released. For an unknown
-                # outcome, the block at the end of this method decides
-                # whether the 30-second refusal starts. See issue #820.
-                hook_arrived = self._suspend_hooks != hooks_before
-                terminating = self._terminating
-                closed = self._closed
-                suspending = self._suspending
-                # The service did nothing. So jobs can run again at once. A
-                # suspend hook that arrived since the idle time ended means
-                # that the MicroVM is suspending anyway, so its refusal stays.
-                if outcome is not SuspendOutcome.UNKNOWN and not hook_arrived:
-                    deferred = self._stop_refusing()
-                    # A rejection, such as a missing permission, is not
-                    # retried until a job ends. A refusal for now is retried
-                    # after the next idle time. That idle time lasts at least
-                    # 30 seconds, because the same error can repeat on every
-                    # call.
-                    if outcome is SuspendOutcome.REFUSED_FOR_NOW:
-                        self._start_idle_time(after_refusal=True)
-            self._logger.warning(
-                _failed_call_warning(
-                    outcome,
-                    terminating=terminating,
-                    closed=closed,
-                    suspend_hook_arrived=hook_arrived,
-                    suspending=suspending,
-                ),
-                extra={**fields, "error": describe(error)},
-            )
-            if outcome is not SuspendOutcome.UNKNOWN:
+            # describe() calls str(error). A client from
+            # create_microvms_client can raise any exception type. So the
+            # caller of the listener controls __str__(). That method can be
+            # slow, or can call the listener. A listener method takes the
+            # lock, and the lock is not reentrant. So the error is described
+            # here, before either locked block.
+            described = describe(error)
+            if outcome is SuspendOutcome.UNKNOWN:
+                # A timeout, a conflict, a server error, or an error after a
+                # retried attempt does not show whether the service suspended
+                # the MicroVM. So the refusal continues, as after a successful
+                # call. The block after the client is closed acts on it.
+                unknown_described = described
+            else:
+                deferred = []
+                with self._lock:
+                    # The service did nothing. So jobs can run again at once.
+                    # A suspend hook that arrived since the idle time ended
+                    # means that the MicroVM is suspending anyway, so its
+                    # refusal stays.
+                    if self._suspend_hooks == hooks_before:
+                        deferred = self._stop_refusing()
+                        # A rejection, such as a missing permission, is not
+                        # retried until a job ends. A refusal for now is
+                        # retried after the next idle time. That idle time
+                        # lasts at least 30 seconds, because the same error
+                        # can repeat on every call.
+                        if outcome is SuspendOutcome.REFUSED_FOR_NOW:
+                            self._start_idle_time(after_refusal=True)
+                    message, extra = self._failed_call_log(
+                        outcome, described, target, hooks_before
+                    )
+                self._logger.warning(message, extra=extra)
                 self._launch_deferred(deferred)
                 return
-            # A timeout, a conflict, a server error, or an error after a
-            # retried attempt does not show whether the service suspended
-            # the MicroVM. So the refusal continues, as after a successful
-            # call.
         finally:
             if owns_client:
                 # Each suspend creates its own client. Closing it releases
@@ -1676,6 +1577,47 @@ class MicrovmWorkerListener:
             # closed listener does not refuse jobs forever.
             if self._suspending:
                 self._start_grace()
+            if unknown_described is None:
+                return
+            message, extra = self._failed_call_log(
+                SuspendOutcome.UNKNOWN, unknown_described, target, hooks_before
+            )
+        self._logger.warning(message, extra=extra)
+
+    def _failed_call_log(
+        self,
+        outcome: SuspendOutcome,
+        described: object,
+        microvm_id: str,
+        hooks_before: int,
+    ) -> tuple[str, dict[str, object]]:
+        """Return the warning for a failed SuspendMicrovm call, and its fields.
+
+        The message names only the outcome. The fields state whether a
+        suspend hook arrived since the idle time ended, whether the listener
+        is terminating or closed, and whether it refuses jobs.
+
+        The caller holds the lock, and has already acted on the outcome in
+        the same locked block. So the fields state what the listener does
+        after the outcome. The caller logs the warning after it releases the
+        lock.
+
+        This method runs under the lock. So it must not call code that the
+        caller of the listener controls. ``described`` is the result of
+        :func:`describe`, which calls ``str()`` on the error. So the caller
+        describes the error before it takes the lock.
+        """
+        name, message = _FAILED_CALL_WARNINGS[outcome]
+        return message, {
+            "microvmId": microvm_id,
+            "error": described,
+            "outcome": name,
+            "suspendHookArrived": self._suspend_hooks != hooks_before,
+            "terminating": self._terminating,
+            "closed": self._closed,
+            # The job path refuses a job with HTTP 503 in both states.
+            "refusingJobs": self._terminating or self._suspending,
+        }
 
     def _start_grace(self) -> None:
         """End the refusal after the grace period, unless the ``resume`` hook
