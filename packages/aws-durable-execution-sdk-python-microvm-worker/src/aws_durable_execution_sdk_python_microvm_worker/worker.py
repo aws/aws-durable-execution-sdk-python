@@ -409,6 +409,9 @@ class MicrovmWorkerListener:
         # The timers that could not start, as a log message and the error.
         # _locked() logs them after it releases the lock.
         self._timer_failures: list[tuple[str, BaseException]] = []
+        # The number of _locked() blocks that run now. It is 0 or 1, because
+        # the lock is not reentrant. A timer start checks it.
+        self._locked_depth = 0
         # The callback IDs of the jobs that run now.
         self._jobs: set[str] = set()
         # The callback IDs of jobs that ended, oldest first.
@@ -1315,19 +1318,48 @@ class MicrovmWorkerListener:
         slow, or can call the listener. A listener method takes the lock,
         and the lock is not reentrant. So :meth:`_start_idle_time` and
         :meth:`_start_grace` only record a failure under the lock. This
-        method logs each failure after it releases the lock. It also
-        describes the error there, as the SuspendMicrovm warning does. It
-        logs the failures when the block raises too.
+        method logs each failure after it releases the lock. It calls
+        describe() after the release too, because describe() calls str() on
+        the error. It logs the failures when the block raises too.
+
+        A block must not call this method again. The lock is not reentrant.
+        So the second call would wait forever for the lock that the first
+        call holds.
+
+        This method raises ``_locked_depth`` under the lock, and lowers it
+        before the release. The two timer starts check it through
+        :meth:`_check_locked`.
         """
         self._lock.acquire()
+        self._locked_depth += 1
         try:
             yield
         finally:
+            self._locked_depth -= 1
             failures = self._timer_failures
             self._timer_failures = []
             self._lock.release()
             for message, error in failures:
                 self._logger.error(message, extra={"error": describe(error)})
+
+    def _check_locked(self) -> None:
+        """Raise RuntimeError unless a :meth:`_locked` block runs.
+
+        A timer start records a failure in ``_timer_failures``. Only
+        :meth:`_locked` logs that list. Suppose a block takes ``self._lock``
+        directly and starts a timer that fails. Then the next
+        :meth:`_locked` block logs the failure, possibly on another thread.
+        If no such block runs, the failure is never logged. So each timer
+        start calls this method first.
+
+        Under a plain ``with self._lock:`` block, no other thread can run a
+        :meth:`_locked` block. So the depth is 0, and this method raises.
+        The check is an explicit raise, because ``python -O`` removes an
+        assert.
+        """
+        if self._locked_depth == 0:
+            msg = "a timer start needs the lock through _locked()"
+            raise RuntimeError(msg)
 
     def _start_idle_time(self, *, after_refusal: bool = False) -> None:
         """Start the idle time, when the session asked for it and no job runs.
@@ -1342,6 +1374,7 @@ class MicrovmWorkerListener:
         The caller holds the lock through :meth:`_locked`. A timer that
         cannot start is logged after the caller releases the lock.
         """
+        self._check_locked()
         self._stop_idle_time()
         auto_suspend = self._auto_suspend
         if (
@@ -1601,6 +1634,7 @@ class MicrovmWorkerListener:
         The caller holds the lock through :meth:`_locked`. A timer that
         cannot start is logged after the caller releases the lock.
         """
+        self._check_locked()
         self._cancel_grace()
         generation = self._grace_generation
         try:

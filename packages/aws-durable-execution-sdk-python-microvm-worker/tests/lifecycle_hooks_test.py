@@ -415,9 +415,15 @@ class Harness:
     def listener(self) -> MicrovmWorkerListener:
         return self.worker._listener  # noqa: SLF001
 
-    def post(self, path: str, body: Any, headers: dict[str, str] | None = None) -> int:
+    def post(
+        self,
+        path: str,
+        body: Any,
+        headers: dict[str, str] | None = None,
+        timeout: float = WAIT,
+    ) -> int:
         connection = http.client.HTTPConnection(
-            host_of(self.worker), self.worker.port, timeout=WAIT
+            host_of(self.worker), self.worker.port, timeout=timeout
         )
         try:
             connection.request(
@@ -448,17 +454,25 @@ class Harness:
             {"microvmId": microvm_id, "runHookPayload": json.dumps(payload)},
         )
 
-    def hook(self, name: str, headers: dict[str, str] | None = None) -> int:
-        return self.post(f"{HOOK_PATH_PREFIX}{name}", {}, headers)
+    def hook(
+        self,
+        name: str,
+        headers: dict[str, str] | None = None,
+        timeout: float = WAIT,
+    ) -> int:
+        return self.post(f"{HOOK_PATH_PREFIX}{name}", {}, headers, timeout)
 
     def hook_in_background(
-        self, name: str, headers: dict[str, str] | None = None
+        self,
+        name: str,
+        headers: dict[str, str] | None = None,
+        timeout: float = WAIT,
     ) -> Future[int]:
         future: Future[int] = Future()
 
         def run() -> None:
             try:
-                future.set_result(self.hook(name, headers))
+                future.set_result(self.hook(name, headers, timeout))
             except BaseException as error:  # noqa: BLE001
                 future.set_exception(error)
 
@@ -486,6 +500,8 @@ class Harness:
         # The job's thread removes the job and starts the idle time in one
         # locked block. The check above reads without the lock, so it can see
         # the removal first. Taking the lock waits for the rest of the block.
+        # The listener writes a timer-failure log line after it releases the
+        # lock. So that line can come after this method returns.
         with self.listener._lock:  # noqa: SLF001
             pass
 
@@ -495,7 +511,8 @@ class Harness:
         # The call's thread lowers the count and starts the idle time in one
         # locked block. The check above reads without the lock, so it can see
         # the lower count first. Taking the lock waits for the rest of the
-        # block.
+        # block. The listener writes a timer-failure log line after it
+        # releases the lock. So that line can come after this method returns.
         with self.listener._lock:  # noqa: SLF001
             pass
 
@@ -2718,7 +2735,7 @@ class _CallingLogger:
 
 @dataclass
 class _TimerCase:
-    """A hook that starts one timer, after the run hook ``idle_seconds``."""
+    """A hook that starts one timer, after a run hook with ``idle_seconds``."""
 
     idle_seconds: float | None
     hook: str
@@ -2791,13 +2808,28 @@ def test_answers_a_hook_that_the_timer_failure_log_sends(
 
     logger.on_error = send_hook
     timers.failure = RuntimeError("can't start new thread")
-    hook = h.hook_in_background(case.hook)
-    # The resume hook's HTTP timeout is WAIT. So this wait ends in either
-    # case.
-    assert hook.result(2 * WAIT) == 200
+    # The inner resume hook's HTTP timeout is WAIT. The outer hook's HTTP
+    # timeout is 2 * WAIT. Suppose the inner hook waits for the lock. Then
+    # the inner hook times out first, and the outer hook still gets its
+    # answer. So the check of statuses reports the failure. Each wait below
+    # ends within 3 * WAIT.
+    hook = h.hook_in_background(case.hook, timeout=2 * WAIT)
+    assert hook.result(3 * WAIT) == 200
     assert statuses == [200]
 
     assert logger.errors()[0] == (case.message, {"error": _THREAD_ERROR})
+
+
+@pytest.mark.parametrize("method", ["_start_idle_time", "_start_grace"])
+def test_a_timer_start_under_the_plain_lock_raises(start: Any, method: str) -> None:
+    # Only _locked() logs a timer failure. A timer start under a plain
+    # ``with self._lock:`` block would leave its failure for an unrelated
+    # block to log. So the timer start refuses to run there.
+    h = start()
+    assert h.run_hook(IDLE) == 200
+    with h.listener._lock:  # noqa: SLF001
+        with pytest.raises(RuntimeError, match=r"needs the lock through _locked\(\)"):
+            getattr(h.listener, method)()
 
 
 def test_fails_a_deferred_run_hook_job_whose_thread_cannot_start(
