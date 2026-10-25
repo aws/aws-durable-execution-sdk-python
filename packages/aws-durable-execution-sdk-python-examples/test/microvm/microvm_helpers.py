@@ -1,13 +1,17 @@
 """Checks for the cloud tests of the MicroVM examples."""
 
 import json
+import logging
 import os
 import time
 from collections.abc import Callable
 from typing import Any
 
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from botocore.exceptions import ClientError
 
+
+logger = logging.getLogger(__name__)
 
 ENDED_STATES = frozenset({"TERMINATING", "TERMINATED"})
 POLL_INTERVAL_SECONDS = 2.0
@@ -238,3 +242,34 @@ def wait_for_microvm_state(
             )
             raise AssertionError(msg)
         sleep(POLL_INTERVAL_SECONDS)
+
+
+TEST_FAILED_ERROR = ErrorObject(
+    message="The test failed before it completed the callback.",
+    type="TestFailed",
+    data=None,
+    stack_trace=None,
+)
+
+
+def fail_callback_after_test_failure(runner: Any, callback_id: str) -> None:
+    """Fail a callback that a failed test left pending.
+
+    1. A pending callback holds the execution until the callback times out.
+    2. A callback failure ends the wait at once. The handler then raises
+       CallbackError, and the session terminates its MicroVM.
+    3. So the test calls this function when it fails before it completes the
+       callback.
+
+    The call runs while the test's own error propagates. An error from the
+    call would replace that error. So this function logs the error and
+    returns.
+    """
+    try:
+        runner.send_callback_failure(callback_id=callback_id, error=TEST_FAILED_ERROR)
+    except Exception:
+        logger.warning(
+            "Could not fail callback %s after the test failed.",
+            callback_id,
+            exc_info=True,
+        )

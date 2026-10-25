@@ -4,12 +4,15 @@ The MicroVM runs the image that scripts/ensure_microvm_image.py builds from
 microvm-image/. The image's routes /write and /read write and read a file in
 the MicroVM. The image enables the resume hook. So the worker accepts the
 next job as soon as the MicroVM resumes.
+
+A callback named gate holds the second job. The caller completes the callback
+with SendDurableExecutionCallbackSuccess to start the second job.
 """
 
 import os
 from typing import Any
 
-from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.config import CallbackConfig, Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
 from aws_durable_execution_sdk_python_extras.microvm import (
@@ -20,23 +23,14 @@ from aws_durable_execution_sdk_python_extras.microvm import (
 )
 
 
-# 1. The worker starts its idle time of 10 seconds at the run hook, and again
-#    after each job. So the idle time starts again when the first job ends.
-# 2. When the idle time ends, the worker calls SuspendMicrovm. The call
-#    returns before the MicroVM freezes. The image gives the suspend hook up
-#    to 10 seconds.
-# 3. The service does not document how long the freeze takes. So this
-#    example assumes that the MicroVM is SUSPENDED within about 25 seconds
-#    of the end of the first job.
-# 4. The wait starts after the first job ends. So the wait ends more than 60
-#    seconds after the first job ends.
-# 5. So the MicroVM stays SUSPENDED for about 35 seconds or more before the
-#    second job resumes it.
-# 6. The cloud test reads the MicroVM state every 2 seconds. So it observes
-#    the SUSPENDED state.
-# A longer wait would only make the test slower.
-PAUSE = Duration.from_seconds(60)
+# The worker suspends the MicroVM after it has run no job for this time.
 IDLE_TIME = Duration.from_seconds(10)
+# The callback named gate holds the second job until the caller completes it.
+# If the caller never completes it, the callback times out after 5 minutes.
+# The handler then raises an error, and the session terminates the MicroVM.
+# So a failed caller leaves the MicroVM running for 5 minutes, not for the
+# whole execution timeout.
+GATE = CallbackConfig(timeout=Duration.from_minutes(5))
 
 
 def _require_microvm_env() -> tuple[str, str]:
@@ -74,7 +68,7 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
     image_arn, execution_role_arn = _require_microvm_env()
     key: str = event["key"]
 
-    def write_pause_read(vm: MicrovmSession, session_context: DurableContext) -> Any:
+    def write_gate_read(vm: MicrovmSession, session_context: DurableContext) -> Any:
         written = vm.invoke(
             session_context,
             "write",
@@ -82,8 +76,14 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
             options=_job_options("/write"),
         )
 
-        # No job runs during the wait. So the worker suspends the MicroVM.
-        session_context.wait(PAUSE, name="pause")
+        # 1. The first job has ended before the gate starts.
+        # 2. The second job starts only after the caller completes the gate.
+        # 3. So no job runs while the gate is pending.
+        # 4. So the worker suspends the MicroVM after the idle time.
+        # 5. So a caller that sees the MicroVM SUSPENDED while the gate is
+        #    pending sees a suspend between the two jobs.
+        # The callback result carries no data. So the handler ignores it.
+        session_context.create_callback(name="gate", config=GATE).result()
 
         # The request step calls GetMicrovm, finds the MicroVM SUSPENDED, and
         # calls ResumeMicrovm before it sends the job. A suspended MicroVM
@@ -115,5 +115,5 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
             auto_suspend_on_idle=True,
             auto_suspend_idle_time=IDLE_TIME,
         ),
-        handler=write_pause_read,
+        handler=write_gate_read,
     )

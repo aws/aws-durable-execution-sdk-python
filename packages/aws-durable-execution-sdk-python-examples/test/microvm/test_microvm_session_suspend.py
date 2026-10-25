@@ -22,8 +22,8 @@ from src.microvm import microvm_session_suspend  # noqa: E402
 from test.conftest import deserialize_operation_payload  # noqa: E402
 from test.microvm.microvm_helpers import (  # noqa: E402
     expect_microvm_terminated,
+    fail_callback_after_test_failure,
     find_launched_microvm_id,
-    wait_for_history_event,
     wait_for_microvm_state,
 )
 
@@ -61,39 +61,47 @@ def test_suspends_the_idle_microvm_and_resumes_it_for_the_next_job(durable_runne
         # execution asynchronously and polls for its result.
         execution_arn = durable_runner.run_async(input={"key": key}, timeout=300)
 
-        # The test reads the MicroVM state while the execution waits. So it
+        # The test reads the MicroVM state while the gate is pending. So it
         # reads the MicroVM ID from the launch step in the execution history.
         microvm_id = find_launched_microvm_id(execution_arn, "suspend-session.launch")
 
-        # 1. The worker starts its idle time at the run hook, and again after
-        #    each job.
-        # 2. If the first job arrives more than 10 seconds after the run hook,
-        #    the worker suspends the MicroVM before the first job.
-        # 3. The wait named pause starts only after the first job ends.
-        # 4. So a SUSPENDED state read after the wait has started lies between
-        #    the two jobs. So the test reads the state only after the history
-        #    shows that the wait has started.
-        wait_for_history_event(execution_arn, "WaitStarted", "pause")
+        callback_id = None
+        gate_completed = False
+        try:
+            # The cloud runner reads the callback ID from the CallbackStarted
+            # event named gate. It returns the ID only after the invocation
+            # that created the callback has completed.
+            callback_id = durable_runner.wait_for_callback(
+                execution_arn=execution_arn, name="gate", timeout=120
+            )
 
-        # 1. The worker suspends the MicroVM 10 seconds after the first job
-        #    ends.
-        # 2. The freeze takes up to about 15 seconds more.
-        # 3. The second job resumes it about 60 seconds after the first job
-        #    ends.
-        # 4. So GetMicrovm reports SUSPENDED for about 35 seconds or more.
-        # The state can also pass through SUSPENDING. The service controls
-        # that timing. So the test requires only that SUSPENDED is seen once.
-        #
-        # The helper returns only after it reads SUSPENDED. The test does not
-        # also require a RUNNING state before SUSPENDED:
-        # 1. The idle time starts when the first job ends.
-        # 2. The wait starts later. The service first completes the callback,
-        #    and then invokes the function again. That time has no upper
-        #    bound.
-        # 3. So the wait can start more than 10 seconds after the idle time
-        #    starts. The first read can then already be SUSPENDING or
-        #    SUSPENDED.
-        wait_for_microvm_state(microvm_id, "SUSPENDED")
+            # 1. The gate starts after the first job ends.
+            # 2. The second job starts only after the test completes the gate.
+            # 3. So a SUSPENDED state read now lies between the two jobs.
+            # 4. So the result does not depend on how long the suspend takes.
+            #    The poll lasts at most 150 seconds. The gate times out after
+            #    5 minutes. So the gate stays pending for the whole poll.
+            # The state can also pass through SUSPENDING. So the test requires
+            # only that SUSPENDED is seen once.
+            #
+            # The test does not also require a RUNNING state before SUSPENDED:
+            # 1. The idle time starts when the first job ends.
+            # 2. The runner returns the callback ID after the invocation ends.
+            #    That time has no upper bound.
+            # 3. So the first read can already be SUSPENDING or SUSPENDED.
+            wait_for_microvm_state(microvm_id, "SUSPENDED")
+
+            durable_runner.send_callback_success(callback_id=callback_id)
+            gate_completed = True
+        finally:
+            # A failure before the gate completes leaves the execution waiting
+            # for the gate, with the MicroVM still running. A callback failure
+            # makes the session terminate the MicroVM now, instead of after
+            # the gate's timeout. If the test fails before it has the callback
+            # ID, the gate times out after 5 minutes. The session then
+            # terminates the MicroVM.
+            if callback_id is not None and not gate_completed:
+                fail_callback_after_test_failure(durable_runner, callback_id)
 
         result = durable_runner.wait_for_result(
             execution_arn=execution_arn, timeout=300
@@ -101,7 +109,7 @@ def test_suspends_the_idle_microvm_and_resumes_it_for_the_next_job(durable_runne
 
     assert result.status is InvocationStatus.SUCCEEDED, result.error
     output = deserialize_operation_payload(result.result)
-    # 1. GetMicrovm reported the MicroVM SUSPENDED after the wait started.
+    # 1. GetMicrovm reported the MicroVM SUSPENDED while the gate was pending.
     # 2. The second job read the file that the first job wrote.
     # 3. A suspended MicroVM keeps its files.
     # So both jobs ran in the same MicroVM, before and after the suspend.
@@ -112,9 +120,10 @@ def test_suspends_the_idle_microvm_and_resumes_it_for_the_next_job(durable_runne
 
     expect_microvm_terminated(microvm_id)
 
-    # The tree is the same as in the session example without suspending. The
-    # state check and the resume run inside each request step. So the tree
-    # shows them only as a request step that succeeded after the suspend.
+    # The tree is the tree of the session example without suspending, with
+    # the callback named gate in place of that example's wait. The state
+    # check and the resume run inside each request step. So the tree shows
+    # them only as a request step that succeeded after the suspend.
     assert tree(result.operations) == [
         (
             "suspend-session",
@@ -132,7 +141,7 @@ def test_suspends_the_idle_microvm_and_resumes_it_for_the_next_job(durable_runne
                         ("write.request", OperationType.STEP, SUCCEEDED, []),
                     ],
                 ),
-                ("pause", OperationType.WAIT, SUCCEEDED, []),
+                ("gate", OperationType.CALLBACK, SUCCEEDED, []),
                 (
                     "read",
                     OperationType.CONTEXT,

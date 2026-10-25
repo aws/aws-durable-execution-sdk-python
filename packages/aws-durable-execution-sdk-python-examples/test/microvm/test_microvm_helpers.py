@@ -9,8 +9,10 @@ from test.microvm.microvm_helpers import (
     HISTORY_TIMEOUT_SECONDS,
     POLL_INTERVAL_SECONDS,
     STATE_TIMEOUT_SECONDS,
+    TEST_FAILED_ERROR,
     TIMEOUT_SECONDS,
     expect_microvm_terminated,
+    fail_callback_after_test_failure,
     find_launched_microvm_id,
     wait_for_history_event,
     wait_for_microvm_state,
@@ -330,3 +332,34 @@ def test_wait_for_event_fails_after_the_timeout():
     # The check reads the history at 0, 2, ..., 120 seconds.
     assert len(client.requests) == HISTORY_TIMEOUT_SECONDS / POLL_INTERVAL_SECONDS + 1
     assert sum(clock.sleeps) == HISTORY_TIMEOUT_SECONDS
+
+
+class FakeRunner:
+    """Records send_callback_failure calls, and raises ``error`` if set."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self._error = error
+        self.failures: list[dict[str, Any]] = []
+
+    def send_callback_failure(self, **request: Any) -> None:
+        self.failures.append(request)
+        if self._error is not None:
+            raise self._error
+
+
+def test_fail_callback_sends_a_callback_failure():
+    runner = FakeRunner()
+
+    fail_callback_after_test_failure(runner, "cb-1")
+
+    assert runner.failures == [{"callback_id": "cb-1", "error": TEST_FAILED_ERROR}]
+
+
+def test_fail_callback_logs_an_error_instead_of_raising_it(caplog):
+    runner = FakeRunner(RuntimeError("callback already completed"))
+
+    fail_callback_after_test_failure(runner, "cb-1")
+
+    assert len(runner.failures) == 1
+    assert "Could not fail callback cb-1" in caplog.text
+    assert "callback already completed" in caplog.text
