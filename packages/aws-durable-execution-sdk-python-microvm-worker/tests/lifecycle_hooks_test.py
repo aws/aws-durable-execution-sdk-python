@@ -20,8 +20,12 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any
 
+import boto3
 import pytest
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.awsrequest import AWSResponse, HTTPHeaders
+from botocore.config import Config
+from botocore.exceptions import ClientError, ConnectionClosedError, NoCredentialsError
+from botocore.retries.standard import ExponentialBackoff
 
 from aws_durable_execution_sdk_python_microvm_worker import (
     HOOK_PATH_PREFIX,
@@ -913,6 +917,129 @@ def test_accepts_jobs_at_once_when_the_resume_hook_arrives_during_the_call(
     h.settle()
     assert h.job("cb-2") == 202
     assert eventually(lambda: sorted(h.jobs.started()) == ["cb-1", "cb-2"])
+
+
+class LostAnswerService:
+    """Stands in for the Lambda MicroVMs service in a botocore client.
+
+    A ``before-send`` handler answers each attempt instead of HTTP. The
+    first attempt "suspends" the MicroVM. Its answer is lost: the attempt
+    waits until :meth:`thaw`, and then fails with a closed connection, as
+    after a freeze. Each later attempt also "suspends" the MicroVM, answers
+    200, and records the jobs that it would freeze.
+    """
+
+    def __init__(self, listener: Callable[[], MicrovmWorkerListener]) -> None:
+        self._listener = listener
+        self._thawed = threading.Event()
+        self._lock = threading.Lock()
+        self.attempts = 0
+        self.frozen_jobs: list[str] = []
+
+    def install(self, client: Any) -> Any:
+        client.meta.events.register(
+            "before-send.lambda-microvms.SuspendMicrovm", self._send
+        )
+        return client
+
+    def thaw(self) -> None:
+        self._thawed.set()
+
+    def _send(self, **_: Any) -> AWSResponse:
+        with self._lock:
+            self.attempts += 1
+            first = self.attempts == 1
+        if first:
+            self._thawed.wait(WAIT)
+            raise ConnectionClosedError(endpoint_url="https://example.com")
+        with self._lock:
+            self.frozen_jobs.extend(self._listener()._jobs)  # noqa: SLF001
+        headers = HTTPHeaders()
+        headers["Content-Type"] = "application/json"
+        return AWSResponse("https://example.com", 200, headers, _Body(b"{}"))
+
+
+class _Body:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def stream(self, **_: Any) -> Any:
+        yield self._data
+
+
+@pytest.fixture
+def credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+
+@pytest.mark.parametrize("client_kind", ["default", "retrying"])
+def test_sends_no_suspend_attempt_after_the_resume_hook(
+    start: Any,
+    logger: Any,
+    credentials: None,
+    monkeypatch: pytest.MonkeyPatch,
+    client_kind: str,
+) -> None:
+    # 1. The first SuspendMicrovm attempt suspends the MicroVM.
+    # 2. Its answer is lost in the freeze.
+    # 3. The resume hook ends the refusal, and the next job starts.
+    # 4. botocore would then retry the closed connection. The retry would
+    #    suspend the MicroVM with that job inside.
+    # The default client makes one attempt. A caller's client can retry,
+    # and the before-send handler stops its retry after the resume hook.
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    harness: list[Harness] = []
+    service = LostAnswerService(lambda: harness[0].listener)
+    if client_kind == "default":
+        default = worker_module.create_microvms_client
+        monkeypatch.setattr(
+            worker_module,
+            "create_microvms_client",
+            lambda region: service.install(default(region)),
+        )
+        h = start(create_microvms_client=None)
+    else:
+        retrying = service.install(
+            boto3.session.Session().client(
+                "lambda-microvms",
+                region_name="us-east-1",
+                config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
+            )
+        )
+        h = start(create_microvms_client=lambda region: retrying)
+    harness.append(h)
+
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert eventually(lambda: service.attempts == 1)
+    assert h.job("cb-0") == 503
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    service.thaw()
+    h.settle()
+
+    assert service.attempts == 1
+    assert service.frozen_jobs == []
+    # The resume hook has ended the refusal. The failed call starts no new
+    # refusal and no grace period.
+    assert_one_warning(logger, "unknown", refusing_jobs=False)
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert h.job("cb-2") == 202
+    h.finish_job("cb-1")
+    h.finish_job("cb-2")
+    assert eventually(
+        lambda: {c["callbackId"] for c in h.lambda_client.recorded()}
+        == {"cb-1", "cb-2"}
+    )
+    # The next idle time makes a new call, which the resume hook above does
+    # not stop.
+    h.timers.advance(IDLE)
+    h.settle()
+    assert service.attempts == 2
+    assert service.frozen_jobs == []
 
 
 def test_logs_a_rejected_suspend_accepts_jobs_at_once_and_does_not_retry(
