@@ -330,9 +330,16 @@ def test_fails_with_the_handlers_own_error_and_still_terminates(
     ("call", "error", "message"),
     [
         (
-            lambda vm, ctx: vm.invoke("build", "build", job_input=1, options=job()),  # type: ignore[arg-type]
+            # Python binds "build" to context, so name is missing.
+            lambda vm, ctx: vm.invoke("build", job_input=1, options=job()),  # type: ignore[call-arg, arg-type]
             "TypeError",
-            "invoke requires the durable context",
+            "missing 1 required positional argument: 'name'",
+        ),
+        (
+            # Python raises AttributeError at context.run_in_child_context.
+            lambda vm, ctx: vm.invoke("build", "build", job_input=1, options=job()),  # type: ignore[arg-type]
+            "AttributeError",
+            "'str' object has no attribute 'run_in_child_context'",
         ),
         (
             lambda vm, ctx: vm.invoke(ctx, "", job_input=1, options=job()),
@@ -381,7 +388,7 @@ def test_rejects_an_invalid_job_inside_the_handler_where_it_can_be_caught(
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
         try:
             call(vm, ctx)
-        except (TypeError, ValidationError) as raised:
+        except (AttributeError, TypeError, ValidationError) as raised:
             return [type(raised).__name__, str(raised)]
         return None
 
@@ -494,7 +501,6 @@ def test_fails_with_the_launch_error_and_skips_terminate(
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
-        ({"image_identifier": ""}, "image_identifier is required"),
         ({"timeout": Duration.from_hours(9)}, "timeout must be between 1 second"),
         (
             {"auto_suspend_idle_time": Duration.from_seconds(30)},
@@ -542,23 +548,30 @@ def test_rejects_an_invalid_config_before_any_durable_operation(
     assert client.calls == []
 
 
-def test_rejects_a_handler_that_is_not_callable(run: Any, fake_client: Any) -> None:
+def test_fails_inside_the_session_for_a_handler_that_is_not_callable(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    """Python raises TypeError when the session calls the handler. That call
+    runs inside the session's child context, after the launch. So the caller
+    gets ChildContextError, and the session terminates the MicroVM."""
+    client = fake_client(endpoint=fake_endpoint().url)
+
     @durable_execution
     def handler(event: Any, context: DurableContext) -> Any:
         try:
             microvm_session(
                 context,
                 "pipeline",
-                config=session_config(fake_client()),
+                config=session_config(client),
                 handler="build",  # type: ignore[arg-type]
             )
-        except TypeError as error:
-            return str(error)
+        except ChildContextError as error:
+            return [error.error_type, error.message]
         return None
 
-    assert (
-        outcome(run(handler)) == 'MicroVM session "pipeline": handler must be callable'
-    )
+    assert outcome(run(handler)) == ["TypeError", "'str' object is not callable"]
+    assert len(client.requests("run_microvm")) == 1
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
 
 
 def test_passes_an_idle_policy_through_and_resumes_before_each_job(

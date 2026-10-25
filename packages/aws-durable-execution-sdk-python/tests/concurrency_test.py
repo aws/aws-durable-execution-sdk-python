@@ -84,6 +84,7 @@ from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     PluginExecutor,
 )
+from aws_durable_execution_sdk_python.serdes import ExtendedTypeSerDes
 from aws_durable_execution_sdk_python.state import (
     CheckpointedResult,
     ExecutionState,
@@ -310,6 +311,113 @@ def test_batch_result_get_errors():
     assert len(errors) == 2
     assert error1 in errors
     assert error2 in errors
+
+
+def test_batch_result_preserves_missing_errors_through_serdes():
+    """Deserialization preserves one optional error per FAILED item."""
+    real_error = ErrorObject("real error", "RealError", "data", ["line"])
+    wire = {
+        "all": [
+            {"index": 2, "status": "FAILED", "result": None, "error": None},
+            {
+                "index": 5,
+                "status": "FAILED",
+                "result": None,
+                "error": real_error.to_dict(),
+            },
+        ],
+        "completionReason": "ALL_COMPLETED",
+    }
+
+    restored = BatchResult.from_dict(wire)
+    assert restored.get_errors() == [None, real_error]
+    assert len(restored.get_errors()) == restored.failure_count == 2
+
+    serdes = ExtendedTypeSerDes()
+    round_tripped = serdes.deserialize(serdes.serialize(restored))
+
+    assert isinstance(round_tripped, BatchResult)
+    assert round_tripped.get_errors() == [None, real_error]
+    assert len(round_tripped.get_errors()) == round_tripped.failure_count == 2
+
+
+def test_batch_result_throw_if_error_without_error_uses_item_index():
+    """A FAILED item without an ErrorObject raises a deterministic error."""
+    result = BatchResult(
+        [BatchItem(7, BatchItemStatus.FAILED)],
+        CompletionReason.ALL_COMPLETED,
+    )
+
+    with pytest.raises(ChildContextError) as exc_info:
+        result.throw_if_error()
+
+    assert exc_info.value.message == "Batch item 7 failed without an ErrorObject."
+    assert exc_info.value.error_type == (
+        "aws_durable_execution_sdk_python.exceptions.ChildContextError"
+    )
+    assert exc_info.value.__cause__ is None
+
+
+def test_batch_result_throw_if_error_uses_first_failed_item():
+    """A later real error does not replace the first FAILED item."""
+    later_error = ErrorObject("later error", "LaterError", None, None)
+    result = BatchResult(
+        [
+            BatchItem(3, BatchItemStatus.FAILED),
+            BatchItem(4, BatchItemStatus.FAILED, error=later_error),
+        ],
+        CompletionReason.ALL_COMPLETED,
+    )
+
+    assert result.get_errors() == [None, later_error]
+    with pytest.raises(
+        ChildContextError,
+        match=r"Batch item 3 failed without an ErrorObject\.",
+    ):
+        result.throw_if_error()
+
+
+def test_batch_result_throw_if_error_preserves_real_first_error():
+    """A real error on the first FAILED item retains all error fields."""
+    first_error = ErrorObject(
+        "first error",
+        "OriginalError",
+        "error data",
+        ["stack line"],
+    )
+    result = BatchResult(
+        [
+            BatchItem(3, BatchItemStatus.FAILED, error=first_error),
+            BatchItem(4, BatchItemStatus.FAILED),
+        ],
+        CompletionReason.ALL_COMPLETED,
+    )
+
+    assert result.get_errors()[0] is first_error
+    with pytest.raises(ChildContextError) as exc_info:
+        result.throw_if_error()
+
+    assert exc_info.value.message == first_error.message
+    assert exc_info.value.error_type == first_error.type
+    assert exc_info.value.data == first_error.data
+    assert exc_info.value.stack_trace == first_error.stack_trace
+
+
+def test_batch_result_keeps_succeeded_items_with_none_result():
+    """A branch that returns None still counts as succeeded."""
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, None),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, 10),
+        BatchItem(
+            2, BatchItemStatus.FAILED, error=ErrorObject("msg", "Error", None, None)
+        ),
+        BatchItem(3, BatchItemStatus.SUCCEEDED, None),
+    ]
+    result = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    assert [item.index for item in result.succeeded()] == [0, 1, 3]
+    assert len(result.succeeded()) == result.success_count
+    assert result.get_results() == [None, 10, None]
 
 
 def test_batch_result_counts():
@@ -595,21 +703,6 @@ def test_executable_creation():
     executable = Executable(index=5, func=test_func)
     assert executable.index == 5
     assert executable.func == test_func
-
-
-def test_batch_result_failed_with_none_error():
-    """Test BatchResult failed method filters out None errors."""
-    items = [
-        BatchItem(0, BatchItemStatus.FAILED, error=None),  # Should be filtered out
-        BatchItem(
-            1, BatchItemStatus.FAILED, error=ErrorObject("msg", "Error", None, None)
-        ),
-    ]
-    result = BatchResult(items, CompletionReason.ALL_COMPLETED)
-
-    failed = result.failed()
-    assert len(failed) == 1
-    assert failed[0].error is not None
 
 
 def test_concurrent_executor_nesting_type_parameter():
@@ -1035,6 +1128,61 @@ def test_flat_replay_rejects_failed_nested_container_checkpoint(replay_path):
             )
 
     executor_context.create_child_context.assert_not_called()
+
+
+@pytest.mark.parametrize("replay_path", ["recorded-terminal", "fallback"])
+def test_replay_failed_checkpoint_without_error_keeps_none(replay_path):
+    """A FAILED branch checkpoint may carry no error; the item keeps None.
+
+    Replay stores the checkpoint error as recorded. The item stays FAILED,
+    get_errors() keeps its position, and throw_if_error() still raises.
+    """
+    executor = _RecordingExecutor(
+        executables=[Executable(0, lambda: "must-not-run")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(tolerated_failure_count=1),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+        nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor_context = Mock()
+    executor_context._parent_id = "parallel-op"  # noqa: SLF001
+    execution_state = Mock()
+    execution_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(
+            Operation(
+                operation_id="op_0",
+                operation_type=OperationType.CONTEXT,
+                status=OperationStatus.FAILED,
+                parent_id="parallel-op",
+                sub_type=OperationSubType.PARALLEL_BRANCH,
+                name="parallel-branch-0",
+            )
+        )
+    )
+
+    if replay_path == "recorded-terminal":
+        item = executor._replay_terminal_item(  # noqa: SLF001
+            execution_state, executor_context, executor.executables[0]
+        )
+        result = BatchResult([item], CompletionReason.ALL_COMPLETED)
+    else:
+        result = executor._replay_from_checkpoints(  # noqa: SLF001
+            execution_state, executor_context
+        )
+
+    assert [item.index for item in result.failed()] == [0]
+    assert result.failed()[0].error is None
+    assert result.get_errors() == [None]
+    assert result.has_failure
+
+    with pytest.raises(ChildContextError, match="without an ErrorObject") as exc_info:
+        result.throw_if_error()
+
+    assert exc_info.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
@@ -3986,7 +4134,7 @@ def test_replay_round_trip_matches_live_result():
     # (a terminal checkpoint can land after the completion decision).
     replay_state, replay_context = _make_replay_mocks(
         {
-            "op_0": _succeeded_checkpoint('"replayed_0"'),
+            "op_0": _succeeded_checkpoint("null"),
             "op_1": _succeeded_checkpoint('"raced_1"'),
             "op_2": _succeeded_checkpoint('"replayed_2"'),
         }
@@ -4004,9 +4152,28 @@ def test_replay_round_trip_matches_live_result():
         (i.index, i.status) for i in live.all
     ]
     assert replayed.completion_reason is live.completion_reason
-    assert replayed.all[0].result == "replayed_0"
+    assert replayed.all[0].result is None
     assert replayed.all[1].result is None
     assert replayed.all[2].result == "replayed_2"
+    assert replayed.success_count == 2
+    assert [item.index for item in replayed.succeeded()] == [0, 2]
+    assert replayed.get_results() == [None, "replayed_2"]
+
+
+def test_execute_keeps_branches_that_return_none():
+    """Branches returning None appear in succeeded() and get_results()."""
+    executables = [
+        Executable(index, partial(lambda value: value, value))
+        for index, value in enumerate([None, 10, None, 30])
+    ]
+    executor = _make_executor(executables, max_concurrency=2)
+    execution_state, executor_context = _make_executor_mocks()
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert result.success_count == 4
+    assert len(result.succeeded()) == 4
+    assert result.get_results() == [None, 10, None, 30]
 
 
 def test_replay_without_record_falls_back_to_checkpoint_derivation():

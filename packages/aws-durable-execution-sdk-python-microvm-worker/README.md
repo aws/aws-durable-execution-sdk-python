@@ -35,7 +35,7 @@ if __name__ == "__main__":
     worker.wait()
 ```
 
-The worker needs `handler`, `routes`, or both. A handler is a plain function. An `async def` function, or an object whose `__call__` is `async def`, raises `TypeError`. A handler that returns an awaitable fails its job with a `TypeError`, because the worker cannot run it. The handler's return value becomes the durable function's result, and must be JSON-serializable. An exception fails the durable operation with the exception's class name and message. `context.cancelled` is set when the durable function stops waiting, for example after a heartbeat timeout, and when Lambda calls the `terminate` hook. Python cannot stop a running thread, so the handler should check the event and stop its work.
+The worker needs `handler`, `routes`, or both. A handler is a plain function. An `async def` function, or an object whose `__call__` is `async def`, raises `TypeError`. A plain function that returns a coroutine fails its job with `ResultSerializationError`, because a coroutine is not JSON-serializable. Python then warns that the coroutine was never awaited. The handler's return value becomes the durable function's result, and must be JSON-serializable. An exception fails the durable operation with the exception's class name and message. `context.cancelled` is set when the durable function stops waiting, for example after a heartbeat timeout, and when Lambda calls the `terminate` hook. Python cannot stop a running thread, so the handler should check the event and stop its work.
 
 `start_microvm_worker` serves in a daemon thread and returns. So the entry point ends with `worker.wait()`, which blocks until `worker.close()`.
 
@@ -211,6 +211,6 @@ The worker needs boto3 1.43.35 or later, the first release with the `lambda-micr
 
 These rules apply to the `handler` and the route handlers that you pass to `start_microvm_worker`. Each rule states what happens if a handler breaks it.
 
-1. Write each handler as a plain function. To run async code, call `asyncio.run` inside the handler. The worker runs each job in a thread of its own, and that thread has no running event loop. So `asyncio.run` can start one there. An `async def` handler makes `start_microvm_worker` raise `TypeError`, and a handler that returns an awaitable fails each of its jobs. See [Usage](#usage).
+1. Write each handler as a plain function. To run async code, call `asyncio.run` inside the handler. The worker runs each job in a thread of its own, and that thread has no running event loop. So `asyncio.run` can start one there. An `async def` handler makes `start_microvm_worker` raise `TypeError`, and a handler that returns a coroutine fails each of its jobs with `ResultSerializationError`. See [Usage](#usage).
 2. Return a JSON-serializable value of at most 256 KB. The worker reports any other value as a failure of the job. So the durable function raises `MicrovmJobFailedError`. Store a larger result elsewhere, for example in S3, and return its key. See [Reporting](#reporting).
 3. Pass a `logger` that does not raise. The worker drops each line whose logger raises, and it continues. So that line is lost, and nothing reports the loss. See [Logging](#logging).

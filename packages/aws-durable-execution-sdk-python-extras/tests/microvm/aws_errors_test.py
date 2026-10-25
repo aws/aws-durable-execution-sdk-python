@@ -49,7 +49,7 @@ def response(request_id: Any = "req-1", code: str = "ThrottlingException") -> An
         ({"ResponseMetadata": {"RequestId": ""}}, ""),
         ({"ResponseMetadata": {"RequestId": 7}}, ""),
         ({"ResponseMetadata": {}}, ""),
-        ({"ResponseMetadata": "req-1"}, ""),
+        ({"ResponseMetadata": None}, ""),
         ({}, ""),
         (None, ""),
         ("req-1", ""),
@@ -127,14 +127,21 @@ def test_returns_the_error_itself_when_it_gets_no_request_id(
     assert error.__cause__ is None
 
 
-def test_returns_the_error_itself_when_its_class_builds_str_otherwise() -> None:
+def test_copies_an_error_whose_class_builds_str_otherwise() -> None:
+    """The copy shows the same ``str()`` as the error. So the step records
+    the same message, and the strategy still receives the error."""
+
     class FixedMessageError(ClientError):
         def __str__(self) -> str:
             return "fixed"
 
     error = FixedMessageError(response(), "RunMicrovm")
 
-    assert add_request_id("RunMicrovm", error) is error
+    labelled = add_request_id("RunMicrovm", error)
+
+    assert type(labelled) is FixedMessageError
+    assert str(labelled) == "fixed"
+    assert vars(labelled)["_original_error"] is error
 
 
 def test_copies_a_subclass_whose_init_takes_other_arguments() -> None:

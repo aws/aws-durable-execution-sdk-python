@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import boto3
 from botocore.config import Config
@@ -262,7 +262,8 @@ def microvm(
         ValueError: When the JSON of ``job_input`` is over
             :data:`MAX_JOB_INPUT_BYTES` UTF-8 bytes. No durable operation
             starts.
-        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
+        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries, or
+            rejects the config, for example an empty ``image_identifier``.
         MicrovmNotRunningError: When ``CreateMicrovmAuthToken`` reports that
             the MicroVM no longer exists. It is a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
@@ -306,8 +307,13 @@ def step_retry_strategy(
     )
 
 
-def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> int:
+def _validate_base(name: str, timeout: Duration) -> int:
     """Validate the settings that every MicroVM operation shares.
+
+    ``image_identifier`` and ``execution_role_arn`` are not checked here.
+    The boto3 client rejects an empty value before it sends ``RunMicrovm``,
+    and the service rejects any other invalid value. Either way, the launch
+    step fails, and the operation raises ``MicrovmLaunchError``.
 
     Returns:
         The timeout in seconds.
@@ -317,12 +323,6 @@ def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> i
     """
     if not isinstance(name, str) or not name:
         msg = "a MicroVM operation requires a non-empty name"
-        raise ValidationError(msg)
-    if not config.image_identifier:
-        msg = f'MicroVM "{name}": image_identifier is required'
-        raise ValidationError(msg)
-    if not config.execution_role_arn:
-        msg = f'MicroVM "{name}": execution_role_arn is required'
         raise ValidationError(msg)
     return _validate_timeout(name, "timeout", timeout)
 
@@ -517,20 +517,14 @@ class _MicrovmScope:
         port = DEFAULT_MICROVM_PORT if request.port is None else request.port
 
         def attempt(step_context: StepContext) -> None:
-            # The launch records an endpoint for every HTTP delivery. So a
-            # missing endpoint is a defect, not a transient failure. The
-            # default retry strategy does not retry RuntimeError.
-            if launched.endpoint is None:
-                msg = (
-                    f"the launch recorded no endpoint for MicroVM "
-                    f"{launched.microvm_id}, so the job cannot be sent over HTTP"
-                )
-                raise RuntimeError(msg)
             client = self._client()
             # The state check before delivery and the request's retries share
             # one window. So the wait for a resume counts toward it.
             window_started_at = time.monotonic()
-            endpoint = launched.endpoint
+            # _launch_call raises when RunMicrovm returns no endpoint for an
+            # HTTP delivery. The launch step checkpoints only what
+            # _launch_call returned. So an HTTP launch always has an endpoint.
+            endpoint = cast("str", launched.endpoint)
             recheck: Callable[[float], str | None] | None = None
             if resume:
                 require_time_for_call(remaining_seconds)
@@ -745,7 +739,7 @@ class _OperationScope(_MicrovmScope):
             TypeError: When ``job_input`` is not JSON-serializable.
             ValueError: When the JSON of ``job_input`` is too large.
         """
-        timeout_seconds = _validate_base(name, config, config.timeout)
+        timeout_seconds = _validate_base(name, config.timeout)
         heartbeat_timeout_seconds = _validate_heartbeat(name, config.heartbeat_timeout)
         request = config.request or MicrovmRequestConfig()
         retry_window_seconds = _validate_request(name, request)
