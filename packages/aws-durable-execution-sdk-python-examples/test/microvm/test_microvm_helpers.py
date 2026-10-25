@@ -1,4 +1,4 @@
-"""Tests for expect_microvm_terminated with a fake client and a fake clock."""
+"""Tests for the MicroVM cloud-test helpers, with fake clients and a fake clock."""
 
 from typing import Any
 
@@ -6,9 +6,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 from test.microvm.microvm_helpers import (
+    LAUNCH_TIMEOUT_SECONDS,
     POLL_INTERVAL_SECONDS,
+    STATE_TIMEOUT_SECONDS,
     TIMEOUT_SECONDS,
     expect_microvm_terminated,
+    find_launched_microvm_id,
+    wait_for_microvm_state,
 )
 
 
@@ -102,3 +106,157 @@ def test_raises_another_get_microvm_error():
 
     with pytest.raises(ClientError, match="AccessDeniedException"):
         check(client, clock)
+
+
+def wait(client: FakeMicrovmsClient, clock: FakeClock) -> list[str]:
+    return wait_for_microvm_state(
+        "mvm-1", "SUSPENDED", client=client, sleep=clock.sleep, clock=clock
+    )
+
+
+def test_wait_returns_the_states_seen_until_the_expected_state():
+    client = FakeMicrovmsClient(
+        ["RUNNING", "RUNNING", "SUSPENDING", "SUSPENDED", "RUNNING"]
+    )
+    clock = FakeClock()
+
+    assert wait(client, clock) == ["RUNNING", "SUSPENDING", "SUSPENDED"]
+    assert len(client.requests) == 4
+    assert clock.sleeps == [POLL_INTERVAL_SECONDS] * 3
+
+
+@pytest.mark.parametrize("state", ["TERMINATING", "TERMINATED"])
+def test_wait_fails_at_once_for_an_ended_microvm(state):
+    client = FakeMicrovmsClient(["RUNNING", state])
+    clock = FakeClock()
+
+    with pytest.raises(AssertionError, match=f"is {state} before it was SUSPENDED"):
+        wait(client, clock)
+
+    assert len(client.requests) == 2
+
+
+def test_wait_fails_at_once_for_a_microvm_that_get_microvm_does_not_find():
+    client = FakeMicrovmsClient([client_error("ResourceNotFoundException")])
+    clock = FakeClock()
+
+    with pytest.raises(AssertionError, match="did not find MicroVM mvm-1"):
+        wait(client, clock)
+
+    assert clock.sleeps == []
+
+
+def test_wait_fails_after_the_timeout():
+    client = FakeMicrovmsClient(["RUNNING"])
+    clock = FakeClock()
+
+    with pytest.raises(AssertionError, match="was not SUSPENDED within 150 seconds"):
+        wait(client, clock)
+
+    assert sum(clock.sleeps) == STATE_TIMEOUT_SECONDS
+
+
+def test_wait_raises_another_get_microvm_error():
+    client = FakeMicrovmsClient([client_error("AccessDeniedException")])
+    clock = FakeClock()
+
+    with pytest.raises(ClientError, match="AccessDeniedException"):
+        wait(client, clock)
+
+
+def launch_event(name: str, microvm_id: str) -> dict[str, Any]:
+    return {
+        "EventType": "StepSucceeded",
+        "Name": name,
+        "StepSucceededDetails": {
+            "Result": {
+                "Payload": (
+                    f'{{"microvmId": "{microvm_id}", "delivery": "http", '
+                    '"resumeBeforeDelivery": true}'
+                )
+            }
+        },
+    }
+
+
+class FakeLambdaClient:
+    """Answers GetDurableExecutionHistory from a list of answers, in order.
+
+    Each answer is a list of pages, or an exception. After the list ends, it
+    repeats the last answer. Each page is a list of events. Every page but the
+    last carries a NextMarker.
+    """
+
+    def __init__(self, answers: list[Any]) -> None:
+        self._answers = answers
+        self._polls = 0
+        self.requests: list[dict[str, Any]] = []
+
+    def get_durable_execution_history(self, **request: Any) -> dict[str, Any]:
+        self.requests.append(request)
+        if "Marker" not in request:
+            self._polls += 1
+        answer = self._answers[min(self._polls, len(self._answers)) - 1]
+        if isinstance(answer, BaseException):
+            raise answer
+        index = int(request.get("Marker", "0"))
+        page: dict[str, Any] = {"Events": answer[index]}
+        if index + 1 < len(answer):
+            page["NextMarker"] = str(index + 1)
+        return page
+
+
+def find(client: FakeLambdaClient, clock: FakeClock) -> str:
+    return find_launched_microvm_id(
+        "arn:execution", "s.launch", client=client, sleep=clock.sleep, clock=clock
+    )
+
+
+def test_find_reads_the_microvm_id_from_a_later_history_page():
+    client = FakeLambdaClient(
+        [[[{"EventType": "ExecutionStarted"}], [launch_event("s.launch", "mvm-1")]]]
+    )
+    clock = FakeClock()
+
+    assert find(client, clock) == "mvm-1"
+    assert client.requests == [
+        {"DurableExecutionArn": "arn:execution", "IncludeExecutionData": True},
+        {
+            "DurableExecutionArn": "arn:execution",
+            "IncludeExecutionData": True,
+            "Marker": "1",
+        },
+    ]
+    assert clock.sleeps == []
+
+
+def test_find_reads_again_until_the_launch_step_succeeds():
+    client = FakeLambdaClient(
+        [
+            client_error("ResourceNotFoundException"),
+            [[launch_event("s.session", "ignored")]],
+            [[launch_event("s.session", "ignored"), launch_event("s.launch", "mvm-1")]],
+        ]
+    )
+    clock = FakeClock()
+
+    assert find(client, clock) == "mvm-1"
+    assert clock.sleeps == [POLL_INTERVAL_SECONDS] * 2
+
+
+def test_find_fails_after_the_timeout():
+    client = FakeLambdaClient([[[{"EventType": "ExecutionStarted"}]]])
+    clock = FakeClock()
+
+    with pytest.raises(AssertionError, match="s.launch did not succeed within 120"):
+        find(client, clock)
+
+    assert sum(clock.sleeps) == LAUNCH_TIMEOUT_SECONDS
+
+
+def test_find_raises_another_history_error():
+    client = FakeLambdaClient([client_error("AccessDeniedException")])
+    clock = FakeClock()
+
+    with pytest.raises(ClientError, match="AccessDeniedException"):
+        find(client, clock)

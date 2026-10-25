@@ -26,6 +26,15 @@ def test_the_session_function_timeout_covers_the_http_retry_window():
     assert entry["timeout"] >= HTTP_DELIVERY_MIN_TIMEOUT_SECONDS
 
 
+def test_the_suspend_session_function_timeout_covers_the_http_retry_window():
+    # Every session job goes over HTTP. The wait for a resume counts toward
+    # the retry window. So the same minimum applies.
+    entry = catalog_entry("MicroVM Session Suspend")
+
+    assert entry["usesMicrovm"] is True
+    assert entry["timeout"] >= HTTP_DELIVERY_MIN_TIMEOUT_SECONDS
+
+
 def test_the_run_job_function_uses_the_global_timeout():
     # The input is small, so the job goes in the run hook. The run hook
     # delivery adds no Lambda time for the boot.
