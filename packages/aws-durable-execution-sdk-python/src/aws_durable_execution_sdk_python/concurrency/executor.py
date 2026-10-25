@@ -53,7 +53,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from aws_durable_execution_sdk_python.config import CompletionConfig
     from aws_durable_execution_sdk_python.context import DurableContext
-    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import (
         CheckpointedResult,
@@ -129,8 +128,8 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         executables: list[Executable[CallableType]],
         max_concurrency: int | None,
         completion_config: CompletionConfig,
-        sub_type_top: OperationSubType,
-        sub_type_iteration: OperationSubType,
+        sub_type_top: str,
+        sub_type_iteration: str,
         name_prefix: str,
         serdes: SerDes | None,
         operation_id_namespace: OperationIdNamespace,
@@ -702,7 +701,6 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             operation_identifier=operation_identifier,
             config=ChildConfig(
                 serdes=self.item_serdes or self.serdes,
-                sub_type=self.sub_type_iteration,
                 is_virtual=is_virtual,
             ),
         )

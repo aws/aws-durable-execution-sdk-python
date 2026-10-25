@@ -266,6 +266,25 @@ def test_basic_success_record():
     assert "result" not in op  # results omitted by default
 
 
+def test_record_writes_subtype():
+    """A subtype lands in the record as the string the service stores."""
+    exporter = CaptureExporter()
+    factory = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[exporter])
+    )
+    _run(
+        factory,
+        ops=[
+            _step("charge", sub_type="OrderCharge"),
+            _step("settle", op_type=OperationType.WAIT, sub_type=OperationSubType.WAIT),
+        ],
+    )
+    ops = {op["name"]: op for op in exporter.records[0]["operations"]}
+    assert ops["charge"]["subType"] == "OrderCharge"
+    assert ops["settle"]["subType"] == "Wait"
+    assert json.dumps(ops["settle"]["subType"]) == '"Wait"'
+
+
 def test_on_failure_success_emits_nothing():
     exporter = CaptureExporter()
     factory = durable_execution_telemetry(

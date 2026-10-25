@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.config import (
     ChildConfig,
     MapConfig,
@@ -3264,8 +3265,8 @@ def test_durable_execution_preserves_nested_nondeterminism_error():
     mock_client.checkpoint.assert_not_called()
 
 
-def test_durable_execution_replays_child_context_with_step_subtype():
-    """A CONTEXT/Step checkpoint remains valid for an unchanged child replay."""
+def test_durable_execution_replays_child_context_with_custom_subtype():
+    """A CONTEXT checkpoint with a custom subtype replays an unchanged child."""
     mock_client = Mock(spec=DurableServiceClient)
     child_id = OperationIdNamespace().create_id_for_step(1)
     execution_operation = Operation(
@@ -3278,7 +3279,7 @@ def test_durable_execution_replays_child_context_with_step_subtype():
         operation_id=child_id,
         operation_type=OperationType.CONTEXT,
         status=OperationStatus.SUCCEEDED,
-        sub_type=OperationSubType.STEP,
+        sub_type="OrderSaga",
         name="child",
         context_details=ContextDetails(result=json.dumps("cached")),
     )
@@ -3302,13 +3303,112 @@ def test_durable_execution_replays_child_context_with_step_subtype():
         return context.run_in_child_context(
             child_body,
             name="child",
-            config=ChildConfig(sub_type=OperationSubType.STEP),
+            config=ChildConfig(sub_type="OrderSaga"),
         )
 
     result = test_handler(invocation_input, _make_lambda_context())
 
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     assert child_body_calls == []
+
+
+def test_durable_execution_replays_state_recorded_by_core_2x():
+    """State loaded from the service holds plain-string SDK subtypes.
+
+    Core 2.x recorded only SDK subtypes. Replay compares them with the member
+    the handler puts on each identifier, so a 2.x execution resumes under 3.0
+    without re-running any completed body.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    root = OperationIdNamespace()
+    child_id = root.create_id_for_step(1)
+    map_id = root.create_id_for_step(2)
+    iteration_id = OperationIdNamespace(map_id).create_id_for_step(0)
+    step_id = root.create_id_for_step(3)
+
+    def op(**kwargs: Any) -> Operation:
+        return Operation.from_dict(kwargs)
+
+    initial = [
+        op(
+            Id="exec1",
+            Type="EXECUTION",
+            Status="STARTED",
+            ExecutionDetails={"InputPayload": "{}"},
+        ),
+        op(
+            Id=child_id,
+            Type="CONTEXT",
+            Status="SUCCEEDED",
+            SubType="RunInChildContext",
+            Name="child",
+            ContextDetails={"Result": json.dumps("child")},
+        ),
+        op(
+            Id=map_id,
+            Type="CONTEXT",
+            Status="SUCCEEDED",
+            SubType="Map",
+            Name="map",
+            ContextDetails={
+                "Result": json.dumps({"MapResult": {"Items": [], "Summary": None}}),
+                "ReplayChildren": True,
+            },
+        ),
+        op(
+            Id=iteration_id,
+            Type="CONTEXT",
+            Status="SUCCEEDED",
+            SubType="MapIteration",
+            Name="map-item-0",
+            ParentId=map_id,
+            ContextDetails={"Result": json.dumps(2)},
+        ),
+        op(
+            Id=step_id,
+            Type="STEP",
+            Status="SUCCEEDED",
+            SubType="Step",
+            Name="step",
+            StepDetails={"Result": json.dumps("stepped")},
+        ),
+    ]
+    for operation in initial:
+        assert operation.sub_type is None or type(operation.sub_type) is str
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=initial, next_marker=""
+        ),
+        service_client=mock_client,
+    )
+    body_calls: list[str] = []
+
+    def child_body(_child: DurableContext) -> str:
+        body_calls.append("child")
+        return "child"
+
+    def map_item(_child: DurableContext, item: int, _index: int, _items: Any) -> int:
+        body_calls.append("item")
+        return item * 2
+
+    def step_body(_step: Any) -> str:
+        body_calls.append("step")
+        return "stepped"
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        child = context.run_in_child_context(child_body, name="child")
+        items: BatchResult[int] = context.map([1], map_item, name="map")
+        step = context.step(step_body, name="step")
+        return f"{child}:{items.get_results()}:{step}"
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value, result
+    assert body_calls == []
 
 
 @pytest.mark.parametrize(

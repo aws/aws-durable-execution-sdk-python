@@ -53,7 +53,7 @@ def test_handle_wait_for_callback_timeout_scenarios(durable_runner):
     wait_for_callback_ops = [
         operation
         for operation in result.get_all_operations()
-        if operation.sub_type is OperationSubType.WAIT_FOR_CALLBACK
+        if operation.sub_type == OperationSubType.WAIT_FOR_CALLBACK
     ]
     assert len(wait_for_callback_ops) == 1
     wait_for_callback_error = wait_for_callback_ops[0].error

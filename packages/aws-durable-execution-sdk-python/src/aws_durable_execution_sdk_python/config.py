@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+import string
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -18,7 +19,6 @@ T = TypeVar("T")
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
     from aws_durable_execution_sdk_python.retries import RetryDecision
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.types import SummaryGenerator
@@ -481,13 +481,69 @@ class StepSemantics(Enum):
     AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
 
 
+_SUB_TYPE_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_")
+_SUB_TYPE_MAX_LENGTH = 32
+
+
+def _validate_sub_type(sub_type: str | None) -> None:
+    """Raise ValidationError when sub_type is set and the service would reject it.
+
+    The service accepts 1 to 32 characters from A-Z, a-z, 0-9, hyphen, and
+    underscore. None and "" select the SDK default, so both are accepted.
+    Checking here raises before any checkpoint is sent, so a step body never
+    runs under a subtype the service will reject.
+    """
+    if not sub_type:
+        return
+    if (
+        len(sub_type) > _SUB_TYPE_MAX_LENGTH
+        or not set(sub_type) <= _SUB_TYPE_CHARACTERS
+    ):
+        msg = (
+            f"sub_type must be 1 to {_SUB_TYPE_MAX_LENGTH} characters from "
+            f"A-Z, a-z, 0-9, hyphen, and underscore, got: {sub_type!r}"
+        )
+        raise ValidationError(msg)
+
+
 @dataclass(frozen=True)
 class StepConfig:
-    """Configuration for a step."""
+    """Configuration for a step.
+
+    Args:
+        retry_strategy: Decides whether and when a failed attempt is retried.
+            If None, the SDK uses its default retry strategy.
+
+        step_semantics: How often one attempt may run the function.
+            AT_LEAST_ONCE_PER_RETRY (the default) checkpoints START without
+            waiting, so an interrupted attempt runs again on the next
+            invocation. AT_MOST_ONCE_PER_RETRY waits for the START checkpoint
+            first, and an interrupted attempt fails with StepInterruptedError
+            and goes to the retry strategy instead of running again.
+
+        serdes: Custom serialization/deserialization for the step result.
+            If None, uses the default JSON serializer.
+
+        sub_type: Subtype recorded in the checkpoint, in replay validation, and
+            in plugin events. The default is "Step".
+            A custom operation built from steps uses this to label its steps,
+            so history and plugins can filter them without parsing names.
+            The value must be 1 to 32 characters from A-Z, a-z, 0-9, hyphen,
+            and underscore; the config raises ValidationError otherwise. None
+            or an empty string selects the default. Do not reuse an
+            ``OperationSubType`` value: those label the SDK's own operations.
+            Replay compares the subtype with the checkpoint. So changing the
+            subtype of an existing step is a breaking change for executions
+            in flight.
+    """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE_PER_RETRY
     serdes: SerDes | None = None
+    sub_type: str | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        _validate_sub_type(self.sub_type)
 
 
 @dataclass(frozen=True)
@@ -502,9 +558,18 @@ class ChildConfig(Generic[T]):
             Applied at the handler level to serialize the entire BatchResult object.
             If None, uses the default JSON serializer for BatchResult.
 
-        sub_type: Operation subtype identifier used for tracking and debugging.
-            Examples: OperationSubType.MAP_ITERATION, OperationSubType.PARALLEL_BRANCH.
-            Used internally by the execution engine for operation classification.
+        sub_type: Subtype recorded in the checkpoint, in replay validation, and
+            in plugin events. The default is "RunInChildContext".
+            A custom operation built from several durable operations uses this
+            to label its child context, so history and plugins can filter it
+            without parsing names. The value must be 1 to 32 characters from
+            A-Z, a-z, 0-9, hyphen, and underscore; the config raises
+            ValidationError otherwise. None or an empty string selects the
+            default. Do not reuse an ``OperationSubType`` value: those label
+            the SDK's own operations.
+            Replay compares the subtype with the checkpoint. So changing the
+            subtype of an existing child context is a breaking change for
+            executions in flight.
 
         summary_generator: Function generating the checkpoint payload for large
             results (>256KB). When the serialized result exceeds CHECKPOINT_SIZE_LIMIT,
@@ -528,9 +593,12 @@ class ChildConfig(Generic[T]):
     """
 
     serdes: SerDes | None = None
-    sub_type: OperationSubType | None = None
+    sub_type: str | None = None
     summary_generator: SummaryGenerator | None = None
     is_virtual: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_sub_type(self.sub_type)
 
 
 @dataclass(frozen=True)
@@ -649,11 +717,45 @@ class InvokeConfig(Generic[P, R]):
 
 @dataclass(frozen=True)
 class CallbackConfig:
-    """Configuration for callbacks."""
+    """Configuration for callbacks.
+
+    Args:
+        timeout: Maximum time to wait for the callback result. The default,
+            a zero Duration, means no timeout.
+
+        heartbeat_timeout: Maximum time between heartbeats before the callback
+            fails. The default, a zero Duration, means no heartbeat timeout.
+
+        serdes: Custom deserialization for the callback result.
+            If None, the payload is returned as is, without JSON parsing.
+
+        sub_type: Subtype recorded in the checkpoint, in replay validation, and
+            in plugin events. The default is "Callback".
+            A custom operation built from callbacks uses this to label its
+            callbacks, so history and plugins can filter them without parsing
+            names. The value must be 1 to 32 characters from A-Z, a-z, 0-9,
+            hyphen, and underscore; the config raises ValidationError
+            otherwise. None or an empty string selects the default. Do not
+            reuse an ``OperationSubType`` value: those label the SDK's own
+            operations. Under
+            ``wait_for_callback`` the subtype labels the callback the
+            operation creates; the surrounding context keeps the subtype
+            "WaitForCallback".
+            Replay compares the subtype with the checkpoint. So changing the
+            subtype of an existing callback is a breaking change for
+            executions in flight.
+    """
 
     timeout: Duration = field(default_factory=Duration)
     heartbeat_timeout: Duration = field(default_factory=Duration)
     serdes: SerDes | None = None
+    # Keyword-only, so the positional order of every config, including
+    # WaitForCallbackConfig(timeout, heartbeat_timeout, serdes, retry_strategy),
+    # is unchanged from 2.x.
+    sub_type: str | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        _validate_sub_type(self.sub_type)
 
     @property
     def timeout_seconds(self) -> int:

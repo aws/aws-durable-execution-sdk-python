@@ -20,7 +20,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationAction,
     OperationStatus,
-    OperationSubType,
     OperationType as ServiceOperationType,
     OperationUpdate,
 )
@@ -89,7 +88,11 @@ def _extract_error(operation: Operation) -> ErrorObject | None:
 class OperationInfo:
     operation_id: str
     operation_type: OperationType
-    sub_type: OperationSubType | None
+    sub_type: str | None
+    """The recorded subtype as a plain ``str``, or None for the execution root.
+    Compare it with ``==`` against an ``OperationSubType`` member, which
+    equals its value, or against a caller-defined string. Do not read
+    ``.value`` or compare with ``is``."""
     name: str | None
     parent_id: str | None
     start_time: datetime.datetime | None

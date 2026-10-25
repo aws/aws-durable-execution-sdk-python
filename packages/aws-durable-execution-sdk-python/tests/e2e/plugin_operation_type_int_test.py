@@ -107,7 +107,7 @@ def test_builtin_operation_categories_survive_suspend_and_replay() -> None:
     )
     assert plugin.invocation_ends[-1].status is InvocationStatus.SUCCEEDED
 
-    expected = {
+    expected: dict[str, OperationType] = {
         OperationSubType.STEP: OperationType.STEP,
         OperationSubType.WAIT_FOR_CONDITION: OperationType.STEP,
         OperationSubType.WAIT: OperationType.WAIT,
@@ -156,7 +156,7 @@ def test_child_category_is_independent_of_subtype_on_resume(is_virtual: bool) ->
         return context.run_in_child_context(
             child,
             name="custom-subtype-child",
-            config=ChildConfig(sub_type=OperationSubType.STEP, is_virtual=is_virtual),
+            config=ChildConfig(sub_type="OrderSaga", is_virtual=is_virtual),
         )
 
     wrapped = durable_execution(handler, plugins=[plugin_factory(plugin)])
@@ -187,7 +187,7 @@ def test_child_category_is_independent_of_subtype_on_resume(is_virtual: bool) ->
     assert completed
     for info in [*starts, *ends, *completed]:
         assert info.operation_type is OperationType.CONTEXT
-        assert info.sub_type is OperationSubType.STEP
+        assert info.sub_type == "OrderSaga"
         assert info.operation_id == starts[0].operation_id
 
     snapshots = [
@@ -202,4 +202,4 @@ def test_child_category_is_independent_of_subtype_on_resume(is_virtual: bool) ->
         assert snapshots
         for info in snapshots:
             assert info.operation_type is OperationType.CONTEXT
-            assert info.sub_type is OperationSubType.STEP
+            assert info.sub_type == "OrderSaga"

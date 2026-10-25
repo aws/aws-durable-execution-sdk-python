@@ -8,6 +8,7 @@ import json
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
+    OperationSubType,
     OperationType,
 )
 
@@ -947,6 +948,28 @@ def test_checkpoint_durable_execution_request_serialization():
     # Test round-trip
     round_trip = CheckpointDurableExecutionRequest.from_dict(result_data, execution_arn)
     assert round_trip == request_obj
+
+
+def test_checkpoint_durable_execution_request_keeps_custom_sub_type():
+    """The local checkpoint endpoint accepts a caller-defined SubType as a string."""
+    execution_arn = (
+        "arn:aws:lambda:us-east-1:123456789012:function:my-function:execution:test"
+    )
+    data = {
+        "CheckpointToken": "checkpoint-123",
+        "Updates": [
+            {"Id": "op-1", "Type": "STEP", "Action": "START", "SubType": "OrderCharge"},
+            {"Id": "op-2", "Type": "CONTEXT", "Action": "START", "SubType": "Map"},
+        ],
+    }
+
+    request_obj = CheckpointDurableExecutionRequest.from_dict(data, execution_arn)
+
+    assert request_obj.updates is not None
+    assert request_obj.updates[0].sub_type == "OrderCharge"
+    assert request_obj.updates[1].sub_type == OperationSubType.MAP
+    assert type(request_obj.updates[1].sub_type) is str
+    assert request_obj.to_dict() == {"DurableExecutionArn": execution_arn, **data}
 
 
 def test_checkpoint_durable_execution_request_minimal():
@@ -3548,25 +3571,34 @@ def test_events_to_operations_preserves_sub_type():
     operations = events_to_operations([event])
 
     assert len(operations) == 1
-    assert operations[0].sub_type is not None
-    assert operations[0].sub_type.value == "Step"
+    assert operations[0].sub_type == OperationSubType.STEP
+    assert type(operations[0].sub_type) is str
 
 
-def test_events_to_operations_invalid_sub_type():
-    """Test events_to_operations raises InvalidParameterValueException when sub_type is invalid."""
-    invalid_sub_type: str = "INVALID_SUB_TYPE"
+def test_events_to_operations_keeps_custom_sub_type():
+    """A caller-defined subtype is kept as the string the event carries."""
     event = Event(
         event_type="StepStarted",
         event_timestamp=datetime.datetime(2023, 1, 1, 0, 0, 0, tzinfo=datetime.UTC),
         operation_id="step-1",
-        sub_type=invalid_sub_type,
+        sub_type="OrderCharge",
     )
 
-    with pytest.raises(
-        InvalidParameterValueException,
-        match=f"'{invalid_sub_type}' is not a valid OperationSubType",
-    ):
-        events_to_operations([event])
+    operations = events_to_operations([event])
+
+    assert len(operations) == 1
+    assert operations[0].sub_type == "OrderCharge"
+    assert type(operations[0].sub_type) is str
+
+
+def test_events_to_operations_treats_empty_sub_type_as_none():
+    event = Event(
+        event_type="StepStarted",
+        event_timestamp=datetime.datetime(2023, 1, 1, 0, 0, 0, tzinfo=datetime.UTC),
+        operation_id="step-1",
+        sub_type="",
+    )
+    assert events_to_operations([event])[0].sub_type is None
 
 
 def test_invocation_completed_details_to_json_dict():

@@ -761,7 +761,7 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
             entry: dict[str, Any] = {"id": op.operation_id, "name": op.name}
             entry["type"] = op.operation_type.value
             if op.sub_type is not None:
-                entry["subType"] = op.sub_type.value
+                entry["subType"] = op.sub_type
             if op.parent_id is not None:
                 entry["parentId"] = op.parent_id
             entry["status"] = op.status.value if op.status is not None else "UNKNOWN"

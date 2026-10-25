@@ -45,7 +45,7 @@ def _attempt_record(hook: str, info: OperationInfo) -> dict[str, Any]:
     if info.name is not None:
         record["name"] = info.name
     if info.sub_type is not None:
-        record["subType"] = info.sub_type.value
+        record["subType"] = info.sub_type
     if info.parent_id is not None:
         record["parentId"] = info.parent_id
     if info.attempt is not None:

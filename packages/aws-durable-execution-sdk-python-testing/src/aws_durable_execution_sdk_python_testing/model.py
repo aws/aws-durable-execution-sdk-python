@@ -17,22 +17,17 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CallbackOptions,
     ChainedInvokeDetails,
-    ChainedInvokeOptions,
     ContextDetails,
-    ContextOptions,
     ErrorObject,
     ExecutionDetails,
     Operation,
     OperationAction,
     OperationStatus,
-    OperationSubType,
     OperationType,
     OperationUpdate,
     StepDetails,
-    StepOptions,
     TimestampConverter,
     WaitDetails,
-    WaitOptions,
 )
 from aws_durable_execution_sdk_python.types import (
     LambdaContext as LambdaContextProtocol,
@@ -1330,7 +1325,7 @@ class EventCreationContext:
 
     @property
     def sub_type(self) -> str | None:
-        return self.operation.sub_type.value if self.operation.sub_type else None
+        return self.operation.sub_type
 
     def get_retry_details(self) -> RetryDetails | None:
         if not self.operation.step_details or not self.operation_update:
@@ -2651,14 +2646,6 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
             event_config.operation_status or OperationStatus.PENDING
         )
 
-        # Parse sub_type
-        sub_type: OperationSubType | None = None
-        if event.sub_type:
-            try:
-                sub_type = OperationSubType(event.sub_type)
-            except ValueError as e:
-                raise InvalidParameterValueException(str(e)) from e
-
         # Create base operation
         operation = Operation(
             operation_id=event.operation_id,
@@ -2666,7 +2653,7 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
             status=status,
             name=event.name,
             parent_id=event.parent_id,
-            sub_type=sub_type,
+            sub_type=event.sub_type or None,
             start_timestamp=event.event_timestamp,
         )
 
@@ -3161,45 +3148,7 @@ class CheckpointDurableExecutionRequest:
     ) -> CheckpointDurableExecutionRequest:
         updates = None
         if updates_data := data.get("Updates"):
-            updates = []
-            for update_data in updates_data:
-                # Map dictionary fields to OperationUpdate constructor parameters
-                operation_update = OperationUpdate(
-                    operation_id=update_data["Id"],
-                    operation_type=OperationType(update_data["Type"]),
-                    action=OperationAction(update_data["Action"]),
-                    parent_id=update_data.get("ParentId"),
-                    name=update_data.get("Name"),
-                    sub_type=OperationSubType(update_data["SubType"])
-                    if update_data.get("SubType")
-                    else None,
-                    payload=update_data.get("Payload"),
-                    error=ErrorObject.from_dict(update_data["Error"])
-                    if update_data.get("Error")
-                    else None,
-                    context_options=ContextOptions.from_dict(
-                        update_data["ContextOptions"]
-                    )
-                    if update_data.get("ContextOptions")
-                    else None,
-                    step_options=StepOptions.from_dict(update_data["StepOptions"])
-                    if update_data.get("StepOptions")
-                    else None,
-                    wait_options=WaitOptions.from_dict(update_data["WaitOptions"])
-                    if update_data.get("WaitOptions")
-                    else None,
-                    callback_options=CallbackOptions.from_dict(
-                        update_data["CallbackOptions"]
-                    )
-                    if update_data.get("CallbackOptions")
-                    else None,
-                    chained_invoke_options=ChainedInvokeOptions.from_dict(
-                        update_data["ChainedInvokeOptions"]
-                    )
-                    if update_data.get("ChainedInvokeOptions")
-                    else None,
-                )
-                updates.append(operation_update)
+            updates = [OperationUpdate.from_dict(update) for update in updates_data]
 
         return cls(
             durable_execution_arn=durable_execution_arn,

@@ -18,7 +18,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     Operation,
     OperationStatus,
-    OperationSubType,
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.constants import CHECKPOINT_SIZE_LIMIT_BYTES
@@ -71,7 +70,6 @@ class ChildOperationExecutor(OperationExecutor[T]):
         self.operation_identifier = operation_identifier
         self.config = config
         self.is_virtual: bool = config.is_virtual
-        self.sub_type = config.sub_type or OperationSubType.RUN_IN_CHILD_CONTEXT
 
     @staticmethod
     def validate_virtual_checkpoint(
@@ -151,7 +149,6 @@ class ChildOperationExecutor(OperationExecutor[T]):
         if not checkpointed_result.is_existent() and not self.is_virtual:
             start_operation: OperationUpdate = OperationUpdate.create_context_start(
                 identifier=self.operation_identifier,
-                sub_type=self.sub_type,
             )
             # Checkpoint child context START with non-blocking (is_sync=False).
             # This is a fire-and-forget operation for performance - we don't need to wait for
@@ -282,7 +279,6 @@ class ChildOperationExecutor(OperationExecutor[T]):
             success_operation: OperationUpdate = OperationUpdate.create_context_succeed(
                 identifier=self.operation_identifier,
                 payload=payload_to_checkpoint,
-                sub_type=self.sub_type,
                 context_options=ContextOptions(replay_children=replay_children),
             )
             # Checkpoint child context SUCCEED with blocking (is_sync=True, default).
@@ -319,7 +315,6 @@ class ChildOperationExecutor(OperationExecutor[T]):
                 fail_operation: OperationUpdate = OperationUpdate.create_context_fail(
                     identifier=self.operation_identifier,
                     error=error_object,
-                    sub_type=self.sub_type,
                 )
                 # Checkpoint child context FAIL with blocking (is_sync=True, default).
                 # Must ensure the failure state is persisted before raising the exception.

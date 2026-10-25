@@ -1129,7 +1129,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if hasattr(info, "operation_type") and info.operation_type is not None:
             attributes["durable.operation.type"] = info.operation_type.value
         if hasattr(info, "sub_type") and info.sub_type is not None:
-            attributes["durable.operation.subtype"] = info.sub_type.value
+            attributes["durable.operation.subtype"] = info.sub_type
         # STEP user-function spans represent attempts, not durable operations.
         if (
             not (

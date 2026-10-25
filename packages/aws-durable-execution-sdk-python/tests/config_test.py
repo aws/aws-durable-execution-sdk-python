@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.config import (
     ParallelConfig,
     StepConfig,
     StepSemantics,
+    WaitForCallbackConfig,
 )
 from aws_durable_execution_sdk_python.exceptions import ValidationError
 from aws_durable_execution_sdk_python.waits import (
@@ -145,10 +146,39 @@ def test_child_config_with_serdes():
 
 def test_child_config_with_sub_type():
     """Test ChildConfig with sub_type."""
-    sub_type = Mock()
-    config = ChildConfig(sub_type=sub_type)
+    config = ChildConfig(sub_type="OrderSaga")
     assert config.serdes is None
-    assert config.sub_type is sub_type
+    assert config.sub_type == "OrderSaga"
+
+
+def test_step_config_sub_type_defaults_to_none():
+    assert StepConfig().sub_type is None
+    assert StepConfig(sub_type="OrderCharge").sub_type == "OrderCharge"
+
+
+def test_callback_config_sub_type_defaults_to_none():
+    assert CallbackConfig().sub_type is None
+    assert CallbackConfig(sub_type="Approval").sub_type == "Approval"
+    # WaitForCallbackConfig inherits the field and labels the inner callback.
+    assert WaitForCallbackConfig(sub_type="Approval").sub_type == "Approval"
+
+
+def test_sub_type_is_keyword_only_so_positional_order_is_unchanged():
+    """2.x positional construction keeps its meaning; sub_type never takes a slot."""
+    retry = Mock()
+    serdes = Mock()
+    config = WaitForCallbackConfig(
+        Duration.from_seconds(1), Duration.from_seconds(2), serdes, retry
+    )
+    assert config.retry_strategy is retry
+    assert config.sub_type is None
+    assert (
+        StepConfig(retry, StepSemantics.AT_MOST_ONCE_PER_RETRY, serdes).serdes is serdes
+    )
+    # ChildConfig.sub_type keeps its 2.x positional slot; only its type changed.
+    assert ChildConfig(serdes, "OrderSaga").sub_type == "OrderSaga"
+    with pytest.raises(TypeError):
+        StepConfig(retry, StepSemantics.AT_LEAST_ONCE_PER_RETRY, serdes, "OrderCharge")  # type: ignore[misc]
 
 
 def test_child_config_with_summary_generator():
@@ -279,3 +309,35 @@ def test_completion_decision_rejects_outcome_when_not_complete():
 
 
 # endregion Config validation
+
+
+# --- sub_type validation ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sub_type",
+    ["OrderCharge", "a", "A" * 32, "with-hyphen_and_underscore9", None, ""],
+    ids=["custom", "one-char", "max-length", "all-classes", "none", "empty"],
+)
+def test_configs_accept_a_valid_or_default_sub_type(sub_type: str | None) -> None:
+    assert StepConfig(sub_type=sub_type).sub_type == sub_type
+    assert CallbackConfig(sub_type=sub_type).sub_type == sub_type
+    assert ChildConfig(sub_type=sub_type).sub_type == sub_type
+
+
+@pytest.mark.parametrize(
+    "sub_type",
+    ["A" * 33, "Order Charge", "order.charge", "order/charge", "ordér"],
+    ids=["too-long", "space", "dot", "slash", "non-ascii"],
+)
+@pytest.mark.parametrize("config_class", [StepConfig, CallbackConfig, ChildConfig])
+def test_configs_reject_a_sub_type_the_service_rejects(
+    config_class: type, sub_type: str
+) -> None:
+    with pytest.raises(ValidationError, match="1 to 32 characters"):
+        config_class(sub_type=sub_type)
+
+
+def test_sub_type_rejection_names_the_value() -> None:
+    with pytest.raises(ValidationError, match=r"got: 'Order Charge'"):
+        StepConfig(sub_type="Order Charge")

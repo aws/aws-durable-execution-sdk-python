@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from aws_durable_execution_sdk_python import plugin as core_plugin
+from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationStartInfo,
@@ -13,7 +14,6 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     OperationEndInfo,
     OperationStatus,
-    OperationSubType,
     OperationType,
     PluginExecutor,
     PropagationInput,

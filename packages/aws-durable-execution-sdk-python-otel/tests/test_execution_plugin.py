@@ -145,6 +145,34 @@ def test_operation_attributes_use_structural_user_function_marker():
     assert "durable.operation.status" not in user_function_attributes
 
 
+@pytest.mark.parametrize(
+    ("sub_type", "expected"),
+    [
+        (OperationSubType.STEP, "Step"),
+        ("OrderCharge", "OrderCharge"),
+        (None, None),
+    ],
+    ids=["sdk-subtype", "custom-subtype", "no-subtype"],
+)
+def test_operation_attributes_record_subtype(sub_type, expected):
+    """A subtype is a str: an SDK member or a caller-defined string."""
+    plugin, _ = _create_plugin()
+
+    attributes = plugin._operation_attributes(
+        SimpleNamespace(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            sub_type=sub_type,
+            status=OperationStatus.STARTED,
+        )
+    )
+
+    if expected is None:
+        assert "durable.operation.subtype" not in attributes
+    else:
+        assert attributes["durable.operation.subtype"] == expected
+
+
 # ---------------------------------------------------------------------------
 # derive_workflow_span_id
 # ---------------------------------------------------------------------------

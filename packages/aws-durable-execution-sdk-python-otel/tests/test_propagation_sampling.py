@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.plugin import (
     InvocationEndInfo,
     InvocationStartInfo,
@@ -11,7 +12,6 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationEndInfo,
     OperationStartInfo,
     OperationStatus,
-    OperationSubType,
     OperationType,
     PropagationInput,
 )

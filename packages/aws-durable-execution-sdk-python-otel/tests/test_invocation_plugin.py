@@ -778,6 +778,45 @@ def test_invocation_end_closes_callback_child_before_parent_context():
     assert callback_span.end_time <= context_span.end_time <= invocation_span.end_time
 
 
+def test_operation_span_records_custom_subtype_as_plain_string():
+    """A caller-defined subtype reaches the span attribute unchanged."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="step-1",
+            operation_type=OperationType.STEP,
+            sub_type="OrderCharge",
+            name="charge",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="step-1",
+            operation_type=OperationType.STEP,
+            sub_type="OrderCharge",
+            name="charge",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    spans_by_name = {span.name: span for span in exporter.get_finished_spans()}
+    step_span = spans_by_name["charge"]
+    assert step_span.attributes["durable.operation.subtype"] == "OrderCharge"
+    assert step_span.attributes["durable.operation.type"] == OperationType.STEP.value
+
+
 def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     """Verify non-user-function operations are traced beneath the invocation."""
     plugin, exporter = _create_plugin()
