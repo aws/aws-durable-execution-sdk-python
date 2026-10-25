@@ -1,14 +1,21 @@
 # Migrating from 2.x to 3.0
 
-`3.0` is a major release. Its breaking change is the
-[per-invocation plugin factory contract](#register-plugin-factories).
+`3.0` is a major release with three breaking changes:
+
+- the [per-invocation plugin factory contract](#register-plugin-factories)
+- [operation subtypes are strings](#read-subtypes-as-strings), and a caller can
+  set them
+- [`BatchResult` keeps `None` results](#expect-none-in-batch-results)
+
 Upgrade OpenTelemetry instrumentation to `2.x` at the same time as the core SDK
 to `3.x`, including packages delivered through Lambda layers.
 
 Applications that register no plugins, select none through
 `DURABLE_EXECUTION_PLUGINS`, and ship no plugin providers can update their core
-dependency without changing their handler or durable operation calls. If you are
-upgrading from `1.x`, first apply the [1.x to 2.0 migration guide](migration-1.x-to-2.0.md).
+dependency without changing their handler or durable operation calls, with one
+exception: code that reads `BatchResult.get_results()` and cannot handle `None`.
+If you are upgrading from `1.x`, first apply the
+[1.x to 2.0 migration guide](migration-1.x-to-2.0.md).
 
 ## Why upgrade to 3.0
 
@@ -26,8 +33,9 @@ upgrading from `1.x`, first apply the [1.x to 2.0 migration guide](migration-1.x
 ## Porting to 3.0
 
 The changes most likely to touch your code are the `plugins` argument,
-custom entry-point providers, and OTel registrations. Use
-[Finding affected code](#finding-affected-code) to locate them before upgrading.
+custom entry-point providers, OTel registrations, and code that reads an
+operation's subtype. Use [Finding affected code](#finding-affected-code) to
+locate them before upgrading.
 
 | Core 2.x / OTel 1.x | Core 3.x / OTel 2.x |
 | --- | --- |
@@ -36,6 +44,8 @@ custom entry-point providers, and OTel registrations. Use
 | `InvocationOtelPlugin(config)` registration | `InvocationOtelPluginFactory(config)` registration |
 | `ExecutionOtelPlugin(config)` registration | `ExecutionOtelPluginFactory(config)` registration |
 | State on a shared plugin instance | Invocation state on each new plugin; shared resources on the factory |
+| `operation.sub_type.value`, `sub_type is OperationSubType.STEP` | `operation.sub_type`, `sub_type == OperationSubType.STEP` |
+| `get_results()` omits branches that returned `None` | `get_results()` has one entry per succeeded branch |
 
 ### Upgrade dependencies together
 
@@ -45,14 +55,16 @@ For the initial coordinated release, use:
 | --- | --- | --- |
 | `aws-durable-execution-sdk-python` | `3.0.0` | Python 3.11 or later |
 | `aws-durable-execution-sdk-python-otel` | `2.0.0` | Core `>=3.0.0,<4` |
-| `aws-durable-execution-sdk-python-testing` | `1.3.0` | Declares Core `>=2.1.0`, including Core 3; no testing major bump is required |
+| `aws-durable-execution-sdk-python-testing` | `1.4.0` | Core `>=3.0.0`. Earlier releases cannot load a custom subtype |
+| `aws-durable-execution-sdk-python-telemetry-exporter` | `0.0.2` | Core `>=3.0.0,<4`. The published `0.0.1` uses the Core 2 plugin contract |
 
 After these versions are published, update your requirements and lock file:
 
 ```bash
 python -m pip install --upgrade \
   "aws-durable-execution-sdk-python==3.0.0" \
-  "aws-durable-execution-sdk-python-otel==2.0.0"
+  "aws-durable-execution-sdk-python-otel==2.0.0" \
+  "aws-durable-execution-sdk-python-testing==1.4.0"
 python -m pip check
 ```
 
@@ -222,8 +234,8 @@ an individual invocation's cleanup. See the
 [OTel guide](../packages/aws-durable-execution-sdk-python-otel/README.md).
 
 The optional Telemetry Exporter's `durable_execution_telemetry(config)` helper
-already returns a factory in this release, so pass its result directly to
-`plugins`. Do not wrap or cache a plugin returned by that factory. See the
+returns a factory from `0.0.2`, so pass its result directly to `plugins`. Do
+not wrap or cache a plugin returned by that factory. See the
 [Telemetry Exporter guide](../packages/aws-durable-execution-sdk-python-telemetry-exporter/README.md).
 
 ### Move registration metadata to the factory
@@ -234,6 +246,61 @@ unmarked fields are ignored. The optional `on_registration_result(registered)`
 callback concerns registration resources, not invocation finalization. This
 registration API is distinct from the removed provider `plugin_api_version`.
 
+### Read subtypes as strings
+
+Every subtype field is `str | None`: `Operation.sub_type`,
+`OperationUpdate.sub_type`, `ChildConfig.sub_type`, and `OperationInfo.sub_type`
+in plugin hooks. `OperationSubType` remains, as a `StrEnum` of the values the SDK
+records for its own operations. Compare with `==`:
+
+```python
+# Core 2.x
+if info.sub_type is OperationSubType.STEP:
+    label = info.sub_type.value
+```
+
+```python
+# Core 3.0
+if info.sub_type == OperationSubType.STEP:
+    label = info.sub_type
+```
+
+Import `OperationSubType` from `aws_durable_execution_sdk_python.lambda_service`.
+`aws_durable_execution_sdk_python.plugin` no longer re-exports it.
+
+`OperationUpdate.create_context_start`, `create_context_succeed`, and
+`create_context_fail` lose their `sub_type` parameter. The identifier carries it.
+
+`StepConfig` and `CallbackConfig` gain a keyword-only `sub_type`, and
+`ChildConfig.sub_type` accepts any string. The SDK rejects a value outside 1 to
+32 characters from `A-Z`, `a-z`, `0-9`, hyphen, and underscore with
+`ValidationError` before any checkpoint is sent. `None` and `""` select the
+default. Replay compares the subtype with the checkpoint, so changing a subtype
+breaks executions already in flight. The local runner in testing `1.4.0` does
+not yet reject an invalid subtype, so a subtype that passes locally can still
+fail in the cloud. See
+[#836](https://github.com/aws/aws-durable-execution-sdk-python/issues/836).
+
+### Expect `None` in batch results
+
+`BatchResult.succeeded()` and `get_results()` now return every succeeded item of
+a `map` or `parallel`, including a branch whose function returned `None`. In
+2.x both dropped those branches, so `len(succeeded())` could be less than
+`success_count` and `get_results()` lost its alignment with `BatchResult.all`.
+`failed()` and `get_errors()` return every failed item the same way.
+
+Code that assumed `get_results()` holds no `None` must now handle it:
+
+```python
+# Core 2.x: None results were omitted
+total = sum(batch.get_results())
+```
+
+```python
+# Core 3.0: None results are present
+total = sum(result for result in batch.get_results() if result is not None)
+```
+
 ### Finding affected code
 
 Search application code, plugin packages, deployment configuration, and tests:
@@ -242,11 +309,13 @@ Search application code, plugin packages, deployment configuration, and tests:
 rg -n 'plugins\s*=|DURABLE_EXECUTION_PLUGINS|aws_durable_execution\.plugins' .
 rg -n 'DurableInstrumentationPluginProvider|plugin_api_version|plugin_type' .
 rg -n 'InvocationOtelPlugin|ExecutionOtelPlugin|create_plugin' .
+rg -n 'sub_type\.value|sub_type is |create_context_(start|succeed|fail)' .
+rg -n 'get_results\(\)|succeeded\(\)' .
 rg -n 'aws-durable-execution-sdk-python|Layers:|layer_version_arn' .
 ```
 
-These searches find registration and packaging candidates. They cannot prove
-that plugin state has the correct lifetime.
+These searches find registration, subtype, batch-result, and packaging
+candidates. They cannot prove that plugin state has the correct lifetime.
 
 ## Plugin state and invocation lifecycle
 
@@ -262,12 +331,21 @@ execution identity. If a factory retains an execution-keyed cache, its owner
 must synchronize and prune it; it is neither durable storage nor guaranteed to
 survive replacement of the execution environment.
 
-Operation and user-function hooks can run on different threads within one
-invocation, so mutable collections and shared resources still need appropriate
-synchronization. Invocation Start and End run on the handler's invocation
-worker, in registration order. End follows handler unwinding, admitted branch
-cleanup, output preparation, and checkpoint shutdown; it is not a reverse-order
-context stack. See the [invocation worker lifecycle](../packages/aws-durable-execution-sdk-python/README.md#invocation-worker-lifecycle)
+No hook runs on the checkpoint thread. Each hook is a synchronous call on the
+thread that owns the event, and that thread waits for it to return. So a slow
+hook delays its own thread and never another thread's checkpoint. Do slow work,
+such as a network export, on a thread the plugin owns, and finish it in
+`on_invocation_end`.
+
+Invocation Start and End run on the handler thread, in registration order.
+Operation hooks run on the thread that runs or reads the operation, and an end
+hook runs at most once per invocation. `on_operation_change` runs on its own
+thread and may merge several responses into one call. On one thread, an
+operation's end hook returns before the next operation's start hook is called.
+Threads are not ordered with each other, so guard state shared between hooks
+with a lock. The `DurableInstrumentationPlugin` docstring states where each
+hook runs and the exceptions to this order. See the
+[invocation worker lifecycle](../packages/aws-durable-execution-sdk-python/README.md#invocation-worker-lifecycle)
 for context-variable handling.
 
 ## Recommended validation after upgrading
