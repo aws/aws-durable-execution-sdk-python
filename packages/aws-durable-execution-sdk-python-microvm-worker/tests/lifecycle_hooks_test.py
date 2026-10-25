@@ -2282,6 +2282,90 @@ def test_refuses_jobs_with_503_after_the_terminate_hook(start: Any) -> None:
     assert not h.started("cb-1")
 
 
+def test_answers_a_resent_known_job_with_202_after_the_terminate_hook(
+    start: Any, logger: Any
+) -> None:
+    # A resend starts nothing. The terminate hook fails the running job's
+    # callback, and the finished job has reported its outcome. So the durable
+    # function learns each outcome from the callback. A 503 would only make
+    # it deliver the job again to a MicroVM that is ending.
+    h = start()
+    h.run_hook()
+    assert h.job("cb-done") == 202
+    h.finish_job("cb-done")
+    assert h.job("cb-running") == 202
+    assert eventually(lambda: h.started("cb-running"))
+    assert h.hook("terminate") == 200
+
+    assert h.job("cb-running") == 202
+    assert h.job("cb-done") == 202
+    assert h.job("cb-new") == 503
+    h.jobs.release_all()
+    assert h.worker.idle(WAIT)
+
+    assert h.jobs.started() == ["cb-done", "cb-running"]
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 2
+    )
+    assert h.lambda_client.recorded() == [
+        {"kind": "success", "callbackId": "cb-done"},
+        terminated_failure("cb-running"),
+    ]
+
+
+@pytest.mark.parametrize("refusal", ["own-suspend", "suspend-hook"])
+def test_answers_a_resent_finished_job_with_202_during_a_suspend_refusal(
+    start: Any, logger: Any, refusal: str
+) -> None:
+    # The job has ended, so a resend starts nothing and cannot freeze with
+    # the MicroVM. A 503 would make the durable function resume the MicroVM
+    # only to get this answer.
+    h = start()
+    h.run_hook(IDLE)
+    assert h.job("cb-done") == 202
+    h.finish_job("cb-done")
+    if refusal == "own-suspend":
+        h.advance(IDLE)
+        assert h.microvms.suspended == ["mvm-1"]
+    else:
+        assert h.hook("suspend") == 200
+
+    assert h.job("cb-done") == 202
+    assert h.job("cb-new") == 503
+
+    assert h.jobs.started() == ["cb-done"]
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 1
+    )
+    # The duplicate did not end the refusal.
+    assert h.job("cb-new") == 503
+
+
+def test_answers_a_resent_running_job_with_202_during_a_suspend_refusal(
+    start: Any, logger: Any
+) -> None:
+    # The job runs and freezes with the MicroVM anyway. A resend starts
+    # nothing.
+    h = start()
+    h.run_hook(IDLE)
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+
+    assert h.job("cb-1") == 202
+    assert h.job("cb-2") == 503
+    h.finish_job("cb-1")
+
+    assert h.jobs.started() == ["cb-1"]
+    assert eventually(
+        lambda: h.lambda_client.recorded()
+        == [{"kind": "success", "callbackId": "cb-1"}]
+    )
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 1
+    )
+
+
 def test_never_suspends_after_the_terminate_hook(start: Any) -> None:
     h = start()
     h.run_hook(IDLE)

@@ -284,7 +284,8 @@ class MicrovmWorkerListener:
 
     A second delivery of a callback ID is answered like the first and
     ignored, while that job runs and after it ended. The listener remembers
-    the last 1,000 finished callback IDs.
+    the last 1,000 finished callback IDs. A second delivery gets this answer
+    during a suspend or terminate refusal too, because it starts nothing.
 
     A document that does not match the contract gets HTTP 400. If the
     document still names a callback, the listener fails that callback. So
@@ -301,9 +302,9 @@ class MicrovmWorkerListener:
     3. When the idle time ends, the listener calls SuspendMicrovm with the
        ``run`` hook's MicroVM ID. The call returns before the MicroVM
        freezes.
-    4. From the moment the idle time ends, the listener answers every job
-       with HTTP 503 and does not start it. A job accepted then would freeze
-       with the MicroVM. After a 503, the durable function resumes the
+    4. From the moment the idle time ends, the listener answers every new
+       job with HTTP 503 and does not start it. A job accepted then would
+       freeze with the MicroVM. After a 503, the durable function resumes the
        MicroVM and delivers the job again.
     5. The refusal ends when the ``resume`` hook arrives, or 30 seconds after
        the call returned. The idle time then starts again.
@@ -361,7 +362,7 @@ class MicrovmWorkerListener:
 
     - ``suspend``: the listener answers HTTP 200 at once, because a suspend
       hook that runs past its timeout terminates the MicroVM. It then
-      refuses jobs with HTTP 503, as after its own suspend, until the
+      refuses new jobs with HTTP 503, as after its own suspend, until the
       ``resume`` hook or for 30 seconds. Running jobs freeze with the
       MicroVM. A ``run`` hook job that arrives during the refusal starts when
       the refusal ends, because the durable function cannot deliver it
@@ -371,8 +372,8 @@ class MicrovmWorkerListener:
       :class:`MicrovmTerminatedError`. It answers HTTP 200 when the reports
       end, or after 5 seconds. The answer also waits for jobs that report
       their own outcome, for ``run`` hook requests in flight, and for the
-      failure reports of invalid requests. From then on it refuses jobs with
-      HTTP 503, and fails the callback of a ``run`` hook job instead of
+      failure reports of invalid requests. From then on it refuses new jobs
+      with HTTP 503, and fails the callback of a ``run`` hook job instead of
       starting it.
 
     The listener acts on these two hooks, and on ``resume``, only when the
@@ -965,11 +966,24 @@ class MicrovmWorkerListener:
                 # arrives.
                 self._microvm_id = request.microvm_id
             microvm_id = self._microvm_id
-            terminating = self._terminating
-            suspending = self._suspending
+            # A known callback ID gets the duplicate answer before the refusal
+            # checks. Its job runs now or has ended, and the answer starts
+            # nothing. So nothing can freeze with the MicroVM or end with it.
+            # A 503 would make the durable function resume a suspending
+            # MicroVM only to get this answer, and nothing would suspend the
+            # MicroVM again.
             duplicate = self._is_known(job.callback_id)
-            if not (terminating or suspending or duplicate):
+            terminating = not duplicate and self._terminating
+            suspending = not duplicate and self._suspending
+            if not (duplicate or terminating or suspending):
                 self._register_job(job.callback_id, request.region)
+        if duplicate:
+            exchange.respond(202, {})
+            self._logger.warning(
+                "duplicate job ignored",
+                extra={"microvmId": microvm_id, "callbackId": job.callback_id},
+            )
+            return
         if terminating or suspending:
             # Terminating: the MicroVM is about to end, and the job could not
             # finish. Suspending: the MicroVM is about to freeze. The durable
@@ -980,13 +994,6 @@ class MicrovmWorkerListener:
                 extra={"microvmId": microvm_id, "callbackId": job.callback_id},
             )
             exchange.respond(503, {"error": f"the MicroVM is {state}"})
-            return
-        if duplicate:
-            exchange.respond(202, {})
-            self._logger.warning(
-                "duplicate job ignored",
-                extra={"microvmId": microvm_id, "callbackId": job.callback_id},
-            )
             return
         # The thread starts before the answer. A thread that cannot start
         # raises, and the caller gets HTTP 500, which the durable function
