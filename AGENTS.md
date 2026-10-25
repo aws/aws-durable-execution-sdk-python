@@ -88,8 +88,9 @@ Do NOT add or modify **conformance tests** without coordinating with the team. C
   extras package with custom operations such as `microvm`
   (`aws-durable-execution-sdk-python-extras`), and examples
   (`aws-durable-execution-sdk-python-examples`).
-- Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes. Use
-  `hatch` for all tests, type checks, and formatting (for example
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes, and
+  follow its [rules for every change](CONTRIBUTING.md#rules-for-every-change).
+  Use `hatch` for all tests, type checks, and formatting (for example
   `hatch run dev-core:test`, `hatch run dev-core:typecheck`, and
   `hatch fmt --check` from a package directory).
 - When the developer guide and the installed SDK source disagree, trust
