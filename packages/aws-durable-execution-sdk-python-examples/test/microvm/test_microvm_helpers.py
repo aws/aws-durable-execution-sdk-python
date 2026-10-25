@@ -6,12 +6,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 from test.microvm.microvm_helpers import (
-    LAUNCH_TIMEOUT_SECONDS,
+    HISTORY_TIMEOUT_SECONDS,
     POLL_INTERVAL_SECONDS,
     STATE_TIMEOUT_SECONDS,
     TIMEOUT_SECONDS,
     expect_microvm_terminated,
     find_launched_microvm_id,
+    wait_for_history_event,
     wait_for_microvm_state,
 )
 
@@ -248,10 +249,12 @@ def test_find_fails_after_the_timeout():
     client = FakeLambdaClient([[[{"EventType": "ExecutionStarted"}]]])
     clock = FakeClock()
 
-    with pytest.raises(AssertionError, match="s.launch did not succeed within 120"):
+    with pytest.raises(
+        AssertionError, match="no StepSucceeded event named s.launch within 120"
+    ):
         find(client, clock)
 
-    assert sum(clock.sleeps) == LAUNCH_TIMEOUT_SECONDS
+    assert sum(clock.sleeps) == HISTORY_TIMEOUT_SECONDS
 
 
 def test_find_raises_another_history_error():
@@ -260,3 +263,70 @@ def test_find_raises_another_history_error():
 
     with pytest.raises(ClientError, match="AccessDeniedException"):
         find(client, clock)
+
+
+WAIT_STARTED = {"EventType": "WaitStarted", "Name": "pause", "Id": "w-1"}
+
+
+def wait_for_pause(client: FakeLambdaClient, clock: FakeClock) -> dict[str, Any]:
+    return wait_for_history_event(
+        "arn:execution",
+        "WaitStarted",
+        "pause",
+        client=client,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+
+
+def test_wait_for_event_returns_the_event_from_a_later_history_page():
+    client = FakeLambdaClient(
+        [
+            [
+                [{"EventType": "ExecutionStarted"}],
+                # Same type with another name, and same name with another type.
+                [
+                    {"EventType": "WaitStarted", "Name": "other"},
+                    {"EventType": "StepStarted", "Name": "pause"},
+                ],
+                [WAIT_STARTED],
+            ]
+        ]
+    )
+    clock = FakeClock()
+
+    assert wait_for_pause(client, clock) == WAIT_STARTED
+    assert [request.get("Marker") for request in client.requests] == [
+        None,
+        "1",
+        "2",
+    ]
+    assert clock.sleeps == []
+
+
+def test_wait_for_event_reads_again_after_resource_not_found():
+    client = FakeLambdaClient(
+        [
+            client_error("ResourceNotFoundException"),
+            client_error("ResourceNotFoundException"),
+            [[{"EventType": "ExecutionStarted"}, WAIT_STARTED]],
+        ]
+    )
+    clock = FakeClock()
+
+    assert wait_for_pause(client, clock) == WAIT_STARTED
+    assert clock.sleeps == [POLL_INTERVAL_SECONDS] * 2
+
+
+def test_wait_for_event_fails_after_the_timeout():
+    client = FakeLambdaClient([[[{"EventType": "ExecutionStarted"}]]])
+    clock = FakeClock()
+
+    with pytest.raises(
+        AssertionError, match="no WaitStarted event named pause within 120 seconds"
+    ):
+        wait_for_pause(client, clock)
+
+    # The check reads the history at 0, 2, ..., 120 seconds.
+    assert len(client.requests) == HISTORY_TIMEOUT_SECONDS / POLL_INTERVAL_SECONDS + 1
+    assert sum(clock.sleeps) == HISTORY_TIMEOUT_SECONDS

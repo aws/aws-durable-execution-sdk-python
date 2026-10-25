@@ -2,8 +2,8 @@
 
 The MicroVM runs the image that scripts/ensure_microvm_image.py builds from
 microvm-image/. The image's routes /write and /read write and read a file in
-the MicroVM. The image enables the suspend and resume hooks, which the worker
-needs to suspend its own MicroVM.
+the MicroVM. The image enables the resume hook. So the worker accepts the
+next job as soon as the MicroVM resumes.
 """
 
 import os
@@ -20,7 +20,8 @@ from aws_durable_execution_sdk_python_extras.microvm import (
 )
 
 
-# 1. The worker starts its idle time of 10 seconds when the first job ends.
+# 1. The worker starts its idle time of 10 seconds at the run hook, and again
+#    after each job. So the idle time starts again when the first job ends.
 # 2. When the idle time ends, the worker calls SuspendMicrovm. The call
 #    returns before the MicroVM freezes. The image gives the suspend hook up
 #    to 10 seconds.

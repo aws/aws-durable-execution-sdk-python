@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 ENDED_STATES = frozenset({"TERMINATING", "TERMINATED"})
 POLL_INTERVAL_SECONDS = 2.0
 TIMEOUT_SECONDS = 30.0
-LAUNCH_TIMEOUT_SECONDS = 120.0
+HISTORY_TIMEOUT_SECONDS = 120.0
 STATE_TIMEOUT_SECONDS = 150.0
 
 
@@ -90,41 +90,31 @@ def expect_microvm_terminated(
         sleep(POLL_INTERVAL_SECONDS)
 
 
-def _launch_result(history_pages: list[dict[str, Any]], step_name: str) -> Any:
+def _find_event(
+    history_pages: list[dict[str, Any]], event_type: str, name: str
+) -> dict[str, Any] | None:
     for page in history_pages:
         for event in page.get("Events", []):
-            if event.get("EventType") == "StepSucceeded" and (
-                event.get("Name") == step_name
-            ):
-                payload = (
-                    event.get("StepSucceededDetails", {})
-                    .get("Result", {})
-                    .get("Payload")
-                )
-                # The launch step checkpoints its result with JsonSerDes.
-                return json.loads(payload)
+            if event.get("EventType") == event_type and event.get("Name") == name:
+                return event
     return None
 
 
-def find_launched_microvm_id(
+def wait_for_history_event(
     execution_arn: str,
-    launch_step_name: str,
+    event_type: str,
+    name: str,
     *,
     client: Any = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
-) -> str:
-    """Return the MicroVM ID from the launch step of a running execution.
+) -> dict[str, Any]:
+    """Return the first history event with ``event_type`` and ``name``.
 
-    1. The launch step checkpoints the RunMicrovm result, with the MicroVM ID.
-    2. GetDurableExecutionHistory returns the checkpoint while the execution
+    1. GetDurableExecutionHistory returns the events while the execution
        still runs.
-    3. So the check reads the history every 2 seconds, until the launch step
-       has succeeded, for up to 120 seconds.
-
-    Other tests launch MicroVMs from the same image at the same time. So a
-    list of the image's MicroVMs could name another test's MicroVM. The
-    history names only this execution's MicroVM.
+    2. So the check reads the history every 2 seconds, until it contains the
+       event, for up to 120 seconds.
 
     GetDurableExecutionHistory answers ResourceNotFoundException for a short
     time after an asynchronous Invoke. The check reads again after that
@@ -133,7 +123,7 @@ def find_launched_microvm_id(
     if client is None:
         client = _default_lambda_client()
 
-    deadline = clock() + LAUNCH_TIMEOUT_SECONDS
+    deadline = clock() + HISTORY_TIMEOUT_SECONDS
     while True:
         pages: list[dict[str, Any]] = []
         request: dict[str, Any] = {
@@ -150,16 +140,51 @@ def find_launched_microvm_id(
         except ClientError as error:
             if not _is_not_found(error):
                 raise
-        launch = _launch_result(pages, launch_step_name)
-        if launch is not None:
-            return launch["microvmId"]
+        event = _find_event(pages, event_type, name)
+        if event is not None:
+            return event
         if clock() >= deadline:
             msg = (
-                f"The step {launch_step_name} did not succeed within "
-                f"{LAUNCH_TIMEOUT_SECONDS:.0f} seconds of the execution start."
+                f"The execution history had no {event_type} event named "
+                f"{name} within {HISTORY_TIMEOUT_SECONDS:.0f} seconds."
             )
             raise AssertionError(msg)
         sleep(POLL_INTERVAL_SECONDS)
+
+
+def find_launched_microvm_id(
+    execution_arn: str,
+    launch_step_name: str,
+    *,
+    client: Any = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    """Return the MicroVM ID from the launch step of a running execution.
+
+    1. The launch step checkpoints the RunMicrovm result, with the MicroVM ID.
+    2. The history records the checkpoint as a StepSucceeded event with the
+       step's name.
+    3. So the check waits for that event with wait_for_history_event.
+
+    Other tests launch MicroVMs from the same image at the same time. So a
+    list of the image's MicroVMs could name another test's MicroVM. The
+    history names only this execution's MicroVM.
+
+    The result payload is execution data. So wait_for_history_event requests
+    the history with IncludeExecutionData.
+    """
+    event = wait_for_history_event(
+        execution_arn,
+        "StepSucceeded",
+        launch_step_name,
+        client=client,
+        sleep=sleep,
+        clock=clock,
+    )
+    payload = event.get("StepSucceededDetails", {}).get("Result", {}).get("Payload")
+    # The launch step checkpoints its result with JsonSerDes.
+    return json.loads(payload)["microvmId"]
 
 
 def wait_for_microvm_state(
