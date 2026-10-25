@@ -20,7 +20,8 @@ import socketserver
 import sys
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -405,6 +406,9 @@ class MicrovmWorkerListener:
         # job, a report, a run hook, or a suspend call ends.
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
+        # The timers that could not start, as a log message and the error.
+        # _locked() logs them after it releases the lock.
+        self._timer_failures: list[tuple[str, BaseException]] = []
         # The callback IDs of the jobs that run now.
         self._jobs: set[str] = set()
         # The callback IDs of jobs that ended, oldest first.
@@ -690,7 +694,7 @@ class MicrovmWorkerListener:
         Lambda freezes the MicroVM after the answer. A job accepted now would
         freeze with it.
         """
-        with self._lock:
+        with self._locked():
             self._suspend_hooks += 1
             self._stop_idle_time()
             self._suspending = True
@@ -703,7 +707,7 @@ class MicrovmWorkerListener:
         until the next job ends. Returns the deferred run hook jobs,
         registered. The caller starts them after the answer.
         """
-        with self._lock:
+        with self._locked():
             if self._suspending:
                 return self._end_suspending()
             self._start_idle_time()
@@ -804,7 +808,7 @@ class MicrovmWorkerListener:
         # otherwise both start the job. The body is read before these checks.
         # So a suspend or terminate hook can arrive while it is still being
         # read.
-        with self._lock:
+        with self._locked():
             later = self._run_hook_accepted
             if not later:
                 self._run_hook_accepted = True
@@ -1036,7 +1040,7 @@ class MicrovmWorkerListener:
             # durable function delivers the job again, and the retry may run
             # it. The run hook fails the callback instead, because Lambda
             # sends it only once.
-            with self._changed:
+            with self._locked():
                 self._jobs.discard(job.callback_id)
                 self._active.pop(job.callback_id, None)
                 self._start_idle_time()
@@ -1054,7 +1058,7 @@ class MicrovmWorkerListener:
                 extra={"callbackId": job.callback_id, "error": describe(error)},
             )
         finally:
-            with self._changed:
+            with self._locked():
                 self._jobs.discard(job.callback_id)
                 self._active.pop(job.callback_id, None)
                 self._finished[job.callback_id] = None
@@ -1302,6 +1306,29 @@ class MicrovmWorkerListener:
             callback_id, self._create_client(region), logger=self._logger
         )
 
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the lock, then log the timers that could not start.
+
+        Every block that can start a timer takes the lock with this method.
+        The caller of the listener passes the logger. That logger can be
+        slow, or can call the listener. A listener method takes the lock,
+        and the lock is not reentrant. So :meth:`_start_idle_time` and
+        :meth:`_start_grace` only record a failure under the lock. This
+        method logs each failure after it releases the lock. It also
+        describes the error there, as the SuspendMicrovm warning does. It
+        logs the failures when the block raises too.
+        """
+        self._lock.acquire()
+        try:
+            yield
+        finally:
+            failures = self._timer_failures
+            self._timer_failures = []
+            self._lock.release()
+            for message, error in failures:
+                self._logger.error(message, extra={"error": describe(error)})
+
     def _start_idle_time(self, *, after_refusal: bool = False) -> None:
         """Start the idle time, when the session asked for it and no job runs.
 
@@ -1312,7 +1339,8 @@ class MicrovmWorkerListener:
         call as fast as the client can make it. Every other start uses the
         session's idle time.
 
-        The caller holds the lock.
+        The caller holds the lock through :meth:`_locked`. A timer that
+        cannot start is logged after the caller releases the lock.
         """
         self._stop_idle_time()
         auto_suspend = self._auto_suspend
@@ -1346,9 +1374,7 @@ class MicrovmWorkerListener:
         except Exception as error:  # noqa: BLE001
             # Without a timer thread, the MicroVM keeps running until a job
             # ends and the idle time starts again.
-            self._logger.error(
-                "could not start the idle time", extra={"error": describe(error)}
-            )
+            self._timer_failures.append(("could not start the idle time", error))
 
     def _stop_idle_time(self) -> None:
         """Cancel the idle time. The caller holds the lock."""
@@ -1393,7 +1419,7 @@ class MicrovmWorkerListener:
                 "could not start the suspend of the idle MicroVM",
                 extra={"microvmId": auto_suspend.microvm_id, "error": describe(error)},
             )
-            with self._changed:
+            with self._locked():
                 deferred = self._end_own_refusal(hooks_before)
                 self._suspend_call_ended()
             self._launch_deferred(deferred)
@@ -1404,7 +1430,7 @@ class MicrovmWorkerListener:
         try:
             self._call_suspend(auto_suspend, hooks_before, waited_seconds)
         finally:
-            with self._changed:
+            with self._locked():
                 self._suspend_call_ended()
 
     def _end_own_refusal(
@@ -1423,7 +1449,7 @@ class MicrovmWorkerListener:
     def _suspend_call_ended(self) -> None:
         """Count a SuspendMicrovm call as ended, and start the idle time that
         a resume hook, a job, or a refusal for now asked for during it. The
-        caller holds the lock."""
+        caller holds the lock through :meth:`_locked`."""
         self._suspend_calls -= 1
         if self._idle_after_call:
             self._idle_after_call = False
@@ -1489,7 +1515,7 @@ class MicrovmWorkerListener:
                 unknown_described = described
             else:
                 deferred = []
-                with self._lock:
+                with self._locked():
                     # The service did nothing. So jobs can run again at once.
                     # A suspend hook that arrived since the idle time ended
                     # means that the MicroVM is suspending anyway, so its
@@ -1520,7 +1546,7 @@ class MicrovmWorkerListener:
                         "could not close the Lambda MicroVMs client",
                         extra={**fields, "error": describe(close_error)},
                     )
-        with self._lock:
+        with self._locked():
             # A resume hook that arrived during the call has already ended
             # the refusal. The grace timer also runs after close(), so a
             # closed listener does not refuse jobs forever.
@@ -1572,7 +1598,8 @@ class MicrovmWorkerListener:
         """End the refusal after the grace period, unless the ``resume`` hook
         ends it first. A timer started earlier is replaced.
 
-        The caller holds the lock.
+        The caller holds the lock through :meth:`_locked`. A timer that
+        cannot start is logged after the caller releases the lock.
         """
         self._cancel_grace()
         generation = self._grace_generation
@@ -1582,9 +1609,8 @@ class MicrovmWorkerListener:
             )
         except Exception as error:  # noqa: BLE001
             # Without a timer thread, only the resume hook ends the refusal.
-            self._logger.error(
-                "could not start the end of the refusal",
-                extra={"error": describe(error)},
+            self._timer_failures.append(
+                ("could not start the end of the refusal", error)
             )
 
     def _cancel_grace(self) -> None:
@@ -1595,7 +1621,7 @@ class MicrovmWorkerListener:
             self._cancel_grace_timer = None
 
     def _grace_ended(self, generation: int) -> None:
-        with self._lock:
+        with self._locked():
             if generation != self._grace_generation:
                 return
             self._cancel_grace_timer = None
@@ -1605,8 +1631,9 @@ class MicrovmWorkerListener:
     def _end_suspending(self) -> list[tuple[MicrovmJobDocument, str]]:
         """End the refusal of jobs, and start the idle time again.
 
-        The caller holds the lock, and the listener is suspending. The caller
-        starts the returned jobs after it releases the lock.
+        The caller holds the lock through :meth:`_locked`, and the listener
+        is suspending. The caller starts the returned jobs after it releases
+        the lock.
         """
         deferred = self._stop_refusing()
         self._start_idle_time()

@@ -2680,6 +2680,126 @@ def test_refuses_jobs_until_the_resume_hook_when_the_refusal_timer_cannot_start(
     assert h.job("cb-1") == 202
 
 
+class _CallingLogger:
+    """Records the worker's log lines. The first error line calls ``on_error``.
+
+    Only the first error line calls it. A hook that ``on_error`` sends can
+    fail to start a timer too, and log a second error line.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str, dict[str, Any]]] = []
+        self.on_error: Callable[[], None] = lambda: None
+        self._called = False
+        self._lock = threading.Lock()
+
+    def _add(self, level: str, message: str, data: Any) -> bool:
+        with self._lock:
+            self.lines.append((level, message, dict(data or {})))
+            first = level == "error" and not self._called
+            if first:
+                self._called = True
+            return first
+
+    def info(self, msg: object, *args: object, extra: Any = None) -> None:
+        self._add("info", str(msg), extra)
+
+    def warning(self, msg: object, *args: object, extra: Any = None) -> None:
+        self._add("warning", str(msg), extra)
+
+    def error(self, msg: object, *args: object, extra: Any = None) -> None:
+        if self._add("error", str(msg), extra):
+            self.on_error()
+
+    def errors(self) -> list[tuple[str, dict[str, Any]]]:
+        with self._lock:
+            return [(m, data) for level, m, data in self.lines if level == "error"]
+
+
+@dataclass
+class _TimerCase:
+    """A hook that starts one timer, after the run hook ``idle_seconds``."""
+
+    idle_seconds: float | None
+    hook: str
+    message: str
+
+
+# The resume hook starts the idle time. The suspend hook starts the timer
+# that ends the refusal.
+_EACH_TIMER = pytest.mark.parametrize(
+    "case",
+    [
+        _TimerCase(IDLE, "resume", "could not start the idle time"),
+        _TimerCase(None, "suspend", "could not start the end of the refusal"),
+    ],
+    ids=["idle-time", "grace"],
+)
+
+_THREAD_ERROR = {"name": "RuntimeError", "message": "can't start new thread"}
+
+
+@_EACH_TIMER
+def test_logs_a_timer_failure_after_it_releases_the_lock(
+    start: Any, timers: FakeTimers, case: _TimerCase
+) -> None:
+    # The listener's lock is not reentrant. The logger's error() calls
+    # close(), which takes the lock. If the listener logged the failure
+    # under the lock, close() would wait for that lock forever. Every hook
+    # and job request would then wait too.
+    logger = _CallingLogger()
+    h = start(logger=logger)
+    assert h.run_hook(case.idle_seconds) == 200
+    closed = threading.Event()
+
+    def close() -> None:
+        h.listener.close()
+        closed.set()
+
+    logger.on_error = close
+    timers.failure = RuntimeError("can't start new thread")
+    hook = h.hook_in_background(case.hook)
+    if not closed.wait(WAIT):
+        # threading.Lock lets any thread release it. So the test releases
+        # the lock that the hook's thread holds. close() then returns, and
+        # the fixture can close the worker.
+        h.listener._lock.release()  # noqa: SLF001
+        closed.wait(WAIT)
+        pytest.fail("close() in the logger's error() waited for the lock")
+    assert hook.result(WAIT) == 200
+
+    assert logger.errors() == [(case.message, {"error": _THREAD_ERROR})]
+
+
+@_EACH_TIMER
+def test_answers_a_hook_that_the_timer_failure_log_sends(
+    start: Any, timers: FakeTimers, case: _TimerCase
+) -> None:
+    # The logger's error() sends a resume hook. A request thread handles the
+    # hook, and takes the lock. If the listener logged the failure under the
+    # lock, the resume hook would wait until its HTTP timeout.
+    logger = _CallingLogger()
+    h = start(logger=logger)
+    assert h.run_hook(case.idle_seconds) == 200
+    statuses: list[int | BaseException] = []
+
+    def send_hook() -> None:
+        try:
+            statuses.append(h.hook("resume"))
+        except Exception as error:  # noqa: BLE001
+            statuses.append(error)
+
+    logger.on_error = send_hook
+    timers.failure = RuntimeError("can't start new thread")
+    hook = h.hook_in_background(case.hook)
+    # The resume hook's HTTP timeout is WAIT. So this wait ends in either
+    # case.
+    assert hook.result(2 * WAIT) == 200
+    assert statuses == [200]
+
+    assert logger.errors()[0] == (case.message, {"error": _THREAD_ERROR})
+
+
 def test_fails_a_deferred_run_hook_job_whose_thread_cannot_start(
     start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
