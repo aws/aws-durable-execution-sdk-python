@@ -3894,6 +3894,21 @@ def test_a_request_before_the_run_hook_is_dropped_when_the_run_hook_names_none(
     assert logger.messages("warning").count(NO_TARGET_WARNING) == 1
 
 
+def test_close_drops_a_request_that_waits_for_the_run_hook(start: Any) -> None:
+    h = start()
+    post_job(h, "cb-1", suspendAfter=True)
+    end_job(h, "cb-1")
+    assert h.listener._suspend_requested == "cb-1"  # noqa: SLF001
+
+    h.listener.close()
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    assert h.run_hook() == 200
+    h.settle()
+
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+
+
 def test_a_resume_hook_does_not_repeat_the_suspend(start: Any) -> None:
     h = start()
     h.run_hook()
@@ -3986,6 +4001,24 @@ def test_does_not_suspend_after_the_terminate_hook(start: Any) -> None:
 
     assert h.microvms.suspended == []
     assert h.listener._suspend_requested is None  # noqa: SLF001
+
+
+def test_records_no_request_for_a_job_that_ends_after_the_terminate_hook(
+    start: Any,
+) -> None:
+    # The terminate hook clears no request here, because none is pending
+    # yet. Only the job end's check of the terminate hook stops the
+    # suspend.
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+
+    assert h.hook("terminate", LAMBDA_HEADERS) == 200
+    end_job(h, "cb-1")
+    assert h.worker.idle(WAIT)
+
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    assert h.microvms.suspended == []
 
 
 def test_does_not_suspend_after_close(start: Any) -> None:
