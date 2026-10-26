@@ -537,6 +537,10 @@ class MicrovmWorkerListener:
         # repeats it. A suspend hook, the terminate hook, and close() clear
         # it too.
         self._suspend_requested: str | None = None
+        # Set when the worker has logged that a request waits for the run
+        # hook. An image without the run hook would make every such job log
+        # it. So the worker logs it once.
+        self._warned_run_hook_wait = False
         # Each timer action carries the generation it was started with, and
         # acts only when it is still current. Cancelling a timer increments
         # the generation.
@@ -1253,7 +1257,11 @@ class MicrovmWorkerListener:
             # now. The suspend runs after this block, so that no lock is
             # held while it logs or starts its thread. During a suspend
             # refusal, the MicroVM is suspending already. So a job that ends
-            # then asks for nothing.
+            # then asks for nothing. A request that comes before the first
+            # accepted run hook waits for it. An image without the run hook
+            # never ends that wait. So the worker warns the first time a
+            # request starts to wait.
+            warn_run_hook_wait = False
             with self._locked():
                 callback_id = job.callback_id
                 suspend_after = callback_id in self._suspend_after_jobs
@@ -1268,8 +1276,18 @@ class MicrovmWorkerListener:
                     self._terminating or self._closed or self._suspending
                 ):
                     self._suspend_requested = callback_id
+                    if not (self._run_hook_accepted or self._warned_run_hook_wait):
+                        self._warned_run_hook_wait = True
+                        warn_run_hook_wait = True
                 self._changed.notify_all()
                 decision = self._take_job_suspend()
+            if warn_run_hook_wait:
+                self._logger.warning(
+                    "a job asked to suspend the MicroVM before the run hook "
+                    "arrived. The worker waits for the run hook to name the "
+                    "MicroVM.",
+                    extra={"callbackId": callback_id},
+                )
             self._act_on_job_suspend(decision)
 
     def _run_job_and_report(

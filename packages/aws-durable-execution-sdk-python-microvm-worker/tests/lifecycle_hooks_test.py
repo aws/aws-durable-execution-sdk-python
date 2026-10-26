@@ -3506,6 +3506,10 @@ JOB_SUSPEND_INFO = "suspending the MicroVM after a job"
 NO_TARGET_WARNING = (
     "cannot suspend the MicroVM after a job: the run hook named no MicroVM"
 )
+RUN_HOOK_WAIT_WARNING = (
+    "a job asked to suspend the MicroVM before the run hook arrived. "
+    "The worker waits for the run hook to name the MicroVM."
+)
 
 
 def post_job(h: Harness, callback_id: str, **fields: Any) -> tuple[int, str | None]:
@@ -3892,6 +3896,37 @@ def test_a_request_before_the_run_hook_is_dropped_when_the_run_hook_names_none(
     end_job(h, "cb-2")
     assert h.microvms.suspended == []
     assert logger.messages("warning").count(NO_TARGET_WARNING) == 1
+
+
+def test_warns_once_when_requests_wait_for_the_run_hook(
+    start: Any, logger: Any
+) -> None:
+    # An image without the run hook never ends the wait. The warning is the
+    # only sign of that. Two jobs that wait log it once.
+    h = start()
+    post_job(h, "cb-1", suspendAfter=True)
+    end_job(h, "cb-1")
+    post_job(h, "cb-2", suspendAfter=True)
+    end_job(h, "cb-2")
+
+    assert [line for line in logger.lines if line[1] == RUN_HOOK_WAIT_WARNING] == [
+        ("warning", RUN_HOOK_WAIT_WARNING, {"callbackId": "cb-1"})
+    ]
+    assert h.microvms.suspended == []
+
+
+def test_does_not_warn_of_the_wait_when_the_run_hook_came_first(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    # The job request arrives before the run hook, and ends after it.
+    post_job(h, "cb-1", suspendAfter=True)
+    h.run_hook()
+
+    end_job(h, "cb-1")
+
+    assert h.microvms.suspended == ["mvm-1"]
+    assert RUN_HOOK_WAIT_WARNING not in logger.messages("warning")
 
 
 def test_close_drops_a_request_that_waits_for_the_run_hook(start: Any) -> None:
