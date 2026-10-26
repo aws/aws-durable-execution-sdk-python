@@ -777,7 +777,7 @@ def echo(job_input: Any, context: MicrovmJobContext) -> Any:
 
 
 def test_suspends_after_a_job_and_the_next_job_resumes_the_microvm(
-    fake_client: Any,
+    fake_client: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     def make_pipeline(microvm: SimulatedMicrovm) -> Pipeline:
         def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
@@ -790,11 +790,14 @@ def test_suspends_after_a_job_and_the_next_job_resumes_the_microvm(
 
         return pipeline
 
-    outcome, client, microvm, logger = suspend_after_session(
-        fake_client, make_pipeline, echo
-    )
+    with caplog.at_level(logging.WARNING):
+        outcome, client, microvm, logger = suspend_after_session(
+            fake_client, make_pipeline, echo
+        )
 
     assert outcome == ["build done", "SUSPENDED", "test done"]
+    # The worker acknowledged suspendAfter. So the session logs no warning.
+    assert IGNORED_WARNING not in [record.getMessage() for record in caplog.records]
     assert microvm.suspended == ["mvm-1"]
     [line] = logger.extras("suspending the MicroVM after a job")
     assert list(line) == ["microvmId", "callbackId"]
