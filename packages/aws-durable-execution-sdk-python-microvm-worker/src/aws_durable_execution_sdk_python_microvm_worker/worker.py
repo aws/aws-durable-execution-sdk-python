@@ -424,16 +424,16 @@ class MicrovmWorkerListener:
        pending request. A job that ends while the listener refuses jobs for
        a suspend sets none, because the MicroVM is suspending already. The
        request fires when no job, failure report, ``run`` hook request, or
-       SuspendMicrovm call runs, and the listener is not terminating, not
-       closed, and not refusing jobs. Each of those ends checks it again.
+       SuspendMicrovm call runs. Each of those ends checks it again.
     3. Firing clears the request, stops the idle time, and makes the same
        call as items 3 to 9, with the MicroVM ID of the first accepted
        ``run`` hook with a payload. A request that comes before the first
        accepted ``run`` hook waits for it. The request fires when that hook
        names a MicroVM. When it names none, the listener logs a warning,
        drops the request, and does not suspend. A ``resume`` hook never
-       repeats the request. A ``suspend`` hook, the ``terminate`` hook, and
-       ``close()`` drop it.
+       repeats the request. A ``suspend`` hook drops it. The ``terminate``
+       hook and ``close()`` drop it, and a job end after either records
+       none.
     4. A call refused for now is retried only when the session suspends
        when idle.
 
@@ -1689,11 +1689,15 @@ class MicrovmWorkerListener:
         fires now.
 
         The request fires when no job, failure report, run hook, or
-        SuspendMicrovm call runs, and the listener is not terminating, not
-        closed, and not refusing jobs for a suspend. Each event that can
-        change one of these calls this method: a job end, a report end, a
-        run hook end, and a call end. Firing clears the request, and stops
-        an idle timer that auto-suspend armed.
+        SuspendMicrovm call runs. Each event that can change one of these
+        calls this method: a job end, a report end, a run hook end, and a
+        call end. Firing clears the request, and stops an idle timer that
+        auto-suspend armed.
+
+        The terminate hook and ``close()`` drop the request, and a job end
+        after either records none. A suspend refusal drops the request too,
+        and a job end during a refusal records none. So these states need
+        no check here.
 
         HTTP jobs can arrive before the run hook. A request that is due
         before the first accepted run hook stays pending, because that hook
@@ -1712,9 +1716,6 @@ class MicrovmWorkerListener:
             or self._jobs
             or self._reports
             or self._run_hooks
-            or self._terminating
-            or self._closed
-            or self._suspending
             or self._suspend_calls
         ):
             return None
