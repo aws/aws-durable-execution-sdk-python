@@ -244,8 +244,9 @@ def classify_suspend_error(error: BaseException) -> SuspendOutcome:
     7. Any other error is :attr:`SuspendOutcome.UNKNOWN`. Examples are a
        timeout, a dropped connection, a 408, a server error,
        :class:`SuspendDeadlineError`, and :class:`SuspendResumedError`. The
-       last two stop a later attempt, and an earlier attempt may have
-       suspended the MicroVM.
+       last two stop an attempt. When they stop the first attempt, nothing
+       was sent. An earlier attempt, if there was one, may have suspended
+       the MicroVM.
     """
     if isinstance(error, NoCredentialsError):
         return SuspendOutcome.REJECTED

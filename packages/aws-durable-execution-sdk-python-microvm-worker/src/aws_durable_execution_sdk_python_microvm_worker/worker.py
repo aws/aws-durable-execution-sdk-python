@@ -969,9 +969,9 @@ class MicrovmWorkerListener:
             # A known callback ID gets the duplicate answer before the refusal
             # checks. Its job runs now or has ended, and the answer starts
             # nothing. So nothing can freeze with the MicroVM or end with it.
-            # A 503 would make the durable function resume a suspending
-            # MicroVM only to get this answer, and nothing would suspend the
-            # MicroVM again.
+            # After a 503, the durable function resumes the MicroVM and
+            # delivers the job again. That delivery gets this answer. So the
+            # MicroVM ran again for nothing.
             duplicate = self._is_known(job.callback_id)
             terminating = not duplicate and self._terminating
             suspending = not duplicate and self._suspending
@@ -1587,9 +1587,11 @@ class MicrovmWorkerListener:
                 # retried attempt does not show whether the service suspended
                 # the MicroVM. So the refusal continues, as after a successful
                 # call. The block after the client is closed acts on it. A
-                # resume hook that stopped the call's next attempt has
-                # already ended the refusal. So that block starts a grace
-                # period only for a suspend hook that came after the resume.
+                # resume hook can stop any attempt, the first one included. An
+                # earlier attempt, if there was one, may have suspended the
+                # MicroVM. That resume hook has already ended the refusal. So
+                # that block starts a grace period only for a suspend hook
+                # that came after the resume.
                 unknown_described = described
             else:
                 deferred = []
