@@ -135,19 +135,43 @@ def make_error() -> Callable[..., ClientError]:
     return client_error
 
 
+@pytest.fixture
+def connect_failed() -> Status:
+    """The answer of the endpoint of a suspended MicroVM."""
+    return CONNECT_FAILED
+
+
+@pytest.fixture
+def suspend_after_ack() -> dict[str, str]:
+    """The header of a worker that supports ``suspendAfter``."""
+    return dict(SUSPEND_AFTER_ACK)
+
+
+Status = int | tuple[int, dict[str, str]] | None
+
+CONNECT_FAILED: Status = (502, {"x-aws-proxy-error": "MICROVM_CONNECT_FAILED"})
+"""The answer of the endpoint of a suspending or suspended MicroVM."""
+
+SUSPEND_AFTER_ACK = {"X-Microvm-Suspend-After": "accepted"}
+"""The header with which a worker acknowledges ``suspendAfter``."""
+
+
 class FakeEndpoint:
     """A local HTTP server that stands in for a MicroVM endpoint.
 
     It records each request, and answers from ``statuses`` in order. After
     the list ends, it answers 202. A status of ``None`` closes the connection
-    without an answer. A redirect status gets ``Location: <location>``,
-    ``/moved`` by default. A ``location`` of ``None`` sends no ``Location``.
+    without an answer. A ``(status, headers)`` pair adds the headers to the
+    answer. The 202 after the list ends gets ``accept_headers``. A redirect
+    status gets ``Location: <location>``, ``/moved`` by default. A
+    ``location`` of ``None`` sends no ``Location``.
     """
 
     def __init__(
         self,
-        statuses: list[int | None] | None = None,
+        statuses: list[Status] | None = None,
         location: str | None = "/moved",
+        accept_headers: dict[str, str] | None = None,
     ) -> None:
         self.requests: list[dict[str, Any]] = []
         self._statuses = list(statuses or [])
@@ -181,12 +205,19 @@ class FakeEndpoint:
                             "body": json.loads(body),
                         }
                     )
-                    status = endpoint._statuses.pop(0) if endpoint._statuses else 202
-                if status is None:
+                    answer = (
+                        endpoint._statuses.pop(0)
+                        if endpoint._statuses
+                        else (202, dict(accept_headers or {}))
+                    )
+                if answer is None:
                     self.close_connection = True
                     self.connection.shutdown(socket.SHUT_RDWR)
                     return
+                status, headers = answer if isinstance(answer, tuple) else (answer, {})
                 self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
                 if 300 <= status < 400 and location is not None:  # noqa: PLR2004
                     self.send_header("location", location)
                 self.send_header("content-length", "0")
@@ -213,9 +244,11 @@ def fake_endpoint() -> Iterator[Callable[..., FakeEndpoint]]:
     endpoints: list[FakeEndpoint] = []
 
     def _create(
-        statuses: list[int | None] | None = None, location: str | None = "/moved"
+        statuses: list[Status] | None = None,
+        location: str | None = "/moved",
+        accept_headers: dict[str, str] | None = None,
     ) -> FakeEndpoint:
-        endpoint = FakeEndpoint(statuses, location)
+        endpoint = FakeEndpoint(statuses, location, accept_headers)
         endpoints.append(endpoint)
         return endpoint
 

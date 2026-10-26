@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from aws_durable_execution_sdk_python.types import LoggerInterface
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
     add_request_id,
@@ -61,6 +61,31 @@ class MicrovmStateError(Exception):
         super().__init__(message)
         self.state = state
         """The MicroVM state, or ``None`` when the MicroVM no longer exists."""
+
+
+class MicrovmStateCheckError(Exception):
+    """``GetMicrovm`` failed in the check of :func:`resume_if_suspended`.
+
+    The request step of a session without the resume mode runs that check
+    only after a sign of a suspended MicroVM. The session may never have
+    asked to suspend. So the step logs one warning per job, and keeps
+    sending the job. ``__cause__`` is the error of the call.
+    """
+
+    def __init__(self, message: str, *, denied: bool) -> None:
+        super().__init__(message)
+        self.denied = denied
+        """Whether the service answered ``AccessDeniedException``."""
+
+
+class MicrovmResumeDeniedError(Exception):
+    """``ResumeMicrovm`` was denied for a suspending or suspended MicroVM.
+
+    Nothing else resumes the MicroVM, and a later attempt is denied the same
+    way. So the default retry strategy does not retry it, and the delivery
+    raises ``MicrovmDeliveryError`` at once. The message names the
+    permission, and ends with the request ID of the call.
+    """
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -124,12 +149,135 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
         ClientError: When ``GetMicrovm`` or ``ResumeMicrovm`` fails
             otherwise.
     """
+    return _wait_until_running(options, resume_sent=False)
+
+
+def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
+    """Check the MicroVM state once, resume a suspended MicroVM, and return
+    its current endpoint.
+
+    The request step of a session without the resume mode calls it after a
+    sign that the MicroVM may be suspended: an HTTP 502 from the endpoint
+    with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. A
+    worker can suspend its MicroVM after a ``suspend_after`` job. The
+    session can lose the record of that job on replay. So this check runs
+    for every session job.
+
+    1. ``GetMicrovm`` runs once. A failure other than
+       ``ResourceNotFoundException`` raises :class:`MicrovmStateCheckError`.
+       The caller then keeps sending the job.
+    2. ``RUNNING`` or ``PENDING``: the function returns at once.
+    3. ``SUSPENDING`` or ``SUSPENDED``: it calls ``ResumeMicrovm`` once.
+       The service honors a resume during ``SUSPENDING`` too. It then waits
+       for ``RUNNING``, as :func:`ensure_running` does after its own resume.
+    4. ``TERMINATING``, ``TERMINATED``, or not found: it raises
+       :class:`MicrovmStateError`.
+
+    A denied ``ResumeMicrovm`` raises :class:`MicrovmResumeDeniedError`.
+    ``ConflictException`` is not an error: polling continues. Any other
+    ``ResumeMicrovm`` error is raised with its class and its ``response``,
+    as in :func:`ensure_running`. So is any error of a ``GetMicrovm`` call
+    after the resume.
+
+    Returns:
+        The endpoint that ``GetMicrovm`` reports, or ``None`` when it reports
+        none.
+
+    Raises:
+        MicrovmStateCheckError: When the first ``GetMicrovm`` call fails.
+        MicrovmStateError: When the MicroVM can no longer run a job.
+        MicrovmResumeDeniedError: When ``ResumeMicrovm`` is denied.
+        MicrovmEndpointUnavailableError: When the MicroVM does not reach
+            ``RUNNING`` in time.
+        ClientError: When ``ResumeMicrovm`` fails otherwise, or a later
+            ``GetMicrovm`` call fails.
+    """
+    started = time.monotonic()
+    reserve = reserve_starts_at(options.remaining_seconds)
+    microvm_id = options.microvm_id
+
+    def unavailable() -> Exception:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        return MicrovmEndpointUnavailableError(
+            f"MicroVM {microvm_id} did not reach RUNNING in {elapsed_ms} ms. "
+            "Last state: unknown."
+        )
+
+    try:
+        current = call_before_deadline(
+            lambda: options.client.get_microvm(microvmIdentifier=microvm_id),
+            reserve,
+            unavailable,
+        )
+    except ClientError as error:
+        code = error_code(error)
+        if code == "ResourceNotFoundException":
+            raise microvm_not_found(microvm_id, "GetMicrovm", error) from error
+        raise MicrovmStateCheckError(
+            str(add_request_id("GetMicrovm", error)),
+            denied=code == "AccessDeniedException",
+        ) from error
+    except BotoCoreError as error:
+        raise MicrovmStateCheckError(str(error), denied=False) from error
+    state = current.get("state")
+    _raise_if_ended(microvm_id, current)
+    if state not in {"SUSPENDING", "SUSPENDED"}:
+        return current.get("endpoint")
+    try:
+        call_before_deadline(
+            lambda: options.client.resume_microvm(microvmIdentifier=microvm_id),
+            reserve,
+            unavailable,
+        )
+    except ClientError as error:
+        code = error_code(error)
+        if code == "ResourceNotFoundException":
+            raise microvm_not_found(microvm_id, "ResumeMicrovm", error) from error
+        if code == "AccessDeniedException":
+            msg = (
+                f"MicroVM {microvm_id} is {state}. ResumeMicrovm was denied, "
+                "so the operation cannot resume it. The function's execution "
+                "role needs lambda:ResumeMicrovm."
+            )
+            response = (
+                error.response
+                if is_microvms_service_error("ResumeMicrovm", error)
+                else None
+            )
+            raise MicrovmResumeDeniedError(
+                with_request_id(msg, "ResumeMicrovm", response)
+            ) from error
+        if code != "ConflictException":
+            raise add_request_id("ResumeMicrovm", error)
+    options.logger.info("resuming MicroVM", extra={"state": state})
+    remaining = options.max_wait_seconds - (time.monotonic() - started)
+    return _wait_until_running(
+        replace(options, max_wait_seconds=remaining), resume_sent=True
+    )
+
+
+def _raise_if_ended(microvm_id: str, current: Any) -> None:
+    """Raise :class:`MicrovmStateError` for a terminating or terminated
+    MicroVM."""
+    state = current.get("state")
+    if state in {"TERMINATING", "TERMINATED"}:
+        reason = current.get("stateReason")
+        # The GetMicrovm output carries the request ID. The state fails
+        # the step, so the message names that request ID.
+        msg = f"MicroVM {microvm_id} is {state}{f': {reason}' if reason else ''}."
+        raise MicrovmStateError(with_request_id(msg, "GetMicrovm", current), state)
+
+
+def _wait_until_running(
+    options: EnsureRunningOptions, *, resume_sent: bool
+) -> str | None:
+    """The loop of :func:`ensure_running`. ``resume_sent`` states that the
+    caller has already called ``ResumeMicrovm``."""
     started = time.monotonic()
     reserve = reserve_starts_at(options.remaining_seconds)
     deadline = started + options.max_wait_seconds
     if reserve is not None:
         deadline = min(deadline, reserve)
-    resume_sent = False
     delay = _INITIAL_POLL_SECONDS
     last_state: str | None = None
     microvm_id = options.microvm_id
@@ -178,12 +326,7 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
                     extra={"waitedMs": round((time.monotonic() - started) * 1000)},
                 )
             return current.get("endpoint")
-        if state in {"TERMINATING", "TERMINATED"}:
-            reason = current.get("stateReason")
-            # The GetMicrovm output carries the request ID. The state fails
-            # the step, so the message names that request ID.
-            msg = f"MicroVM {microvm_id} is {state}{f': {reason}' if reason else ''}."
-            raise MicrovmStateError(with_request_id(msg, "GetMicrovm", current), state)
+        _raise_if_ended(microvm_id, current)
         if state == "SUSPENDED" and not resume_sent:
             try:
                 resume_microvm()

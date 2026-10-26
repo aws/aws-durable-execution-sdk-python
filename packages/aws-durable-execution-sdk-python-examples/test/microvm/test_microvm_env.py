@@ -11,10 +11,16 @@ from src.microvm import (  # noqa: E402
     microvm_run_job,
     microvm_session,
     microvm_session_suspend,
+    microvm_session_suspend_after,
 )
 
 
-EXAMPLES = [microvm_run_job, microvm_session, microvm_session_suspend]
+EXAMPLES = [
+    microvm_run_job,
+    microvm_session,
+    microvm_session_suspend,
+    microvm_session_suspend_after,
+]
 IMAGE_ARN = "arn:aws:lambda:us-west-2:123456789012:microvm-image:img"
 ROLE_ARN = "arn:aws:iam::123456789012:role/microvm-execution"
 
