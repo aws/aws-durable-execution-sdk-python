@@ -613,11 +613,11 @@ class SimulatedMicrovm:
                     self.send_header("content-length", "0")
                     self.end_headers()
                     return
-                status, headers, data = simulated.forward(self.path, body)
+                status, accepted, data = simulated.forward(self.path, body)
                 simulated.record(status)
                 self.send_response(status)
-                for name, value in headers.items():
-                    self.send_header(name, value)
+                if accepted:
+                    self.send_header("X-Microvm-Suspend-After", "accepted")
                 self.send_header("content-length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -644,7 +644,9 @@ class SimulatedMicrovm:
         with self._lock:
             self._state = state
 
-    def forward(self, path: str, body: bytes) -> tuple[int, dict[str, str], bytes]:
+    def forward(self, path: str, body: bytes) -> tuple[int, bool, bytes]:
+        """Send the job to the worker. Return the status, whether the worker
+        accepted ``suspendAfter``, and the body of the answer."""
         worker = self.worker
         assert worker is not None
         if self._old_worker:
@@ -660,12 +662,13 @@ class SimulatedMicrovm:
             )
             response = connection.getresponse()
             data = response.read()
-            ack = response.getheader("X-Microvm-Suspend-After")
-            return (
-                response.status,
-                ({} if ack is None else {"X-Microvm-Suspend-After": ack}),
-                data,
-            )
+            # The endpoint sends one header with a fixed name and a fixed
+            # value. A value from the worker's answer never reaches
+            # send_header. The session accepts only this value. So an answer
+            # with another value reaches the session as an answer without
+            # the header, which the session treats the same way.
+            accepted = response.getheader("X-Microvm-Suspend-After") == "accepted"
+            return response.status, accepted, data
         finally:
             connection.close()
 
