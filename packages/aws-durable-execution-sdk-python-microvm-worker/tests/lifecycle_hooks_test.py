@@ -1042,6 +1042,163 @@ def test_sends_no_suspend_attempt_after_the_resume_hook(
     assert service.frozen_jobs == []
 
 
+STOPPED = "stopping the suspend call: the MicroVM resumed during it"
+
+
+def stop_lines(logger: Any) -> list[dict[str, Any]]:
+    """The fields of each info line that a resume hook logged when it
+    stopped a SuspendMicrovm call."""
+    return [d for level, m, d in logger.lines if level == "info" and m == STOPPED]
+
+
+class AnsweringService:
+    """Stands in for the Lambda MicroVMs service in a botocore client.
+
+    A ``before-send`` handler counts each attempt and answers 200 instead
+    of HTTP. The worker's own handler runs first. So an attempt that it
+    stops is not counted.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.attempts = 0
+
+    def install(self, client: Any) -> Any:
+        client.meta.events.register(
+            "before-send.lambda-microvms.SuspendMicrovm", self._send
+        )
+        return client
+
+    def _send(self, **_: Any) -> AWSResponse:
+        with self._lock:
+            self.attempts += 1
+        headers = HTTPHeaders()
+        headers["Content-Type"] = "application/json"
+        return AWSResponse("https://example.com", 200, headers, _Body(b"{}"))
+
+
+class SlowClientFactory:
+    """A ``create_microvms_client`` that blocks until :meth:`release`.
+
+    It then returns the default client, with ``service`` installed. So a
+    test can send hooks after the idle time ended and before the first
+    attempt.
+    """
+
+    def __init__(self, service: AnsweringService) -> None:
+        self.service = service
+        self.creating = threading.Event()
+        self._release = threading.Event()
+
+    def __call__(self, region: str) -> Any:
+        self.creating.set()
+        self._release.wait(WAIT)
+        return self.service.install(worker_module.create_microvms_client(region))
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def test_starts_no_attempt_after_a_resume_hook_while_the_client_is_created(
+    start: Any, logger: Any, credentials: None
+) -> None:
+    # The idle time has ended, and the worker still creates the client. A
+    # resume hook now ends the refusal. A job can then start, and an attempt
+    # would freeze it. So the call sends nothing.
+    service = AnsweringService()
+    factory = SlowClientFactory(service)
+    h = start(create_microvms_client=factory)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert factory.creating.wait(WAIT)
+    assert h.job("cb-0") == 503
+    assert h.hook("resume") == 200
+    factory.release()
+    h.settle()
+
+    assert service.attempts == 0
+    data = assert_one_warning(logger, "unknown", refusing_jobs=False)
+    assert data["error"]["name"] == "SuspendResumedError"
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+    # The resume hook asked for the idle time during the call. So the idle
+    # time starts when the call ends, and its call is not stopped.
+    h.advance(IDLE - 0.001)
+    assert service.attempts == 0
+    h.advance(0.001)
+    assert service.attempts == 1
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+
+
+@pytest.mark.parametrize("end", ["resume", "grace"])
+def test_keeps_a_suspend_hook_refusal_that_follows_a_resume_that_stopped_the_call(
+    start: Any, logger: Any, credentials: None, end: str
+) -> None:
+    # The resume hook ends the refusal and stops the call. A suspend hook
+    # then starts a refusal of its own, before the stopped call returns.
+    # Lambda is freezing the MicroVM, so the end of the call keeps that
+    # refusal.
+    service = AnsweringService()
+    factory = SlowClientFactory(service)
+    h = start(create_microvms_client=factory)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert factory.creating.wait(WAIT)
+    assert h.hook("resume") == 200
+    assert h.hook("suspend") == 200
+    factory.release()
+    h.settle()
+
+    assert service.attempts == 0
+    assert_one_warning(logger, "unknown", refusing_jobs=True, suspend_hook_arrived=True)
+    assert h.job("cb-1") == 503
+    if end == "resume":
+        assert h.hook("resume") == 200
+    else:
+        h.advance(GRACE - 0.001)
+        assert h.job("cb-1") == 503
+        h.advance(0.001)
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    # The call had returned before the second resume hook. So that hook
+    # stopped nothing, and logged no stop.
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+
+
+def test_a_second_resume_hook_during_the_call_stops_it_too_and_logs_once(
+    start: Any, logger: Any, credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first attempt is in flight when both resume hooks arrive. Its
+    # answer is lost. botocore would retry it, and the retry would freeze
+    # the next job. The second resume hook must not undo the stop.
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    harness: list[Harness] = []
+    service = LostAnswerService(lambda: harness[0].listener)
+    retrying = service.install(
+        boto3.session.Session().client(
+            "lambda-microvms",
+            region_name="us-east-1",
+            config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
+        )
+    )
+    h = start(create_microvms_client=lambda region: retrying)
+    harness.append(h)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert eventually(lambda: service.attempts == 1)
+    assert h.hook("resume") == 200
+    assert h.hook("resume") == 200
+    service.thaw()
+    h.settle()
+
+    assert service.attempts == 1
+    assert_one_warning(logger, "unknown", refusing_jobs=False)
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+
+
 def test_logs_a_rejected_suspend_accepts_jobs_at_once_and_does_not_retry(
     start: Any, logger: Any
 ) -> None:
@@ -1361,6 +1518,30 @@ def test_a_job_that_ends_before_a_refused_call_has_ended_uses_the_normal_idle_ti
     assert client.suspended == ["mvm-1"]
     h.advance(0.001)
     assert client.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_logs_no_stop_for_a_resume_hook_after_the_call_returned(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The call has returned, and the worker still closes its client. A
+    # resume hook now has no attempt left to stop. So it logs no stop.
+    client = _ClosingClient()
+    monkeypatch.setattr(worker_module, "create_microvms_client", lambda r: client)
+    h = start(create_microvms_client=None)
+
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert client.closing.wait(WAIT)
+    assert h.hook("resume") == 200
+    client.release_close.set()
+    h.settle()
+
+    assert client.suspended == ["mvm-1"]
+    assert stop_lines(logger) == []
+    # The resume hook has ended the refusal. So the end of the call starts no
+    # grace period.
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert h.job("cb-1") == 202
 
 
 def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(

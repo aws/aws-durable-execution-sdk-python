@@ -463,6 +463,12 @@ class MicrovmWorkerListener:
         # without the lock: an int read is atomic, and the handler then
         # waits for no listener lock inside botocore.
         self._resume_hooks = 0
+        # The MicroVM ID of the SuspendMicrovm call in flight. It is set when
+        # the idle time ends, and cleared when the call returns or the first
+        # resume hook during the call arrives. That hook logs that it stops
+        # the call. So a second resume hook during the same call logs
+        # nothing.
+        self._stoppable_suspend: str | None = None
         # SuspendMicrovm calls in flight. idle() waits for them. At most one
         # runs at a time.
         self._suspend_calls = 0
@@ -723,13 +729,26 @@ class MicrovmWorkerListener:
         until the next job ends. Returns the deferred run hook jobs,
         registered. The caller starts them after the answer. A
         SuspendMicrovm call in flight starts no attempt after this hook.
+        The first such hook logs that it stops the call.
         """
         with self._locked():
             self._resume_hooks += 1
+            stopped = self._stoppable_suspend
+            self._stoppable_suspend = None
             if self._suspending:
-                return self._end_suspending()
-            self._start_idle_time()
-            return []
+                deferred = self._end_suspending()
+            else:
+                self._start_idle_time()
+                deferred = []
+        # The caller of the listener passes the logger. So the line is
+        # written after the lock is released. botocore cannot cancel an
+        # attempt in flight. So the call stops at its next attempt.
+        if stopped is not None:
+            self._logger.info(
+                "stopping the suspend call: the MicroVM resumed during it",
+                extra={"microvmId": stopped},
+            )
+        return deferred
 
     def _handle_terminate_hook(self, exchange: _Exchange) -> None:
         """Fail the callback of every running job, then answer the hook.
@@ -1462,6 +1481,7 @@ class MicrovmWorkerListener:
             # A resume hook from here on ends the refusal. The call then
             # starts no further attempt.
             resumes_before = self._resume_hooks
+            self._stoppable_suspend = auto_suspend.microvm_id
         try:
             threading.Thread(
                 target=self._suspend_self,
@@ -1514,6 +1534,8 @@ class MicrovmWorkerListener:
         a resume hook, a job, or a refusal for now asked for during it. The
         caller holds the lock through :meth:`_locked`."""
         self._suspend_calls -= 1
+        # The thread or the client could fail before the call was sent.
+        self._stoppable_suspend = None
         if self._idle_after_call:
             self._idle_after_call = False
             self._start_idle_time(after_refusal=self._idle_after_call_floor)
@@ -1564,15 +1586,7 @@ class MicrovmWorkerListener:
         # close().
         unknown_described: object | None = None
         try:
-            # The before-send handler calls resumed() inside botocore, in
-            # this thread. It reads one int without the lock. So it runs no
-            # code of the caller, and waits for no listener lock.
-            suspend_microvm(
-                client,
-                target,
-                SUSPEND_CALL_TIMEOUT_SECONDS,
-                resumed=lambda: self._resume_hooks != resumes_before,
-            )
+            self._send_suspend(client, target, resumes_before)
         except Exception as error:  # noqa: BLE001
             outcome = classify_suspend_error(error)
             # describe() calls str(error). A client from
@@ -1638,6 +1652,27 @@ class MicrovmWorkerListener:
                 SuspendOutcome.UNKNOWN, unknown_described, target, hooks_before
             )
         self._logger.warning(message, extra=extra)
+
+    def _send_suspend(
+        self, client: LambdaMicrovmsClient, target: str, resumes_before: int
+    ) -> None:
+        """Make the SuspendMicrovm call. Start no attempt after a resume hook
+        that arrived since the idle time ended."""
+        try:
+            # The before-send handler calls resumed() inside botocore, in
+            # this thread. It reads one int without the lock. So it runs no
+            # code of the caller, and waits for no listener lock.
+            suspend_microvm(
+                client,
+                target,
+                SUSPEND_CALL_TIMEOUT_SECONDS,
+                resumed=lambda: self._resume_hooks != resumes_before,
+            )
+        finally:
+            # The call has returned. A resume hook from now on stops nothing,
+            # so it logs no stop.
+            with self._lock:
+                self._stoppable_suspend = None
 
     def _failed_call_log(
         self,
