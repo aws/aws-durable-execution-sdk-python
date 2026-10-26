@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
-from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.config import Duration, MapConfig
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
@@ -823,6 +823,7 @@ def test_suspends_after_a_map_with_one_suspend_after_item(fake_client: Any) -> N
                     options=options(suspend_after=item == "a"),
                 ),
                 name="shards",
+                config=MapConfig(max_concurrency=3),
             ).get_results()
             between = ctx.step(lambda _: microvm.wait_for("SUSPENDED"), name="pause")
             after = vm.invoke(ctx, "after", job_input="after", options=options())
