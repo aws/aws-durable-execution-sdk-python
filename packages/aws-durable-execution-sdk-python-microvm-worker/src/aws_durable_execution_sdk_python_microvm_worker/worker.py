@@ -421,15 +421,17 @@ class MicrovmWorkerListener:
        the first one carried the field. A 503 never carries it. Only a
        JSON ``true`` counts. Any other value is ignored.
     2. When the job's outcome reports have ended, the listener sets a
-       pending request. The request fires when no job, failure report,
-       ``run`` hook request, or SuspendMicrovm call runs, and the listener
-       is not terminating, not closed, and not refusing jobs. Each of those
-       ends checks it again.
+       pending request. A job that ends while the listener refuses jobs for
+       a suspend sets none, because the MicroVM is suspending already. The
+       request fires when no job, failure report, ``run`` hook request, or
+       SuspendMicrovm call runs, and the listener is not terminating, not
+       closed, and not refusing jobs. Each of those ends checks it again.
     3. Firing clears the request, stops the idle time, and makes the same
        call as items 3 to 9, with the MicroVM ID of the first accepted
        ``run`` hook with a payload. Without that hook, the listener logs a
        warning and does not suspend. A ``resume`` hook never repeats the
-       request. The ``terminate`` hook and ``close()`` drop it.
+       request. A ``suspend`` hook, the ``terminate`` hook, and ``close()``
+       drop it.
     4. A call refused for now is retried only when the session suspends
        when idle.
 
@@ -529,7 +531,7 @@ class MicrovmWorkerListener:
         # The callback ID of the suspendAfter job whose end asked for a
         # suspend that has not started yet. The request fires when no work
         # runs. A call that starts clears it, so a resume hook never repeats
-        # it. The terminate hook and close() clear it too.
+        # it. A suspend hook, the terminate hook, and close() clear it too.
         self._suspend_requested: str | None = None
         # Each timer action carries the generation it was started with, and
         # acts only when it is still current. Cancelling a timer increments
@@ -808,12 +810,14 @@ class MicrovmWorkerListener:
         """Refuse jobs until the ``resume`` hook, or for 30 seconds.
 
         Lambda freezes the MicroVM after the answer. A job accepted now would
-        freeze with it.
+        freeze with it. Lambda suspends the MicroVM after this hook. So a
+        pending suspend after a job is done, and it is cleared.
         """
         with self._locked():
             self._suspend_hooks += 1
             self._stop_idle_time()
             self._suspending = True
+            self._suspend_requested = None
             self._start_grace()
 
     def _handle_resume_hook(self) -> list[tuple[MicrovmJobDocument, str]]:
@@ -1243,7 +1247,9 @@ class MicrovmWorkerListener:
             # The job's report attempts have ended here, whether the handler
             # succeeded or failed. So a suspendAfter job asks for the suspend
             # now. The suspend runs after this block, so that no lock is
-            # held while it logs or starts its thread.
+            # held while it logs or starts its thread. During a suspend
+            # refusal, the MicroVM is suspending already. So a job that ends
+            # then asks for nothing.
             with self._locked():
                 callback_id = job.callback_id
                 suspend_after = callback_id in self._suspend_after_jobs
@@ -1254,7 +1260,9 @@ class MicrovmWorkerListener:
                 if len(self._finished) > MAX_FINISHED_JOBS:
                     self._finished.popitem(last=False)
                 self._start_idle_time()
-                if suspend_after and not (self._terminating or self._closed):
+                if suspend_after and not (
+                    self._terminating or self._closed or self._suspending
+                ):
                     self._suspend_requested = callback_id
                 self._changed.notify_all()
                 decision = self._take_job_suspend()

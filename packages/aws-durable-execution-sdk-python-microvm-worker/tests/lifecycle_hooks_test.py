@@ -3621,6 +3621,53 @@ def test_refuses_a_resent_running_suspend_after_job_without_acknowledgement(
     assert h.microvms.suspended == ["mvm-1"]
 
 
+@pytest.mark.parametrize("refusal_end", ["resume", "grace"])
+def test_a_job_that_ends_during_a_suspend_hook_refusal_asks_for_nothing(
+    start: Any, refusal_end: str
+) -> None:
+    # Lambda suspends the MicroVM after the suspend hook. So a suspendAfter
+    # job that ends during the refusal asks for no call of the worker's own,
+    # neither then nor after the refusal ends.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend", LAMBDA_HEADERS) == 200
+
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+
+    if refusal_end == "resume":
+        assert h.hook("resume", LAMBDA_HEADERS) == 200
+    else:
+        h.advance(GRACE)
+    post_job(h, "cb-2")
+    end_job(h, "cb-2")
+
+    assert h.jobs.started() == ["cb-1", "cb-2"]
+    assert h.microvms.suspended == []
+
+
+def test_a_suspend_hook_clears_a_pending_suspend_after_a_job(start: Any) -> None:
+    # The request waits for the other job. Lambda then suspends the MicroVM
+    # after the suspend hook. So the request is done, and the other job's end
+    # after the resume fires nothing.
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    post_job(h, "cb-2")
+    end_job(h, "cb-1")
+    assert h.listener._suspend_requested == "cb-1"  # noqa: SLF001
+
+    assert h.hook("suspend", LAMBDA_HEADERS) == 200
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    assert h.hook("resume", LAMBDA_HEADERS) == 200
+    end_job(h, "cb-2")
+
+    assert h.microvms.suspended == []
+
+
 def test_acknowledges_a_resent_running_suspend_after_job_after_the_terminate_hook(
     start: Any,
 ) -> None:
@@ -3886,10 +3933,12 @@ def test_does_not_suspend_after_the_terminate_hook(start: Any) -> None:
     end_job(h, "cb-1")
 
     assert h.hook("terminate", LAMBDA_HEADERS) == 200
+    assert h.listener._suspend_requested is None  # noqa: SLF001
     h.jobs.release_all()
     assert h.worker.idle(WAIT)
 
     assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
 
 
 def test_does_not_suspend_after_close(start: Any) -> None:
