@@ -126,8 +126,10 @@ def microvm_session(
     delivery, as with ``auto_suspend_on_idle``. That record is kept in
     memory only. So every job of every session also checks the state after
     a sign of a suspended MicroVM: no answer, or an HTTP 502 with
-    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A booting MicroVM gives
-    neither sign. So a session that never suspends makes no extra call.
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A boot gives no such
+    sign, unless the worker takes more than 10 seconds to start listening.
+    Then the first delivery gets no answer, and the operation makes one
+    ``GetMicrovm`` call.
 
     A failed :meth:`MicrovmSession.invoke` raises inside the handler. The
     handler can catch the error and continue with the same MicroVM. An

@@ -708,8 +708,8 @@ def test_checks_for_a_suspend_after_a_connect_failure_or_no_answer(
 def test_makes_no_suspend_check_for_another_failure(
     fake_client: Any, fake_endpoint: Any, answer: Any
 ) -> None:
-    # A booting MicroVM never gets MICROVM_CONNECT_FAILED. So a session that
-    # never suspends makes no extra call.
+    # A booting MicroVM never gets MICROVM_CONNECT_FAILED. So these answers
+    # make no extra call.
     endpoint = fake_endpoint([answer])
     checks: list[float] = []
 

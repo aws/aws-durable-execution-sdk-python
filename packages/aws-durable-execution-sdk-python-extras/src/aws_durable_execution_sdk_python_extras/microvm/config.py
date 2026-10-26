@@ -367,7 +367,9 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     reported, and no other job runs. A job that ends while another job runs
     leaves the request pending. The worker then suspends the MicroVM when
     the last running job ends. The next job of the session resumes the
-    MicroVM before it is delivered. The setting works with or without
+    MicroVM before it is delivered. The ``suspend_after`` job itself checks
+    the state too, because the record is set before the job starts. The
+    setting works with or without
     :attr:`MicrovmSessionConfig.auto_suspend_on_idle`.
 
     Set it on the job before a long wait, such as a durable wait or a
@@ -384,7 +386,8 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
        ``lambda:ResumeMicrovm``.
     3. The MicroVM's role has ``lambda:SuspendMicrovm`` on the image.
     4. The worker supports the setting. An older worker ignores it, and the
-       MicroVM keeps running. The session then logs one warning.
+       MicroVM keeps running. Each execution environment then logs one
+       warning per session.
 
     A suspend that the service refuses for now is not retried, unless
     :attr:`MicrovmSessionConfig.auto_suspend_on_idle` is ``True``. Only

@@ -263,12 +263,13 @@ class SendJobOptions:
     MicroVM after a ``suspend_after`` job, and the session can lose the
     record of that job on replay. A suspended or suspending MicroVM gets no
     answer to a request, or its endpoint answers HTTP 502 with
-    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A booting MicroVM gets
-    neither: its endpoint holds the request until the worker listens. So
-    the next attempt calls it after either sign, at most once per 2
-    seconds. A session that never suspends then makes no extra call. It
-    receives what remains of the retry window, in seconds. ``None`` from it
-    keeps the current endpoint.
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. So the next attempt calls
+    it after either sign, at most once per 2 seconds. A booting MicroVM's
+    endpoint holds the request until the worker listens. A boot gives no
+    such sign, unless the worker takes more than 10 seconds to start
+    listening. Then the first delivery gets no answer, and the operation
+    makes one ``GetMicrovm`` call. It receives what remains of the retry
+    window, in seconds. ``None`` from it keeps the current endpoint.
     """
     unavailable_note: Callable[[], str | None] | None = None
     """A sentence to add to the message of

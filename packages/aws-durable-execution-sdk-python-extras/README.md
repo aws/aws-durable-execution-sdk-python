@@ -280,7 +280,9 @@ build = vm.invoke(
     "build",
     job_input=event,
     options=MicrovmInvokeOptions(
-        timeout=Duration.from_minutes(15), suspend_after=True
+        timeout=Duration.from_minutes(15),
+        heartbeat_timeout=Duration.from_seconds(30),
+        suspend_after=True,
     ),
 )
 approval = ctx.create_callback(name="approval").result()  # a long wait
@@ -297,17 +299,17 @@ vm.invoke(
 
 What happens:
 
-1. The job request carries `"suspendAfter": true`. The job document stays at version 1, and the field is omitted for every other job.
+1. The job request carries `"suspendAfter": true`. The job document stays at version 1, and the field is omitted for every other job. The run hook payload never carries it.
 2. The worker acknowledges the field with the header `X-Microvm-Suspend-After: accepted` in its 202 answer.
 3. The worker suspends the MicroVM when the job has ended and its outcome is reported, and no other job runs. A job that ends while another job runs leaves the request pending. The worker then suspends the MicroVM when the last running job ends.
 4. The worker suspends the MicroVM that its `run` hook named. It never uses the MicroVM ID of a job request.
-5. Each later job of the session handle checks the MicroVM state before delivery, and resumes a suspended MicroVM, as with `auto_suspend_on_idle`.
+5. Each later job of the session handle checks the MicroVM state before delivery, and resumes a suspended MicroVM, as with `auto_suspend_on_idle`. The `suspend_after` job itself checks the state too, because the record is set before the job starts.
 
 The setting works with or without `auto_suspend_on_idle`. With both, the worker suspends right after the job, and the idle time applies after each resume.
 
-The record that a job set `suspend_after` is kept in memory only. A replay of a completed job, `map` item, `parallel` branch, or child context does not run its `vm.invoke` again. So the next job can skip the state check of a suspended MicroVM. For that case, every session job checks the state after a sign of a suspended MicroVM:
+The record that a job set `suspend_after` is kept in memory only. A replay of a completed job calls `vm.invoke` again, so it sets the record again. A replay of a completed `map` item, `parallel` branch, or child context does not run its function again. So the next job can skip the state check of a suspended MicroVM. For that case, every session job checks the state after a sign of a suspended MicroVM:
 
-1. The sign is an HTTP 502 with `x-aws-proxy-error: MICROVM_CONNECT_FAILED`, or a request without an answer. A booting MicroVM gives neither sign, because its endpoint holds the request until the worker listens. So a session that never suspends makes no extra call.
+1. The sign is an HTTP 502 with `x-aws-proxy-error: MICROVM_CONNECT_FAILED`, or a request without an answer. A booting MicroVM's endpoint holds the request until the worker listens. A boot gives no such sign, unless the worker takes more than 10 seconds to start listening. Then the first delivery gets no answer, and the operation makes one GetMicrovm call.
 2. The request step calls `GetMicrovm` once. It resumes a `SUSPENDING` or `SUSPENDED` MicroVM, waits for `RUNNING`, and sends the job again.
 3. The check runs again after each failed request, at most once per 2 seconds.
 4. A denied or failed `GetMicrovm` logs one warning per job: `GetMicrovm failed, so the operation could not check whether the MicroVM is suspended. The request step keeps sending the job.` The request step then keeps sending the job. After a denied call, the final `MicrovmEndpointUnavailableError` message adds `GetMicrovm was denied, so the operation could not check whether the MicroVM is suspended.`
@@ -328,7 +330,7 @@ It needs:
 2. A `heartbeat_timeout` on the next job of at least its `retry_window` plus 30 seconds. The heartbeat timeout starts before delivery, so it includes the resume and the refusal.
 3. `lambda:GetMicrovm` and `lambda:ResumeMicrovm` in the function's role.
 4. `lambda:SuspendMicrovm` on the image in the MicroVM's role. That permission lets code in any MicroVM of the image suspend any other. So use one image per trust boundary.
-5. A worker that supports the field. An older worker ignores it, and the MicroVM keeps running. The session then logs one warning: `the worker in MicroVM <id> does not support suspendAfter. The MicroVM keeps running after the job.`
+5. A worker that supports the field. An older worker ignores it, and the MicroVM keeps running. Each execution environment then logs one warning per session: `the worker in MicroVM <id> does not support suspendAfter. The MicroVM keeps running after the job.`
 
 A suspend that the service refuses for now, such as a throttle or expired credentials, is not retried without `auto_suspend_on_idle`. The MicroVM then keeps running until a later suspend. With `auto_suspend_on_idle`, the worker tries again after the idle time, as it does for an idle suspend.
 
