@@ -6,7 +6,9 @@ MicroVM."""
 
 from __future__ import annotations
 
+import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -35,13 +37,12 @@ from aws_durable_execution_sdk_python_extras.microvm.operation import (
     _validate_input,
     _validate_region,
     _validate_request,
+    _validate_suspend_after,
     _validate_timeout,
     create_job_callback,
     job_error,
+    step_retry_strategy,
     unknown_delivery_error,
-)
-from aws_durable_execution_sdk_python_extras.microvm.retry import (
-    default_microvm_retry_strategy,
 )
 
 
@@ -60,6 +61,16 @@ wait costs at most 60 seconds of compute before the MicroVM suspends. A
 session whose ``timeout`` is shorter uses its ``timeout``. A session whose
 ``timeout`` is under 10 seconds does not suspend by default.
 """
+
+_WARNED_SESSIONS: OrderedDict[str, None] = OrderedDict()
+"""The IDs of the sessions that warned about a worker that ignores
+``suspend_after``, oldest first."""
+
+_MAX_WARNED_SESSIONS = 1_000
+"""How many session IDs :data:`_WARNED_SESSIONS` keeps. A session ID is a
+short string, so 1,000 of them use well under 1 MB."""
+
+_WARNED_LOCK = threading.Lock()
 
 _MIN_AUTO_SUSPEND_IDLE_SECONDS = 10
 """The shortest idle time a session accepts.
@@ -109,6 +120,16 @@ def microvm_session(
     once for a new MicroVM that is still booting. The launch checkpoint
     records whether the MicroVM can be suspended. Replay follows that record,
     not the current config.
+
+    A job with ``suspend_after`` asks the worker to suspend the MicroVM after
+    the job. Each later job of the handle then checks the state before
+    delivery, as with ``auto_suspend_on_idle``. That record is kept in
+    memory only. So every job of every session also checks the state after
+    a sign of a suspended MicroVM: no answer, or an HTTP 502 with
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A boot gives no such
+    sign, unless the worker takes more than 10 seconds to start listening.
+    Then the first delivery gets no answer, and the operation makes one
+    ``GetMicrovm`` call.
 
     A failed :meth:`MicrovmSession.invoke` raises inside the handler. The
     handler can catch the error and continue with the same MicroVM. An
@@ -167,16 +188,15 @@ def microvm_session(
     Raises:
         ValidationError: When ``name`` or ``config`` is not valid, or the
             Region cannot be determined. No durable operation starts.
-        TypeError: When ``handler`` is not callable. No durable operation
-            starts.
-        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
+        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries, or
+            rejects the config, for example an empty ``image_identifier``.
         MicrovmError: A MicroVM error that the handler did not catch.
-        ChildContextError: Any other error that the handler raised.
+        ChildContextError: Any other error that the handler raised. A
+            ``handler`` that is not callable raises Python's ``TypeError``
+            after the launch, inside the child context. So it also reaches
+            the caller as ``ChildContextError``, after the terminate step.
     """
     scope = _SessionScope.create(context, name, config)
-    if not callable(handler):
-        msg = f'MicroVM session "{name}": handler must be callable'
-        raise TypeError(msg)
 
     def run(child: DurableContext) -> _T:
         return scope.run_session(child, handler)
@@ -206,15 +226,49 @@ class MicrovmSession:
         launched: LaunchResult,
         *,
         resume_before_delivery: bool,
+        session_id: str,
     ) -> None:
         self._scope = scope
         self._launched = launched
         self._resume_before_delivery = resume_before_delivery
+        # Set by the first suspend_after job of this handle. Later jobs then
+        # check the state before delivery. The flag lives in memory only. A
+        # replay of a completed job, map item, or child context does not run
+        # its invoke() again, so it does not set the flag. The check after a
+        # sign of a suspended MicroVM covers that case.
+        self._may_be_suspended = False
+        self._session_id = session_id
 
     @property
     def microvm_id(self) -> str:
         """The ID of the session's MicroVM."""
         return self._launched.microvm_id
+
+    def _resume_mode(self) -> bool:
+        """Whether a job checks the MicroVM state before delivery.
+
+        The request step reads it at the start of each attempt. So a step
+        retry, and a ``map`` item that starts after a sibling set the flag,
+        see the current value. The flag only changes from ``False`` to
+        ``True``.
+        """
+        return self._resume_before_delivery or self._may_be_suspended
+
+    def _claim_suspend_after_warning(self) -> bool:
+        """Return ``True`` the first time, so the session warns once about a
+        worker that does not support ``suspend_after``.
+
+        Each invocation creates a new handle. So the record is kept per
+        process, by session ID. A later invocation in the same execution
+        environment then logs no second warning.
+        """
+        with _WARNED_LOCK:
+            if self._session_id in _WARNED_SESSIONS:
+                return False
+            _WARNED_SESSIONS[self._session_id] = None
+            if len(_WARNED_SESSIONS) > _MAX_WARNED_SESSIONS:
+                _WARNED_SESSIONS.popitem(last=False)
+            return True
 
     def invoke(
         self,
@@ -240,35 +294,37 @@ class MicrovmSession:
             name: The job's child context name.
             job_input: The job's input. It must be JSON-serializable, and the
                 same on every replay.
-            options: The route and the timeouts of this job.
+            options: The route, the timeouts, and ``suspend_after`` of this
+                job.
 
         Returns:
             The value that the MicroVM passed to
             ``SendDurableExecutionCallbackSuccess``, parsed as JSON.
 
         Raises:
-            TypeError: When ``context`` is not a durable context, or is the
-                context that ``microvm_session`` was called with, or
-                ``job_input`` is not JSON-serializable.
-            ValidationError: When ``name`` or ``options`` is not valid.
-            MicrovmNotRunningError: When the session's MicroVM has ended, and
-                the session checks the MicroVM state before each job.
+            TypeError: When ``context`` is the context that
+                ``microvm_session`` was called with, or ``job_input`` is not
+                JSON-serializable.
+            AttributeError: When ``context`` is not a durable context, for
+                example a job name passed as the first argument. Python
+                raises it at ``context.run_in_child_context``.
+            ValueError: When the JSON of ``job_input`` is over
+                ``MAX_JOB_INPUT_BYTES`` UTF-8 bytes.
+            ValidationError: When ``name`` or ``options`` is not valid, for
+                example a ``suspend_after`` that is not a ``bool``.
+            MicrovmNotRunningError: When the session's MicroVM has ended. The
+                session reports it when it checks the MicroVM state before
+                each job, and for every job when ``CreateMicrovmAuthToken``
+                reports the MicroVM removed. A check after a sign of a
+                suspended MicroVM reports it too.
             MicrovmDeliveryError: When the delivery fails after all retries,
-                or the route rejects the job.
+                or the route rejects the job. A suspended MicroVM whose
+                ``ResumeMicrovm`` is denied fails the delivery at once.
             MicrovmJobFailedError: When the MicroVM reports a failure, or
                 sends a result that is not valid JSON.
             MicrovmTimeoutError: When no result or heartbeat arrives in time.
         """
         scope = self._scope
-        # A call in the shape vm.invoke("build", ...) passes a string here.
-        # This check names the mistake, instead of an AttributeError from
-        # inside.
-        if not callable(getattr(context, "run_in_child_context", None)):
-            msg = (
-                f'MicroVM session "{scope.name}": invoke requires the durable '
-                "context to create the job in, as its first argument"
-            )
-            raise TypeError(msg)
         # The caller's own context is often in scope in the handler's
         # closure. A job created in it lands outside the session's child
         # context. The core SDK does not refuse that, and the next replay
@@ -290,9 +346,15 @@ class MicrovmSession:
         retry_window_seconds = _validate_request(name, options)
         timeout_seconds = _validate_timeout(name, "timeout", options.timeout)
         heartbeat_timeout_seconds = _validate_heartbeat(name, options.heartbeat_timeout)
+        suspend_after = _validate_suspend_after(name, options.suspend_after)
         _validate_input(name, job_input)
         launched = self._launched
-        resume = self._resume_before_delivery
+        if suspend_after:
+            # The flag is set before the child context. A replay of a
+            # completed job returns its result without running the child
+            # context's function. So the flag is set on every replay of this
+            # call too.
+            self._may_be_suspended = True
 
         def run(job_context: DurableContext) -> Any:
             callback = create_job_callback(
@@ -307,7 +369,12 @@ class MicrovmSession:
                 heartbeat_timeout_seconds=heartbeat_timeout_seconds,
                 request=options,
                 retry_window_seconds=retry_window_seconds,
-                resume=resume,
+                resume=self._resume_mode,
+                suspend_check=True,
+                suspend_after=suspend_after,
+                claim_suspend_after_warning=(
+                    self._claim_suspend_after_warning if suspend_after else None
+                ),
             )
             try:
                 return callback.result()
@@ -359,7 +426,7 @@ class _SessionScope(_MicrovmScope):
             ValidationError: When ``name`` or ``config`` is not valid, or the
                 Region cannot be determined.
         """
-        timeout_seconds = _validate_base(name, config, config.timeout)
+        timeout_seconds = _validate_base(name, config.timeout)
         auto_suspend_idle_seconds = _validate_auto_suspend(
             name, config, timeout_seconds
         )
@@ -370,7 +437,7 @@ class _SessionScope(_MicrovmScope):
             partition=partition,
             region=region,
             timeout_seconds=timeout_seconds,
-            retry_strategy=config.retry_strategy or default_microvm_retry_strategy,
+            retry_strategy=step_retry_strategy(config),
             auto_suspend_idle_seconds=auto_suspend_idle_seconds,
             idle_policy=config.idle_policy,
             outer_context=context,
@@ -406,22 +473,19 @@ class _SessionScope(_MicrovmScope):
         # 3. So a deploy that changes auto_suspend_on_idle or idle_policy does
         #    not change what the running MicroVM does.
         # 4. A job that skips the state check of a suspended MicroVM gets a
-        #    502. The request step retries a 502 until both retry tiers end.
+        #    502, or no answer. The request step then checks the state, and
+        #    resumes the MicroVM. That costs a failed request per job.
         # 5. So each job follows the resume mode that the launch recorded,
         #    not the current config.
-        # A launch checkpoint from code that predates the resumeBeforeDelivery
-        # field has no such field. That code computed the mode from the
-        # current config on every replay. So the session does the same for
-        # such a checkpoint.
-        resume_before_delivery = (
-            launched.resume_before_delivery
-            if launched.resume_before_delivery is not None
-            else self.resume_from_config
-        )
+        # Every session launch records a boolean. So only `True` turns the
+        # state check on. A missing field, or any other value, reads as False.
         try:
             result = handler(
                 MicrovmSession(
-                    self, launched, resume_before_delivery=resume_before_delivery
+                    self,
+                    launched,
+                    resume_before_delivery=launched.resume_before_delivery is True,
+                    session_id=session_id,
                 ),
                 child,
             )

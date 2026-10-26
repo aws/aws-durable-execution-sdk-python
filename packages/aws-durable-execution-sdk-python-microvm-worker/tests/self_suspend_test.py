@@ -20,6 +20,7 @@ from botocore.awsrequest import AWSResponse, HTTPHeaders
 from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
+    ConnectionClosedError,
     EndpointConnectionError,
     NoCredentialsError,
 )
@@ -29,10 +30,14 @@ from aws_durable_execution_sdk_python_microvm_worker.self_suspend import (
     SUSPEND_CALL_TIMEOUT_SECONDS,
     SuspendDeadlineError,
     SuspendOutcome,
+    SuspendResumedError,
     classify_suspend_error,
     create_microvms_client,
     suspend_microvm,
 )
+
+
+_BEFORE_SEND = "before-send.lambda-microvms.SuspendMicrovm"
 
 
 def suspend_error(code: str, status: int, retries: int = 0) -> ClientError:
@@ -93,6 +98,9 @@ def test_classifies_a_first_attempt_that_can_succeed_later_as_refused_for_now(
         suspend_error("InternalServerException", 500),
         TimeoutError("timed out"),
         SuspendDeadlineError("passed"),
+        # A resume hook stopped a later attempt. An earlier attempt may have
+        # suspended the MicroVM.
+        SuspendResumedError("resumed"),
         EndpointConnectionError(endpoint_url="https://example.com"),
         RuntimeError("boom"),
     ],
@@ -169,7 +177,9 @@ def test_the_default_client_ends_a_read_at_the_call_timeout() -> None:
         assert client.meta.region_name == "us-west-2"
         assert config.read_timeout == SUSPEND_CALL_TIMEOUT_SECONDS
         assert config.connect_timeout == 5
-        assert config.retries == {"mode": "standard", "total_max_attempts": 3}
+        # One attempt: a retry after a lost answer can run after the MicroVM
+        # resumed, and suspend it with the next job inside.
+        assert config.retries == {"mode": "standard", "total_max_attempts": 1}
     finally:
         client.close()
 
@@ -212,36 +222,40 @@ def _answer_every_attempt(
 
 
 @pytest.mark.parametrize(
-    ("status", "code", "headers", "attempts", "outcome"),
+    ("status", "code", "headers", "outcome"),
     [
-        # A throttle is retried. So its error reports 2 retries, and an
-        # earlier attempt may have reached the service.
-        (429, "ThrottlingException", {}, 3, SuspendOutcome.UNKNOWN),
-        # A signature error with a clock offset is not retried. botocore does
-        # not correct the clock from the server's Date header.
+        # The service did nothing. The worker calls again after the next
+        # idle time.
+        (429, "ThrottlingException", {}, SuspendOutcome.REFUSED_FOR_NOW),
+        # A server error does not show whether the service acted.
+        (500, "InternalServerException", {}, SuspendOutcome.UNKNOWN),
+        (503, "ServiceUnavailableException", {}, SuspendOutcome.UNKNOWN),
+        # botocore does not correct the clock from the server's Date header.
         (
             403,
             "InvalidSignatureException",
             {"Date": formatdate(time.time() + 600, usegmt=True)},
-            1,
             SuspendOutcome.REFUSED_FOR_NOW,
         ),
-        (403, "InvalidSignatureException", {}, 1, SuspendOutcome.REFUSED_FOR_NOW),
-        (403, "ExpiredTokenException", {}, 1, SuspendOutcome.REFUSED_FOR_NOW),
+        (403, "InvalidSignatureException", {}, SuspendOutcome.REFUSED_FOR_NOW),
+        (403, "ExpiredTokenException", {}, SuspendOutcome.REFUSED_FOR_NOW),
     ],
-    ids=["throttle", "signature-clock-offset", "signature-mismatch", "expired-token"],
+    ids=[
+        "throttle",
+        "server-error",
+        "unavailable",
+        "signature-clock-offset",
+        "signature-mismatch",
+        "expired-token",
+    ],
 )
-def test_the_default_client_retries_a_throttle_and_no_signature_or_token_error(
+def test_the_default_client_makes_one_attempt_for_an_error_answer(
     credentials: None,
-    monkeypatch: pytest.MonkeyPatch,
     status: int,
     code: str,
     headers: dict[str, str],
-    attempts: int,
     outcome: SuspendOutcome,
 ) -> None:
-    # No backoff, so that the retries do not slow the test.
-    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
     client = create_microvms_client("us-east-1")
     try:
         sent = _answer_every_attempt(client, status, code, **headers)
@@ -249,12 +263,125 @@ def test_the_default_client_retries_a_throttle_and_no_signature_or_token_error(
         with pytest.raises(ClientError) as raised:
             suspend_microvm(client, "mvm-1", 5.0)
 
-        assert len(sent) == attempts
+        assert len(sent) == 1
         metadata = raised.value.response["ResponseMetadata"]
-        assert metadata["RetryAttempts"] == attempts - 1
+        assert metadata["RetryAttempts"] == 0
         assert classify_suspend_error(raised.value) is outcome
     finally:
         client.close()
+
+
+def test_the_default_client_makes_one_attempt_after_a_connection_error(
+    credentials: None,
+) -> None:
+    # botocore retries a closed connection in its standard mode. The default
+    # client makes no second attempt, and the outcome is unknown.
+    client = create_microvms_client("us-east-1")
+    try:
+        sent: list[int] = []
+
+        def close(**_: Any) -> None:
+            sent.append(1)
+            raise ConnectionClosedError(endpoint_url="https://example.com")
+
+        client.meta.events.register(_BEFORE_SEND, close)
+
+        with pytest.raises(ConnectionClosedError) as raised:
+            suspend_microvm(client, "mvm-1", 5.0)
+
+        assert sent == [1]
+        assert classify_suspend_error(raised.value) is SuspendOutcome.UNKNOWN
+    finally:
+        client.close()
+
+
+def test_a_retrying_client_retries_a_throttle_and_its_error_is_unknown(
+    credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A caller's client can retry. Its error then reports the retries, and an
+    # earlier attempt may have reached the service.
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    client = _retrying_client()
+    try:
+        sent = _answer_every_attempt(client, 429, "ThrottlingException")
+
+        with pytest.raises(ClientError) as raised:
+            suspend_microvm(client, "mvm-1", 5.0)
+
+        assert len(sent) == 3
+        assert raised.value.response["ResponseMetadata"]["RetryAttempts"] == 2
+        assert classify_suspend_error(raised.value) is SuspendOutcome.UNKNOWN
+    finally:
+        client.close()
+
+
+def _retrying_client() -> Any:
+    """A caller's client that makes 3 attempts."""
+    return boto3.session.Session().client(
+        "lambda-microvms",
+        region_name="us-east-1",
+        config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
+    )
+
+
+def test_starts_no_attempt_after_the_microvm_resumed(
+    credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. The first attempt reaches the service, and the service suspends the
+    #    MicroVM.
+    # 2. The freeze cuts the connection, so the answer is lost.
+    # 3. The resume hook arrives, and the worker accepts jobs again.
+    # 4. botocore then retries the closed connection. That attempt would
+    #    suspend the MicroVM with a new job inside.
+    # So the handler stops the retry once resumed() is True.
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    client = _retrying_client()
+    resumes = 0
+    try:
+        sent: list[int] = []
+
+        def land_then_lose_the_answer(**_: Any) -> None:
+            nonlocal resumes
+            sent.append(1)
+            resumes += 1
+            raise ConnectionClosedError(endpoint_url="https://example.com")
+
+        client.meta.events.register(_BEFORE_SEND, land_then_lose_the_answer)
+
+        with pytest.raises(SuspendResumedError):
+            suspend_microvm(client, "mvm-1", 5.0, resumed=lambda: resumes > 0)
+
+        assert sent == [1]
+        assert _deadline_handlers(client) == []
+    finally:
+        client.close()
+
+
+def test_starts_no_first_attempt_when_the_microvm_resumed_before_the_call() -> None:
+    events = _RecordingEvents()
+    client: Any = _EmittingClient(events)
+
+    with pytest.raises(SuspendResumedError):
+        suspend_microvm(client, "mvm-1", 5.0, resumed=lambda: True)
+
+    assert client.sent == 0
+    assert events.handlers == {}
+
+
+def test_starts_the_attempt_while_the_microvm_has_not_resumed() -> None:
+    events = _RecordingEvents()
+    client: Any = _EmittingClient(events)
+    checks: list[int] = []
+
+    def resumed() -> bool:
+        checks.append(1)
+        return False
+
+    suspend_microvm(client, "mvm-1", 5.0, resumed=resumed)
+
+    assert client.sent == 1
+    assert checks == [1]
+    assert events.handlers == {}
 
 
 class _SilentService:
@@ -425,6 +552,21 @@ class _RecordingEvents:
     def unregister(self, event: str, unique_id: str) -> None:
         with self._lock:
             self.handlers.pop(unique_id, None)
+
+
+class _EmittingClient:
+    """A client that runs the registered handlers before its one attempt,
+    as botocore emits ``before-send``."""
+
+    def __init__(self, events: _RecordingEvents) -> None:
+        self.meta = type("Meta", (), {"events": events})()
+        self.sent = 0
+
+    def suspend_microvm(self, **kwargs: Any) -> dict[str, Any]:
+        for handler in list(self.meta.events.handlers.values()):
+            handler(request=None)
+        self.sent += 1
+        return {}
 
 
 class _HeldClient:

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from aws_durable_execution_sdk_python_microvm_worker import MICROVM_JOB_PATH
+from aws_durable_execution_sdk_python_microvm_worker import worker
 
 from aws_durable_execution_sdk_python_extras.microvm import (
     DEFAULT_MICROVM_JOB_PATH,
@@ -55,6 +56,11 @@ def options(
 
 def test_matches_the_job_path_of_the_worker() -> None:
     assert DEFAULT_MICROVM_JOB_PATH == MICROVM_JOB_PATH
+
+
+def test_matches_the_suspend_after_header_of_the_worker() -> None:
+    assert request.SUSPEND_AFTER_HEADER == worker.SUSPEND_AFTER_HEADER
+    assert request.SUSPEND_AFTER_ACCEPTED == "accepted"
 
 
 def test_posts_the_job_with_an_auth_token(fake_client: Any, fake_endpoint: Any) -> None:
@@ -383,11 +389,55 @@ def test_rejects_a_redirect_without_following_it(
     assert raised.value.status == status
     assert str(raised.value) == (
         f"The MicroVM answered the job at /durable-execution/v1/job with HTTP "
-        f"{status}, a redirect to /moved. The operation does not follow "
-        "redirects, so set the path that the route serves."
+        f"{status}, a redirect. The operation does not follow redirects, so set "
+        "the path that the route serves."
     )
     # A followed 301, 302, or 303 would arrive as a GET without the job.
     assert [r["path"] for r in endpoint.requests] == ["/durable-execution/v1/job"]
+
+
+@pytest.mark.parametrize("status", [302, 304])
+def test_rejects_a_3xx_without_a_location(
+    fake_client: Any, fake_endpoint: Any, status: int
+) -> None:
+    endpoint = fake_endpoint([status], location=None)
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(options(fake_client(), endpoint.url, []))
+
+    assert raised.value.status == status
+    assert str(raised.value) == (
+        f"The MicroVM answered the job at /durable-execution/v1/job with HTTP {status}"
+    )
+
+
+def test_rejects_a_3xx_with_an_empty_location(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # An empty Location names no target. So it counts as no Location.
+    endpoint = fake_endpoint([302], location="")
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(options(fake_client(), endpoint.url, []))
+
+    assert raised.value.status == 302
+    assert str(raised.value) == (
+        "The MicroVM answered the job at /durable-execution/v1/job with HTTP 302"
+    )
+
+
+def test_omits_the_location_of_a_redirect_from_the_message(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The execution history stores the message. A query in the Location can
+    # hold a secret. So the message must not contain any part of it.
+    endpoint = fake_endpoint([302], location="https://example.com/x?token=secret")
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(options(fake_client(), endpoint.url, []))
+
+    assert "example.com" not in str(raised.value)
+    assert "secret" not in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -439,14 +489,33 @@ def test_rejects_a_redirect_that_the_callers_opener_followed(
 
     assert str(raised.value) == (
         "The MicroVM answered the job at /durable-execution/v1/job with a "
-        f"redirect to {endpoint.url}/moved, and the opener followed it. The "
-        "operation does not follow redirects, so set the path that the route "
-        "serves."
+        "redirect, and the opener followed it. The operation does not follow "
+        "redirects, so set the path that the route serves, and pass an opener "
+        "that follows no redirect."
     )
     assert [r["path"] for r in endpoint.requests] == [
         "/durable-execution/v1/job",
         "/moved",
     ]
+
+
+def test_omits_the_followed_url_from_the_message(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The opener follows the 302 to the URL with the query. The message must
+    # not contain that URL.
+    endpoint = fake_endpoint([302], location="/x?token=secret")
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(
+            options(
+                fake_client(), endpoint.url, [], opener=urllib.request.build_opener()
+            )
+        )
+
+    assert endpoint.requests[-1]["path"] == "/x?token=secret"
+    assert "?token=" not in str(raised.value)
+    assert "secret" not in str(raised.value)
 
 
 def test_builds_the_default_opener_once() -> None:
@@ -574,3 +643,221 @@ def test_sends_no_auth_token_on_a_redirect_that_the_callers_opener_follows(
     assert followed["method"] == "GET"
     assert "x-test-token" not in followed["headers"]
     assert "content-type" not in followed["headers"]
+
+
+# ---------------------------------------------------------------------------
+# The check for a suspended MicroVM, and the suspendAfter acknowledgement
+# ---------------------------------------------------------------------------
+
+
+class FakeClock:
+    """A monotonic clock that advances only when the tier sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    fake = FakeClock()
+    monkeypatch.setattr(request, "time", fake)
+    return fake
+
+
+def test_checks_for_a_suspend_after_a_connect_failure_or_no_answer(
+    fake_client: Any, fake_endpoint: Any, connect_failed: Any, clock: FakeClock
+) -> None:
+    # 1. A suspended MicroVM's endpoint answers 502 with MICROVM_CONNECT_FAILED.
+    # 2. A request that the freeze caught gets no answer.
+    # 3. The clock passes 2 seconds between the two failures.
+    endpoint = fake_endpoint([connect_failed, 503, 503, 503, None])
+    windows: list[float] = []
+
+    def check(left: float) -> str | None:
+        windows.append(left)
+        return None
+
+    status = send_job(
+        options(
+            fake_client(),
+            endpoint.url,
+            [],
+            sleep=clock.sleep,
+            suspend_check=check,
+        )
+    )
+
+    assert status == 202
+    assert clock.sleeps == [0.25, 0.5, 1.0, 2.0, 4.0]
+    assert windows == [60 - 0.25, 60 - 7.75]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [502, 503, 504, (502, {"x-aws-proxy-error": "OTHER"}), 429, 500],
+    ids=["502", "503", "504", "502-other-proxy-error", "429", "500"],
+)
+def test_makes_no_suspend_check_for_another_failure(
+    fake_client: Any, fake_endpoint: Any, answer: Any
+) -> None:
+    # A booting MicroVM never gets MICROVM_CONNECT_FAILED. So these answers
+    # make no extra call.
+    endpoint = fake_endpoint([answer])
+    checks: list[float] = []
+
+    status = send_job(
+        options(fake_client(), endpoint.url, [], suspend_check=checks.append)
+    )
+
+    assert status == 202
+    assert checks == []
+
+
+def test_checks_for_a_suspend_at_most_once_per_2_seconds(
+    fake_client: Any, fake_endpoint: Any, connect_failed: Any, clock: FakeClock
+) -> None:
+    endpoint = fake_endpoint([connect_failed] * 5)
+    checked_at: list[float] = []
+
+    def check(left: float) -> str | None:
+        checked_at.append(clock.now - 1000)
+        return None
+
+    send_job(
+        options(fake_client(), endpoint.url, [], sleep=clock.sleep, suspend_check=check)
+    )
+
+    # The failures end at 0.25, 0.75, 1.75, 3.75, and 7.75 seconds. A check
+    # that would come less than 2 seconds after the last one is skipped.
+    assert checked_at == [0.25, 3.75, 7.75]
+    assert len(endpoint.requests) == 6
+
+
+def test_sends_the_next_request_to_the_endpoint_that_the_suspend_check_returns(
+    fake_client: Any, fake_endpoint: Any, connect_failed: Any
+) -> None:
+    before = fake_endpoint([connect_failed])
+    after = fake_endpoint()
+
+    status = send_job(
+        options(fake_client(), before.url, [], suspend_check=lambda left: after.url)
+    )
+
+    assert status == 202
+    assert len(before.requests) == 1
+    assert len(after.requests) == 1
+
+
+def test_ends_the_tier_when_the_suspend_check_has_no_time_left(
+    fake_client: Any, fake_endpoint: Any, connect_failed: Any
+) -> None:
+    endpoint = fake_endpoint([connect_failed])
+    checks: list[float] = []
+
+    with pytest.raises(MicrovmEndpointUnavailableError, match="Last failure: HTTP 502"):
+        send_job(
+            options(
+                fake_client(),
+                endpoint.url,
+                [],
+                retry_window_seconds=1,
+                window_started_at=time.monotonic() - 0.2,
+                sleep=lambda seconds: time.sleep(0.9),
+                suspend_check=checks.append,
+            )
+        )
+
+    assert checks == []
+
+
+def test_adds_the_note_to_the_final_error(
+    fake_client: Any, fake_endpoint: Any, connect_failed: Any
+) -> None:
+    endpoint = fake_endpoint([connect_failed] * 10)
+
+    with pytest.raises(MicrovmEndpointUnavailableError) as raised:
+        send_job(
+            options(
+                fake_client(),
+                endpoint.url,
+                [],
+                retry_window_seconds=1,
+                unavailable_note=lambda: "GetMicrovm was denied.",
+            )
+        )
+
+    assert str(raised.value).endswith("Last failure: HTTP 502. GetMicrovm was denied.")
+
+
+def test_adds_no_note_when_the_note_is_none(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint([503] * 10)
+
+    with pytest.raises(MicrovmEndpointUnavailableError) as raised:
+        send_job(
+            options(
+                fake_client(),
+                endpoint.url,
+                [],
+                retry_window_seconds=1,
+                unavailable_note=lambda: None,
+            )
+        )
+
+    assert str(raised.value).endswith("Last failure: HTTP 503.")
+
+
+@pytest.mark.parametrize(
+    ("headers", "ignored"),
+    [
+        ({"X-Microvm-Suspend-After": "accepted"}, 0),
+        ({}, 1),
+        ({"X-Microvm-Suspend-After": "yes"}, 1),
+    ],
+    ids=["acknowledged", "no-header", "other-value"],
+)
+def test_reports_a_suspend_after_job_that_the_worker_did_not_acknowledge(
+    fake_client: Any, fake_endpoint: Any, headers: dict[str, str], ignored: int
+) -> None:
+    endpoint = fake_endpoint(accept_headers=headers)
+    calls: list[None] = []
+
+    status = send_job(
+        options(
+            fake_client(),
+            endpoint.url,
+            [],
+            on_suspend_after_ignored=lambda: calls.append(None),
+        )
+    )
+
+    assert status == 202
+    assert len(calls) == ignored
+
+
+def test_reads_the_acknowledgement_of_the_answer_that_accepted_the_job(
+    fake_client: Any, fake_endpoint: Any, suspend_after_ack: dict[str, str]
+) -> None:
+    # A refused answer that carries the header does not count.
+    endpoint = fake_endpoint([(503, suspend_after_ack)])
+    calls: list[None] = []
+
+    send_job(
+        options(
+            fake_client(),
+            endpoint.url,
+            [],
+            on_suspend_after_ignored=lambda: calls.append(None),
+        )
+    )
+
+    assert calls == [None]

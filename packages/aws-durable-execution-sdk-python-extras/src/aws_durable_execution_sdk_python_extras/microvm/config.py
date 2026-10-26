@@ -112,12 +112,13 @@ class MicrovmBaseConfig:
     1. ``NO_INGRESS`` when the job goes in the ``run`` hook. The job then
        needs no inbound connection.
     2. ``ALL_INGRESS`` when the job goes over HTTP. The request must reach
-       the MicroVM's endpoint. Every job of a session goes over HTTP.
+       the MicroVM's endpoint.
 
     An empty tuple sends no ingress connector. Connectors that you set must
-    allow ingress whenever a job goes over HTTP: for :func:`microvm`,
-    whenever an input can exceed the ``run`` hook limit, and for a session,
-    always.
+    allow ingress for every job that goes over HTTP. A :func:`microvm` job
+    goes over HTTP when its ``run`` hook payload is over 4,096 code points,
+    or when its config sets ``request.path``. Every job of a session goes
+    over HTTP.
     """
 
     egress_network_connectors: tuple[str, ...] | None = None
@@ -138,6 +139,22 @@ class MicrovmBaseConfig:
     It is the second retry tier. The first tier retries inside one step
     attempt: the boto3 client retries each call, and the request step retries
     the POST. Defaults to :func:`default_microvm_retry_strategy`.
+
+    For a failed Lambda MicroVMs call, the strategy receives the
+    ``ClientError`` that botocore raised, with its class, its ``response``,
+    and its message. The step records a copy whose message ends with the
+    request ID. So a strategy that matches the message, such as
+    ``create_retry_strategy(RetryStrategyConfig(retryable_errors=[...]))``,
+    decides on the message of the service. An error that the operation
+    creates itself, such as "RunMicrovm returned no microvmId", has the
+    request ID in its message when the strategy receives it.
+
+    A ``ResourceNotFoundException`` from ``GetMicrovm``, ``ResumeMicrovm``,
+    or ``CreateMicrovmAuthToken`` is the exception. It means that the
+    MicroVM no longer exists. So the operation raises ``MicrovmStateError``
+    of ``aws_durable_execution_sdk_python_extras.microvm.lifecycle``
+    instead, and the strategy receives that error. Its ``__cause__`` is the
+    ``ClientError``, and its message ends with the request ID.
     """
 
     opener: urllib.request.OpenerDirector | None = None
@@ -335,4 +352,46 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     Set it on every job. A MicroVM that ends while suspended, or whose image
     disables the ``terminate`` hook, reports nothing. The heartbeat timeout
     is then the only way that the job fails soon after the MicroVM ends.
+
+    A job after a :attr:`suspend_after` job waits for the resume of the
+    MicroVM. The worker can refuse it with HTTP 503 for up to 30 seconds
+    before that. So set the heartbeat timeout of such a job to at least the
+    ``retry_window`` plus 30 seconds.
+    """
+
+    suspend_after: bool = False
+    """Whether the worker suspends the MicroVM after this job. Defaults to
+    ``False``.
+
+    The worker suspends the MicroVM when the job has ended and its outcome is
+    reported, and no other job runs. A job that ends while another job runs
+    leaves the request pending. The worker then suspends the MicroVM when
+    the last running job ends. The next job of the session resumes the
+    MicroVM before it is delivered. The ``suspend_after`` job itself checks
+    the state too, because the record is set before the job starts. The
+    setting works with or without
+    :attr:`MicrovmSessionConfig.auto_suspend_on_idle`.
+
+    Set it on the job before a long wait, such as a durable wait or a
+    callback. Do not set it on back-to-back jobs, on ``map`` items, or on
+    the last job of the session. Each suspend and resume costs a snapshot
+    and about 1 second of latency for the next job. The session terminates
+    the MicroVM after its last job anyway.
+
+    It needs more than a session without suspending:
+
+    1. The image enables the ``resume`` hook. Without it, the next job waits
+       up to 30 seconds of HTTP 503 answers.
+    2. The function's role has ``lambda:GetMicrovm`` and
+       ``lambda:ResumeMicrovm``.
+    3. The MicroVM's role has ``lambda:SuspendMicrovm`` on the image.
+    4. The worker supports the setting. An older worker ignores it, and the
+       MicroVM keeps running. Each execution environment then logs one
+       warning per session.
+
+    A suspend that the service refuses for now is not retried, unless
+    :attr:`MicrovmSessionConfig.auto_suspend_on_idle` is ``True``. Only
+    :meth:`MicrovmSession.invoke` accepts it. :func:`microvm` raises
+    ``ValidationError`` for it. A value that is not a ``bool`` raises
+    ``ValidationError`` too.
     """

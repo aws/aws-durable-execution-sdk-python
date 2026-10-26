@@ -41,10 +41,11 @@ So the binding is per invocation, not per filter:
       coordinator's Context, carrying the invocation claim. Plugins also
       reaffirm the claim from hooks that run before user code on that thread.
     - A record emitted on a thread that carries no live claim is left unstamped,
-      whatever the number of open invocations. Two threads carry no claim: the
-      SDK's background checkpointing thread, and a thread customer code starts
-      itself, since Python does not copy context into a new thread. Correlation
-      is lost for those records.
+      whatever the number of open invocations. Three kinds of thread carry no
+      claim: the SDK's background checkpointing thread, the SDK's plugin change
+      thread, which runs ``on_operation_change``, and a thread customer code
+      starts itself, since Python does not copy context into a new thread.
+      Correlation is lost for those records.
 
 Resolving an unclaimed record against the single open invocation, when exactly
 one is open, would be wrong in two orderings. A thread claimed by invocation A

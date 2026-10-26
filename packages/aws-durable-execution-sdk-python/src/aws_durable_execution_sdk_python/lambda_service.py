@@ -6,7 +6,7 @@ import datetime
 import logging
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeAlias, cast
 
 import boto3
@@ -38,13 +38,25 @@ TimeoutSeconds: TypeAlias = int
 logger = logging.getLogger(__name__)
 
 
-def _is_in_var_dir(module_file: str = __file__) -> bool:
-    """Return True if this SDK is installed under /var/lang/.
+_BUNDLED_LOCAL_LABEL = "+bundled"
 
-    Lambda bundled Python runtimes install packages at
-    /var/lang/lib/pythonX.Y/site-packages/.
+
+def _is_bundled(version: str) -> bool:
+    """True if the managed runtime stamped a +bundled label onto this install."""
+    return version.endswith(_BUNDLED_LOCAL_LABEL)
+
+
+def _user_agent_version(version: str) -> str:
+    """Return the version segment reported in the boto3 user agent.
+
+    The managed runtime appends ``+bundled`` to ``__version__`` at image build
+    time. The user agent reports that install as ``<public version>-bundled``.
+    The ``-bundled`` form predates the label and matches the JS SDK, so existing
+    telemetry queries keep working. Any other local label is reported unchanged.
     """
-    return module_file.startswith("/var/lang/")
+    if _is_bundled(version):
+        return f"{version.removesuffix(_BUNDLED_LOCAL_LABEL)}-bundled"
+    return version
 
 
 # region model
@@ -81,7 +93,19 @@ class CallbackTimeoutType(Enum):
     HEARTBEAT = "Callback.Heartbeat"
 
 
-class OperationSubType(Enum):
+class OperationSubType(StrEnum):
+    """The subtypes the SDK records for its own operations.
+
+    A subtype is a plain ``str``, and every subtype field is typed
+    ``str | None``. These members catalog the values the SDK writes for its
+    own operations; the SDK assigns ``.value`` into the field. A step, a
+    callback, or a child context records a caller-defined string instead when
+    ``StepConfig.sub_type``, ``CallbackConfig.sub_type``, or
+    ``ChildConfig.sub_type`` is set. Compare with ``==``:
+    ``operation.sub_type == OperationSubType.MAP`` is true for the operation
+    that ``context.map()`` records.
+    """
+
     STEP = "Step"
     WAIT = "Wait"
     CALLBACK = "Callback"
@@ -485,7 +509,7 @@ class OperationUpdate:
     action: OperationAction
     parent_id: str | None = None
     name: str | None = None
-    sub_type: OperationSubType | None = None
+    sub_type: str | None = None
     payload: str | None = None
     error: ErrorObject | None = None
     context_options: ContextOptions | None = None
@@ -506,7 +530,7 @@ class OperationUpdate:
         if self.name:
             result["Name"] = self.name
         if self.sub_type:
-            result["SubType"] = self.sub_type.value
+            result["SubType"] = self.sub_type
         if self.payload is not None:
             result["Payload"] = self.payload
         if self.error:
@@ -555,7 +579,7 @@ class OperationUpdate:
             action=OperationAction(data["Action"]),
             parent_id=data.get("ParentId"),
             name=data.get("Name"),
-            sub_type=OperationSubType(data["SubType"]) if data.get("SubType") else None,
+            sub_type=data.get("SubType") or None,
             payload=data.get("Payload"),
             error=error,
             context_options=context_options,
@@ -574,7 +598,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.CALLBACK,
-            sub_type=OperationSubType.CALLBACK,
+            sub_type=identifier.sub_type,
             action=OperationAction.START,
             name=identifier.name,
             callback_options=callback_options,
@@ -582,15 +606,13 @@ class OperationUpdate:
 
     # region context
     @classmethod
-    def create_context_start(
-        cls, identifier: OperationIdentifier, sub_type: OperationSubType
-    ) -> OperationUpdate:
+    def create_context_start(cls, identifier: OperationIdentifier) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: CONTEXT, action: START."""
         return cls(
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.CONTEXT,
-            sub_type=sub_type,
+            sub_type=identifier.sub_type,
             action=OperationAction.START,
             name=identifier.name,
         )
@@ -600,7 +622,7 @@ class OperationUpdate:
         cls,
         identifier: OperationIdentifier,
         payload: str | None,
-        sub_type: OperationSubType,
+        *,
         context_options: ContextOptions | None = None,
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: CONTEXT, action: SUCCEED."""
@@ -608,7 +630,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.CONTEXT,
-            sub_type=sub_type,
+            sub_type=identifier.sub_type,
             action=OperationAction.SUCCEED,
             name=identifier.name,
             payload=payload,
@@ -620,14 +642,13 @@ class OperationUpdate:
         cls,
         identifier: OperationIdentifier,
         error: ErrorObject,
-        sub_type: OperationSubType,
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: CONTEXT, action: FAIL."""
         return cls(
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.CONTEXT,
-            sub_type=sub_type,
+            sub_type=identifier.sub_type,
             action=OperationAction.FAIL,
             name=identifier.name,
             error=error,
@@ -668,7 +689,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.STEP,
+            sub_type=identifier.sub_type,
             action=OperationAction.SUCCEED,
             name=identifier.name,
             payload=payload,
@@ -683,7 +704,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.STEP,
+            sub_type=identifier.sub_type,
             action=OperationAction.FAIL,
             name=identifier.name,
             error=error,
@@ -696,7 +717,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.STEP,
+            sub_type=identifier.sub_type,
             action=OperationAction.START,
             name=identifier.name,
         )
@@ -713,7 +734,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.STEP,
+            sub_type=identifier.sub_type,
             action=OperationAction.RETRY,
             name=identifier.name,
             error=error,
@@ -737,7 +758,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.CHAINED_INVOKE,
-            sub_type=OperationSubType.CHAINED_INVOKE,
+            sub_type=identifier.sub_type,
             action=OperationAction.START,
             name=identifier.name,
             payload=payload,
@@ -756,7 +777,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.WAIT_FOR_CONDITION,
+            sub_type=identifier.sub_type,
             action=OperationAction.START,
             name=identifier.name,
         )
@@ -770,7 +791,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.WAIT_FOR_CONDITION,
+            sub_type=identifier.sub_type,
             action=OperationAction.SUCCEED,
             name=identifier.name,
             payload=payload,
@@ -788,7 +809,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.WAIT_FOR_CONDITION,
+            sub_type=identifier.sub_type,
             action=OperationAction.RETRY,
             name=identifier.name,
             payload=payload,
@@ -806,7 +827,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.STEP,
-            sub_type=OperationSubType.WAIT_FOR_CONDITION,
+            sub_type=identifier.sub_type,
             action=OperationAction.FAIL,
             name=identifier.name,
             error=error,
@@ -824,7 +845,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.WAIT,
-            sub_type=OperationSubType.WAIT,
+            sub_type=identifier.sub_type,
             action=OperationAction.START,
             name=identifier.name,
             wait_options=wait_options,
@@ -862,7 +883,7 @@ class Operation:
     name: str | None = None
     start_timestamp: datetime.datetime | None = None
     end_timestamp: datetime.datetime | None = None
-    sub_type: OperationSubType | None = None
+    sub_type: str | None = None
     execution_details: ExecutionDetails | None = None
     context_details: ContextDetails | None = None
     step_details: StepDetails | None = None
@@ -883,9 +904,7 @@ class Operation:
         operation_type = OperationType(data.get("Type"))
         operation_status = OperationStatus(data.get("Status"))
 
-        sub_type = None
-        if sub_type_input := data.get("SubType"):
-            sub_type = OperationSubType(sub_type_input)
+        sub_type = data.get("SubType") or None
 
         execution_details = None
         if execution_details_input := data.get("ExecutionDetails"):
@@ -945,7 +964,7 @@ class Operation:
         if self.end_timestamp:
             result["EndTimestamp"] = self.end_timestamp
         if self.sub_type:
-            result["SubType"] = self.sub_type.value
+            result["SubType"] = self.sub_type
         if self.execution_details:
             result["ExecutionDetails"] = {
                 "InputPayload": self.execution_details.input_payload
@@ -1201,7 +1220,7 @@ class LambdaClient(DurableServiceClient):
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
-                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}{'-bundled' if _is_in_var_dir() else ''}",
+                    user_agent_extra=f"aws-durable-execution-sdk-python/{_user_agent_version(__version__)}",
                 ),
             )
         return cls(client=cls._cached_boto_client)

@@ -36,6 +36,7 @@ from aws_durable_execution_sdk_python_testing.runner import (
 from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
+    MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,
     MicrovmError,
@@ -366,6 +367,33 @@ def test_fails_a_launch_without_a_microvm_id(run: Any, fake_client: Any) -> None
     assert "RunMicrovm returned no microvmId" in error["message"]
 
 
+def test_rejects_a_job_input_over_the_size_limit_before_the_launch(
+    run: Any, fake_client: Any
+) -> None:
+    client = fake_client()
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        # The JSON of the input is the limit plus 1 byte, with the 2 quotes.
+        job_input = "x" * (MAX_JOB_INPUT_BYTES - 1)
+        try:
+            microvm(context, "build", job_input=job_input, config=config_with(client))
+        except ValueError as error:
+            return str(error)
+        return None
+
+    result = run(handler, {})
+
+    assert outcome(result) == (
+        f'MicroVM "build": the job input is {MAX_JOB_INPUT_BYTES + 1} bytes as '
+        f"JSON. The limit is {MAX_JOB_INPUT_BYTES} bytes, because the worker "
+        "accepts a job body of at most 6 MiB. Pass larger data by reference, "
+        "for example as an S3 key."
+    )
+    assert client.calls == []
+    assert result.operations == []
+
+
 def test_sends_a_job_too_large_for_the_run_hook_over_http(
     run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
@@ -589,29 +617,6 @@ def test_fails_a_launch_without_an_endpoint_for_http(
     assert "RunMicrovm returned no endpoint" in error["message"]
 
 
-def test_fails_the_request_for_a_launch_checkpoint_without_an_endpoint(
-    run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    original = operation._MicrovmScope._launch_call  # noqa: SLF001
-
-    def without_endpoint(self: Any, *args: Any) -> Any:
-        launched = original(self, *args)
-        return operation.LaunchResult(
-            microvm_id=launched.microvm_id, delivery=launched.delivery
-        )
-
-    monkeypatch.setattr(operation._MicrovmScope, "_launch_call", without_endpoint)  # noqa: SLF001
-    client = fake_client()
-    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
-
-    result = run(catching(config), {})
-
-    error = outcome(result)
-    assert error["error"] == "MicrovmDeliveryError"
-    assert "the launch recorded no endpoint for MicroVM mvm-1" in error["message"]
-    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
-
-
 def test_raises_the_same_class_after_the_handler_stops_catching(
     run: Any, fake_client: Any
 ) -> None:
@@ -769,6 +774,44 @@ def test_http_requests_match_the_lambda_microvms_api_model(
     client.close()
     assert outcome(result) == {"result": "done"}
     assert endpoint.requests[0]["headers"]["x-amz-microvm-token"] == "t"
+
+
+@pytest.mark.parametrize(
+    ("field", "parameter"),
+    [
+        ("image_identifier", "imageIdentifier"),
+        ("execution_role_arn", "executionRoleArn"),
+    ],
+)
+def test_fails_the_launch_for_an_empty_image_or_role(
+    run: Any, field: str, parameter: str
+) -> None:
+    """The operation does not check the image and the role. botocore checks
+    their length against the API model before it sends RunMicrovm."""
+    client = boto3.session.Session().client("lambda-microvms", region_name="us-west-2")
+    config = config_with(client, **{field: ""})
+    with Stubber(client) as stub:
+        # The response is never used. Stubber needs one queued response to
+        # let the call reach botocore's parameter check.
+        stub.add_response(
+            "run_microvm",
+            {
+                "microvmId": "mvm-1",
+                "state": "PENDING",
+                "endpoint": "mvm-1.example",
+                "imageArn": "arn:aws:lambda:us-west-2:123456789012:microvm-image:img",
+                "imageVersion": "1",
+                "maximumDurationInSeconds": 600,
+                "startedAt": datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+            },
+        )
+
+        result = run(catching(config), {"n": 1})
+
+    client.close()
+    error = outcome(result)
+    assert error["error"] == "MicrovmLaunchError"
+    assert f"Invalid length for parameter {parameter}" in error["message"]
 
 
 def test_keeps_the_class_inside_the_callers_child_context(

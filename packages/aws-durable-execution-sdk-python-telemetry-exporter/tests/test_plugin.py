@@ -266,6 +266,25 @@ def test_basic_success_record():
     assert "result" not in op  # results omitted by default
 
 
+def test_record_writes_subtype():
+    """A subtype lands in the record as the string the service stores."""
+    exporter = CaptureExporter()
+    factory = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[exporter])
+    )
+    _run(
+        factory,
+        ops=[
+            _step("charge", sub_type="OrderCharge"),
+            _step("settle", op_type=OperationType.WAIT, sub_type=OperationSubType.WAIT),
+        ],
+    )
+    ops = {op["name"]: op for op in exporter.records[0]["operations"]}
+    assert ops["charge"]["subType"] == "OrderCharge"
+    assert ops["settle"]["subType"] == "Wait"
+    assert json.dumps(ops["settle"]["subType"]) == '"Wait"'
+
+
 def test_on_failure_success_emits_nothing():
     exporter = CaptureExporter()
     factory = durable_execution_telemetry(
@@ -508,7 +527,7 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
     assert names == ["greet", "pause"]  # prior terminal ops present on cold resume
     # Comment 7: start time is the original execution start (T0), not the resume
     # time -> duration is measured from T0 and is non-negative.
-    assert rec["startTime"] == "2026-01-01T00:00:00Z"
+    assert rec["startTime"] == "2026-01-01T00:00:00.000Z"
     assert rec["durationMs"] is not None and rec["durationMs"] >= 0
 
 
@@ -1124,7 +1143,7 @@ def test_operation_change_after_invocation_end_emits_nothing():
     assert [record["status"] for record in exporter.records][-1] == "SUCCEEDED"
     # No fabricated start time: every record still reports the execution start.
     assert {record["startTime"] for record in exporter.records} == {
-        "2026-01-01T00:00:00Z"
+        "2026-01-01T00:00:00.000Z"
     }
 
 

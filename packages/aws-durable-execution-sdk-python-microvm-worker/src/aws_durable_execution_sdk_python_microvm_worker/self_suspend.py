@@ -1,12 +1,22 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""The worker's own SuspendMicrovm call, for a session that suspends when idle."""
+"""The worker's own SuspendMicrovm call, for a session that suspends when idle.
+
+The call can suspend the MicroVM and lose its answer in the freeze. A retry
+of the call then runs after the MicroVM resumed. The ``resume`` hook has
+already ended the worker's refusal of jobs at that point. So the retry would
+suspend the MicroVM with the next job inside it. So the worker stops the
+call's attempts after a ``resume`` hook, and its default client makes one
+attempt. After a failed call, the worker can call again after a later idle
+time, with a new refusal of jobs.
+"""
 
 from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Callable
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -53,10 +63,13 @@ the durable function's default delivery retry window.
 
 _CONNECT_TIMEOUT_SECONDS = 5
 
-_CLIENT_ATTEMPTS = 3
+_CLIENT_ATTEMPTS = 1
 """The attempts of the default client, the first attempt included.
 
-The JavaScript worker's default client makes 3 attempts too.
+An attempt can suspend the MicroVM and lose its answer in the freeze. A
+retry then runs after the MicroVM resumed, and can suspend it with a job
+inside. So the default client makes one attempt. After a failed call, the
+worker can call again after a later idle time, with a new refusal of jobs.
 """
 
 _BEFORE_SEND = "before-send.lambda-microvms.SuspendMicrovm"
@@ -77,12 +90,10 @@ class SuspendOutcome(Enum):
     """The service did nothing on the call's first and only attempt, and a
     later call can succeed.
 
-    Examples are expired credentials and a signature error, with or without
-    a clock offset. botocore retries none of these, so they keep this
-    outcome. The default client retries a throttle. So a throttle usually
-    ends as :attr:`UNKNOWN`. A throttle has this outcome only when it
-    reaches the worker without a retry, for example from a caller's client
-    that does not retry it."""
+    Examples are expired credentials, a signature error with or without a
+    clock offset, and a throttle. The default client makes one attempt, so
+    these errors keep this outcome. A caller's client that retries a
+    throttle turns it into :attr:`UNKNOWN`."""
     UNKNOWN = "unknown"
     """The service may have suspended the MicroVM."""
 
@@ -95,17 +106,30 @@ class SuspendDeadlineError(TimeoutError):
     """
 
 
+class SuspendResumedError(Exception):
+    """A ``resume`` hook arrived before an attempt of the SuspendMicrovm call
+    could start.
+
+    The ``resume`` hook ends the worker's refusal of jobs. So a job can run
+    in the MicroVM from then on. The attempt would suspend the MicroVM with
+    that job inside. So the call stops before the attempt. botocore does not
+    retry this error.
+    """
+
+
 def create_microvms_client(region: str) -> LambdaMicrovmsClient:
     """Create the default ``lambda-microvms`` client for one call.
 
     Each call gets its own session, because boto3's default session is not
     safe to use from several threads at once.
 
-    The client uses botocore's standard retry mode with 3 attempts. That
-    mode retries a throttle error code, such as ``ThrottlingException``, a
-    5xx answer, and a connection error. It retries no credential or
-    signature error, also with a clock offset. Each ``ClientError`` reports the
-    retries in ``ResponseMetadata.RetryAttempts``.
+    The client makes one attempt. An attempt can suspend the MicroVM and
+    lose its answer in the freeze. A retry would then run after the MicroVM
+    resumed, and could suspend it with the next job inside. The worker calls
+    again after a later idle time instead, with a new refusal of jobs.
+    :func:`suspend_microvm` also stops the attempts of a caller's client
+    after the MicroVM resumed. One attempt is still the recommended setting
+    for such a client.
     """
     return boto3.session.Session().client(
         "lambda-microvms",
@@ -123,10 +147,13 @@ def create_microvms_client(region: str) -> LambdaMicrovmsClient:
 
 
 def suspend_microvm(
-    client: LambdaMicrovmsClient, microvm_id: str, deadline_seconds: float
+    client: LambdaMicrovmsClient,
+    microvm_id: str,
+    deadline_seconds: float,
+    resumed: Callable[[], bool] | None = None,
 ) -> None:
-    """Call SuspendMicrovm in this thread, and start no attempt after
-    ``deadline_seconds``.
+    """Call SuspendMicrovm in this thread. Start no attempt after
+    ``deadline_seconds``, and none after ``resumed()`` returns ``True``.
 
     botocore has no deadline for a whole call. Its read timeout limits one
     socket read, and it covers neither credential resolution nor its own
@@ -135,6 +162,18 @@ def suspend_microvm(
     deadline. botocore does not retry that error. Without the handler,
     botocore went on retrying, and an attempt started 22.5 seconds after the
     first one.
+
+    The same handler stops an attempt after the MicroVM resumed:
+
+    1. An attempt can suspend the MicroVM and lose its answer in the freeze.
+    2. botocore then retries the attempt after the MicroVM resumed.
+    3. The ``resume`` hook has ended the worker's refusal of jobs by then.
+    4. So the retry would suspend the MicroVM with a new job inside.
+
+    So the handler raises :class:`SuspendResumedError` when ``resumed()``
+    returns ``True``. botocore does not retry that error either. The handler
+    runs in this thread. So ``resumed`` must not block, and must not take a
+    lock that the caller of this function can hold.
 
     botocore emits ``before-send`` before it opens the connection, and it
     cannot cancel an attempt in flight. So an attempt that started before
@@ -149,6 +188,8 @@ def suspend_microvm(
     Raises:
         SuspendDeadlineError: When an attempt would start after the
             deadline.
+        SuspendResumedError: When an attempt would start after ``resumed()``
+            returned ``True``.
         Exception: The call's own error.
     """
     deadline = time.monotonic() + deadline_seconds
@@ -157,7 +198,10 @@ def suspend_microvm(
     unique_id = f"aws-durable-execution-microvm-worker-deadline-{uuid.uuid4().hex}"
     events = safe_get(lambda: client.meta.events)
 
-    def stop_after_deadline(**_: object) -> None:
+    def stop_attempt(**_: object) -> None:
+        if resumed is not None and resumed():
+            msg = "the MicroVM resumed before this SuspendMicrovm attempt"
+            raise SuspendResumedError(msg)
         if time.monotonic() >= deadline:
             msg = (
                 f"the SuspendMicrovm deadline of {deadline_seconds} seconds has passed"
@@ -165,7 +209,7 @@ def suspend_microvm(
             raise SuspendDeadlineError(msg)
 
     if events is not None:
-        events.register_first(_BEFORE_SEND, stop_after_deadline, unique_id=unique_id)
+        events.register_first(_BEFORE_SEND, stop_attempt, unique_id=unique_id)
     try:
         client.suspend_microvm(microvmIdentifier=microvm_id)
     finally:
@@ -179,7 +223,8 @@ def classify_suspend_error(error: BaseException) -> SuspendOutcome:
     1. A botocore retry inside the call means that an earlier attempt may
        have suspended the MicroVM before its answer was lost. So any error
        after a retry is :attr:`SuspendOutcome.UNKNOWN`. The default client
-       retries a throttle. So a throttle from it usually ends here.
+       makes one attempt. So only a caller's client that retries reaches
+       this rule.
     2. Missing credentials are :attr:`SuspendOutcome.REJECTED`, as in the
        JavaScript worker. A later call in the same MicroVM most likely finds
        no credentials either.
@@ -191,13 +236,17 @@ def classify_suspend_error(error: BaseException) -> SuspendOutcome:
        status. The service answers them before it acts, and a later call can
        succeed. Some services answer a throttle with HTTP 400. botocore
        retries no credential or signature error, also with a clock offset.
-       So these errors reach this rule. A throttle reaches it only from a
-       client that did not retry it.
+       So these errors reach this rule. A throttle reaches it from the
+       default client, and from any client that did not retry it.
     6. Any other 4xx answer except 408, 409, and 429 is
        :attr:`SuspendOutcome.REJECTED`. A 429 is
        :attr:`SuspendOutcome.REFUSED_FOR_NOW`.
-    7. Any other error, such as a timeout, a dropped connection, a 408, or a
-       server error, is :attr:`SuspendOutcome.UNKNOWN`.
+    7. Any other error is :attr:`SuspendOutcome.UNKNOWN`. Examples are a
+       timeout, a dropped connection, a 408, a server error,
+       :class:`SuspendDeadlineError`, and :class:`SuspendResumedError`. The
+       last two stop an attempt. When they stop the first attempt, nothing
+       was sent. An earlier attempt, if there was one, may have suspended
+       the MicroVM.
     """
     if isinstance(error, NoCredentialsError):
         return SuspendOutcome.REJECTED

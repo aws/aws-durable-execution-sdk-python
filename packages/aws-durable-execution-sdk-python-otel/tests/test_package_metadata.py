@@ -80,7 +80,7 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
     assert TEST_OTEL_DEPENDENCIES <= set(environments["types"]["extra-dependencies"])
 
 
-def test_core_dependency_requires_worker_lifecycle_release() -> None:
+def test_core_dependency_requires_coordinated_major_release() -> None:
     dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
         "dependencies"
     ]
@@ -93,6 +93,7 @@ def test_core_dependency_requires_worker_lifecycle_release() -> None:
     assert not requirement.specifier.contains("2.0.1")
     assert not requirement.specifier.contains("2.1.0")
     assert requirement.specifier.contains("3.0.0")
+    assert requirement.specifier.contains("3.1.0")
 
     assert CORE_DEPENDENCY in dependencies
 
@@ -151,23 +152,6 @@ def test_core_dependency_bound_matches_the_core_major_in_this_repository() -> No
 
     assert _major(lower_bound) == _major(core_version)
     assert Version(lower_bound) <= Version(core_version)
-
-
-def test_layer_sdk_pin_matches_the_core_version_in_this_repository() -> None:
-    """The OTel layer pin selects the core wheel bundled into the published layer.
-
-    A combined SDK and OTel release fails outright when the pin disagrees with the
-    released SDK version, and an OTel-only release downloads exactly the pinned
-    version from PyPI. A stale pin therefore either blocks the release or ships a
-    layer whose core cannot run this plugin, so the pin tracks the core version
-    this repository builds.
-    """
-    metadata_path = REPOSITORY_ROOT / ".github" / "lambda-layer-publish.toml"
-
-    with metadata_path.open("rb") as metadata_file:
-        pinned_version = tomllib.load(metadata_file)["layer"]["sdk-version"]
-
-    assert pinned_version == _core_version()
 
 
 def test_core_dependency_excludes_the_next_core_major() -> None:

@@ -11,7 +11,6 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationType,
-    OperationSubType,
 )
 
 
@@ -34,10 +33,15 @@ class OperationIdNamespace:
 
 @dataclass(frozen=True)
 class OperationIdentifier:
-    """Operation identity with an explicit type independent of its subtype."""
+    """Operation identity with an explicit type independent of its subtype.
+
+    ``sub_type`` is the subtype the operation records: the value of an
+    ``OperationSubType`` member for an SDK operation, or the caller-defined
+    string a step, a callback, or a child context was configured with.
+    """
 
     operation_id: str
-    sub_type: OperationSubType
+    sub_type: str
     parent_id: str | None = None
     name: str | None = None
     operation_type: OperationType = field(kw_only=True)
@@ -61,12 +65,9 @@ class OperationIdentifier:
             mismatches.append(
                 f"type checkpoint={checkpoint.operation_type.value!r} current={self.type.value!r}"
             )
-        if checkpoint.sub_type is not self.sub_type:
-            checkpoint_sub_type = (
-                checkpoint.sub_type.value if checkpoint.sub_type is not None else None
-            )
+        if checkpoint.sub_type != self.sub_type:
             mismatches.append(
-                f"subtype checkpoint={checkpoint_sub_type!r} current={self.sub_type.value!r}"
+                f"subtype checkpoint={checkpoint.sub_type!r} current={self.sub_type!r}"
             )
         if checkpoint_name != expected_name:
             mismatches.append(

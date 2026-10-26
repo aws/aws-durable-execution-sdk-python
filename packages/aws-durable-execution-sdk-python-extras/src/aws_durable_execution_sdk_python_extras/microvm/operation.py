@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import boto3
 from botocore.config import Config
@@ -35,6 +34,12 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from botocore.exceptions import ClientError
 
+from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+    add_request_id,
+    decide_on_original_error,
+    error_code,
+    with_request_id,
+)
 from aws_durable_execution_sdk_python_extras.microvm.config import (
     MAX_MICROVM_DURATION_SECONDS,
     LambdaMicrovmsClient,
@@ -51,15 +56,20 @@ from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmTimeoutError,
 )
 from aws_durable_execution_sdk_python_extras.microvm.job import (
+    MAX_JOB_INPUT_BYTES,
     JobRequest,
     RunHookPayload,
+    dumps,
     fits_run_hook,
     run_hook_payload_without_job,
 )
 from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
     EnsureRunningOptions,
+    MicrovmStateCheckError,
     MicrovmStateError,
     ensure_running,
+    microvm_not_found,
+    resume_if_suspended,
 )
 from aws_durable_execution_sdk_python_extras.microvm.request import (
     DEFAULT_MICROVM_JOB_PATH,
@@ -149,15 +159,16 @@ class LaunchResult:
     """Whether each session job checks the MicroVM state, and resumes a
     suspended MicroVM, before delivery. Only a session launch records it.
     Replay reads it from the checkpoint. So every replay follows the mode that
-    the launch prepared the MicroVM for. A launch checkpoint from code that
-    predates this field does not have it."""
+    the launch prepared the MicroVM for. A ``microvm`` launch leaves it
+    ``None``. ``from_dict`` keeps only a bool, and reads any other value as
+    ``None``. ``run_session`` reads only ``True`` as a resume mode."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
-        # Only a bool is a resume mode. In Python True == 1, so a check by
-        # equality would accept 1. Any other value reads as no resume mode.
+        # The field is typed bool | None. to_dict() writes it back. So
+        # from_dict keeps only a bool, and reads any other value as None.
         resume_before_delivery = data.get("resumeBeforeDelivery")
         return cls(
             microvm_id=data["microvmId"],
@@ -247,15 +258,26 @@ def microvm(
         ValidationError: When ``name`` or ``config`` is not valid, or the
             Region cannot be determined. No durable operation starts. It is
             the SDK's class, which ``Duration`` also raises for a negative
-            value.
+            value. A ``config.request`` of type :class:`MicrovmInvokeOptions`
+            with ``suspend_after`` set is not valid, because only a session
+            job can suspend its MicroVM after the job.
         TypeError: When ``job_input`` is not JSON-serializable. No durable
             operation starts.
-        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
+        ValueError: When the JSON of ``job_input`` is over
+            :data:`MAX_JOB_INPUT_BYTES` UTF-8 bytes. No durable operation
+            starts.
+        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries, or
+            rejects the config, for example an empty ``image_identifier``.
+        MicrovmNotRunningError: When ``CreateMicrovmAuthToken`` reports that
+            the MicroVM no longer exists. It is a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
             or the route answers a 4xx status such as 404, or a redirect.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
             result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.
+
+    The message of a failed Lambda MicroVMs call ends with its request ID,
+    for example ``RunMicrovm request ID: <id>.``.
     """
     scope = _OperationScope.create(context, name, job_input, config)
 
@@ -272,9 +294,44 @@ _STATE_ERROR_TYPE = f"{MicrovmStateError.__module__}.{MicrovmStateError.__qualna
 """The error type that a request step checkpoints for a MicroVM that can no
 longer run a job. The SDK records the fully-qualified class name."""
 
+_STATE_CHECK_WARNING = (
+    "GetMicrovm failed, so the operation could not check whether the MicroVM "
+    "is suspended. The request step keeps sending the job."
+)
+"""The warning, once per job, after a failed state check of a session
+without the resume mode."""
 
-def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> int:
+_GET_DENIED_NOTE = (
+    "GetMicrovm was denied, so the operation could not check whether the "
+    "MicroVM is suspended."
+)
+"""The sentence that the first tier adds to its final error after a denied
+state check. Without it, the message names only the last HTTP failure."""
+
+
+def step_retry_strategy(
+    config: MicrovmBaseConfig,
+) -> Callable[[Exception, int], RetryDecision]:
+    """Return the retry strategy of the launch, request, and terminate steps.
+
+    It is the configured strategy, or :func:`default_microvm_retry_strategy`.
+    It decides on the error that botocore raised, without the request ID in
+    the message. See :func:`decide_on_original_error`. A session passes the
+    same strategy to each job. So this applies to every AWS call of both
+    operations.
+    """
+    return decide_on_original_error(
+        config.retry_strategy or default_microvm_retry_strategy
+    )
+
+
+def _validate_base(name: str, timeout: Duration) -> int:
     """Validate the settings that every MicroVM operation shares.
+
+    ``image_identifier`` and ``execution_role_arn`` are not checked here.
+    The boto3 client rejects an empty value before it sends ``RunMicrovm``,
+    and the service rejects any other invalid value. Either way, the launch
+    step fails, and the operation raises ``MicrovmLaunchError``.
 
     Returns:
         The timeout in seconds.
@@ -284,12 +341,6 @@ def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> i
     """
     if not isinstance(name, str) or not name:
         msg = "a MicroVM operation requires a non-empty name"
-        raise ValidationError(msg)
-    if not config.image_identifier:
-        msg = f'MicroVM "{name}": image_identifier is required'
-        raise ValidationError(msg)
-    if not config.execution_role_arn:
-        msg = f'MicroVM "{name}": execution_role_arn is required'
         raise ValidationError(msg)
     return _validate_timeout(name, "timeout", timeout)
 
@@ -327,16 +378,29 @@ def _validate_heartbeat(name: str, heartbeat_timeout: Duration | None) -> int | 
 
 
 def _validate_input(name: str, job_input: Any) -> None:
-    """Check that the job input is JSON-serializable.
+    """Check that the job input is JSON-serializable, and fits in a job body.
+
+    The size is the UTF-8 length of the JSON that the job body holds. So it
+    is measured on the output of :func:`dumps`.
 
     Raises:
-        TypeError: When it is not.
+        TypeError: When it is not JSON-serializable.
+        ValueError: When its JSON is over :data:`MAX_JOB_INPUT_BYTES` bytes.
     """
     try:
-        json.dumps(job_input, allow_nan=False)
+        text = dumps(job_input)
     except (TypeError, ValueError) as error:
         msg = f'MicroVM "{name}": the job input must be JSON-serializable: {error}'
         raise TypeError(msg) from error
+    size = len(text.encode())
+    if size > MAX_JOB_INPUT_BYTES:
+        msg = (
+            f'MicroVM "{name}": the job input is {size} bytes as JSON. The limit '
+            f"is {MAX_JOB_INPUT_BYTES} bytes, because the worker accepts a job "
+            "body of at most 6 MiB. Pass larger data by reference, for example "
+            "as an S3 key."
+        )
+        raise ValueError(msg)
 
 
 def _validate_region(context: DurableContext, name: str) -> tuple[str, str]:
@@ -433,7 +497,10 @@ class _MicrovmScope:
         heartbeat_timeout_seconds: int | None,
         request: MicrovmRequestConfig,
         retry_window_seconds: int,
-        resume: bool = False,
+        resume: bool | Callable[[], bool] = False,
+        suspend_check: bool = False,
+        suspend_after: bool = False,
+        claim_suspend_after_warning: Callable[[], bool] | None = None,
     ) -> None:
         """Run the request step, ``<job_name>.request``: POST the job to the
         MicroVM's endpoint.
@@ -444,7 +511,21 @@ class _MicrovmScope:
         With ``resume``, each attempt first makes sure the MicroVM runs, and
         resumes a suspended one. It then sends the job to the endpoint that
         ``GetMicrovm`` reports. A session sets it when its MicroVM can be
-        suspended.
+        suspended. A callable is read at the start of each attempt.
+
+        Without ``resume``, ``suspend_check`` turns on the check after a sign
+        of a suspended MicroVM. See :func:`resume_if_suspended`. A session
+        sets it for every job. A failed ``GetMicrovm`` call in that check
+        logs one warning per job, and the attempt keeps sending the job.
+
+        ``suspend_after`` adds ``"suspendAfter": true`` to the job request.
+        When the answer lacks the worker's acknowledgement, the attempt
+        logs a warning if ``claim_suspend_after_warning`` returns ``True``.
+
+        ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
+        answer ``ResourceNotFoundException`` for a removed MicroVM. An
+        attempt raises ``MicrovmStateError`` for that answer of any of the
+        three calls. The default retry strategy does not retry it.
 
         Raises:
             MicrovmNotRunningError: When the MicroVM can no longer run a job.
@@ -457,6 +538,7 @@ class _MicrovmScope:
                 callback_id=callback_id,
                 job_input=job_input,
                 heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                suspend_after=suspend_after,
             )
             .to_json()
             .encode()
@@ -464,55 +546,113 @@ class _MicrovmScope:
         remaining_seconds = _remaining_seconds(child)
         path = DEFAULT_MICROVM_JOB_PATH if request.path is None else request.path
         port = DEFAULT_MICROVM_PORT if request.port is None else request.port
+        microvm_id = launched.microvm_id
+        # One warning per job for a failed state check. The attempts of the
+        # step in this invocation share it.
+        check_warned = threading.Event()
 
         def attempt(step_context: StepContext) -> None:
-            # The launch records an endpoint for every HTTP delivery. So a
-            # missing endpoint is a defect, not a transient failure. The
-            # default retry strategy does not retry RuntimeError.
-            if launched.endpoint is None:
-                msg = (
-                    f"the launch recorded no endpoint for MicroVM "
-                    f"{launched.microvm_id}, so the job cannot be sent over HTTP"
-                )
-                raise RuntimeError(msg)
             client = self._client()
+            logger = step_context.logger
             # The state check before delivery and the request's retries share
             # one window. So the wait for a resume counts toward it.
             window_started_at = time.monotonic()
-            endpoint = launched.endpoint
+            # _launch_call raises when RunMicrovm returns no endpoint for an
+            # HTTP delivery. The launch step checkpoints only what
+            # _launch_call returned. So an HTTP launch always has an endpoint.
+            endpoint = cast("str", launched.endpoint)
+            strict = resume() if callable(resume) else resume
+
+            def options(max_wait_seconds: float) -> EnsureRunningOptions:
+                return EnsureRunningOptions(
+                    client=client,
+                    microvm_id=microvm_id,
+                    max_wait_seconds=max_wait_seconds,
+                    remaining_seconds=remaining_seconds,
+                    logger=logger,
+                )
+
             recheck: Callable[[float], str | None] | None = None
-            if resume:
+            check: Callable[[float], str | None] | None = None
+            get_denied = False
+            if strict:
                 require_time_for_call(remaining_seconds)
 
                 def running(max_wait_seconds: float) -> str | None:
-                    return ensure_running(
-                        EnsureRunningOptions(
-                            client=client,
-                            microvm_id=launched.microvm_id,
-                            max_wait_seconds=max_wait_seconds,
-                            remaining_seconds=remaining_seconds,
-                            logger=step_context.logger,
-                        )
-                    )
+                    return ensure_running(options(max_wait_seconds))
 
                 endpoint = running(retry_window_seconds) or endpoint
                 recheck = running
-            send_job(
-                SendJobOptions(
-                    client=client,
-                    microvm_id=launched.microvm_id,
-                    endpoint=endpoint,
-                    path=path,
-                    port=port,
-                    body=body,
-                    retry_window_seconds=retry_window_seconds,
-                    remaining_seconds=remaining_seconds,
-                    logger=step_context.logger,
-                    opener=self.config.opener,
-                    window_started_at=window_started_at,
-                    recheck=recheck,
+            elif suspend_check:
+
+                def check_state(max_wait_seconds: float) -> str | None:
+                    nonlocal get_denied
+                    try:
+                        return resume_if_suspended(options(max_wait_seconds))
+                    except MicrovmStateCheckError as error:
+                        get_denied = get_denied or error.denied
+                        if not check_warned.is_set():
+                            check_warned.set()
+                            logger.warning(
+                                _STATE_CHECK_WARNING,
+                                extra={"microvmId": microvm_id, "error": str(error)},
+                            )
+                        return None
+
+                check = check_state
+
+            def ignored() -> None:
+                if (
+                    claim_suspend_after_warning is not None
+                    and claim_suspend_after_warning()
+                ):
+                    logger.warning(
+                        f"the worker in MicroVM {microvm_id} does not support "
+                        "suspendAfter. The MicroVM keeps running after the job.",
+                        extra={"microvmId": microvm_id},
+                    )
+
+            # Only CreateMicrovmAuthToken can raise ResourceNotFoundException
+            # here:
+            #
+            # 1. _create_auth_token raises that answer unchanged.
+            # 2. send_job calls new_token() outside any try. So the error
+            #    leaves send_job unchanged.
+            # 3. _run_with_limit re-raises the same error object.
+            # 4. ensure_running and resume_if_suspended turn the same answer
+            #    of GetMicrovm and ResumeMicrovm into MicrovmStateError. So
+            #    neither call raises a ClientError with that code.
+            #
+            # So the step raises MicrovmStateError for CreateMicrovmAuthToken.
+            # The default retry strategy does not retry that error.
+            try:
+                send_job(
+                    SendJobOptions(
+                        client=client,
+                        microvm_id=microvm_id,
+                        endpoint=endpoint,
+                        path=path,
+                        port=port,
+                        body=body,
+                        retry_window_seconds=retry_window_seconds,
+                        remaining_seconds=remaining_seconds,
+                        logger=logger,
+                        opener=self.config.opener,
+                        window_started_at=window_started_at,
+                        recheck=recheck,
+                        suspend_check=check,
+                        unavailable_note=lambda: (
+                            _GET_DENIED_NOTE if get_denied else None
+                        ),
+                        on_suspend_after_ignored=ignored if suspend_after else None,
+                    )
                 )
-            )
+            except ClientError as error:
+                if error_code(error) == "ResourceNotFoundException":
+                    raise microvm_not_found(
+                        microvm_id, "CreateMicrovmAuthToken", error
+                    ) from error
+                raise
 
         try:
             child.step(
@@ -604,15 +744,22 @@ class _MicrovmScope:
             request["logging"] = dict(config.logging)
         if idle_policy is not None:
             request["idlePolicy"] = dict(idle_policy)
-        response = self._client().run_microvm(**request)
+        try:
+            response = self._client().run_microvm(**request)
+        except ClientError as error:
+            # add_request_id returns the error, or a copy whose __cause__ is
+            # the error. So the raise has no `from`.
+            raise add_request_id("RunMicrovm", error)
+        # A missing field fails the step. So the message names the request
+        # ID of the answer.
         microvm_id = response.get("microvmId")
         if not microvm_id:
             msg = "RunMicrovm returned no microvmId"
-            raise RuntimeError(msg)
+            raise RuntimeError(with_request_id(msg, "RunMicrovm", response))
         endpoint = response.get("endpoint")
         if over_http and not endpoint:
             msg = "RunMicrovm returned no endpoint"
-            raise RuntimeError(msg)
+            raise RuntimeError(with_request_id(msg, "RunMicrovm", response))
         return LaunchResult(
             microvm_id=microvm_id,
             delivery=delivery,
@@ -626,11 +773,10 @@ class _MicrovmScope:
         except ClientError as error:
             # TerminateMicrovm succeeds for a terminated MicroVM. The service
             # answers ResourceNotFoundException for a MicroVM whose record it
-            # has removed. Either way, the MicroVM is gone.
-            if error.response.get("Error", {}).get("Code") != (
-                "ResourceNotFoundException"
-            ):
-                raise
+            # has removed. Either way, the MicroVM is gone. Any other error
+            # gets the request ID. See add_request_id.
+            if error_code(error) != "ResourceNotFoundException":
+                raise add_request_id("TerminateMicrovm", error)
 
     def _connector_arn(self, connector: str) -> str:
         return (
@@ -666,11 +812,22 @@ class _OperationScope(_MicrovmScope):
             ValidationError: When ``name`` or ``config`` is not valid, or the
                 Region cannot be determined.
             TypeError: When ``job_input`` is not JSON-serializable.
+            ValueError: When the JSON of ``job_input`` is too large.
         """
-        timeout_seconds = _validate_base(name, config, config.timeout)
+        timeout_seconds = _validate_base(name, config.timeout)
         heartbeat_timeout_seconds = _validate_heartbeat(name, config.heartbeat_timeout)
         request = config.request or MicrovmRequestConfig()
         retry_window_seconds = _validate_request(name, request)
+        # MicrovmInvokeOptions subclasses MicrovmRequestConfig. So a session
+        # job's options pass the type check of config.request. microvm()
+        # terminates its MicroVM after its one job, so a suspend after the
+        # job would only delay that.
+        if _validate_suspend_after(name, getattr(request, "suspend_after", False)):
+            msg = (
+                f'MicroVM "{name}": suspend_after applies only to a session job. '
+                "microvm() terminates its MicroVM after the job."
+            )
+            raise ValidationError(msg)
         _validate_input(name, job_input)
         partition, region = _validate_region(context, name)
         return cls(
@@ -682,7 +839,7 @@ class _OperationScope(_MicrovmScope):
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
             request=request,
             retry_window_seconds=retry_window_seconds,
-            retry_strategy=config.retry_strategy or default_microvm_retry_strategy,
+            retry_strategy=step_retry_strategy(config),
         )
 
     def run_job(self, child: DurableContext, job_input: Any) -> Any:
@@ -964,6 +1121,19 @@ def _validate_request(name: str, request: MicrovmRequestConfig) -> int:
         )
         raise ValidationError(msg)
     return seconds
+
+
+def _validate_suspend_after(name: str, suspend_after: object) -> bool:
+    """Validate ``suspend_after``, and return it.
+
+    Raises:
+        ValidationError: When it is not a ``bool``. An ``int`` is rejected
+            too, although ``bool`` subclasses ``int``.
+    """
+    if not isinstance(suspend_after, bool):
+        msg = f'MicroVM "{name}": suspend_after must be a bool'
+        raise ValidationError(msg)
+    return suspend_after
 
 
 def _remaining_seconds(context: DurableContext) -> Callable[[], float | None]:
