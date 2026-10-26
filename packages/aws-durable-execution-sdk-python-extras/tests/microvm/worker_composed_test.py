@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import http.client
+import http.server
 import json
 import socket
 import threading
@@ -557,3 +558,163 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
         assert refusals == 0
     else:
         assert refusals >= 1
+
+
+class LosingProxy:
+    """A stand-in for the MicroVM endpoint in front of a real worker.
+
+    It forwards each job request to the worker, and returns the worker's
+    status. Before it forwards a request, it runs the action for that
+    request's number, if there is one. It can drop the worker's answer to a
+    request, as a network fault does.
+    """
+
+    def __init__(
+        self,
+        worker: MicrovmWorker,
+        *,
+        lose: set[int],
+        before: dict[int, Callable[[], None]],
+    ) -> None:
+        self.statuses: list[int | None] = []
+        self._lock = threading.Lock()
+        proxy = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - the http.server name
+                body = self.rfile.read(int(self.headers.get("content-length", "0")))
+                with proxy._lock:
+                    number = len(proxy.statuses) + 1
+                    proxy.statuses.append(None)
+                action = before.get(number)
+                if action is not None:
+                    action()
+                connection = http.client.HTTPConnection(
+                    host_of(worker), worker.port, timeout=WAIT
+                )
+                try:
+                    connection.request(
+                        "POST",
+                        self.path,
+                        body=body,
+                        headers={"content-type": "application/json"},
+                    )
+                    response = connection.getresponse()
+                    response.read()
+                    status = response.status
+                finally:
+                    connection.close()
+                if number in lose:
+                    self.close_connection = True
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    return
+                with proxy._lock:
+                    proxy.statuses[number - 1] = status
+                self.send_response(status)
+                self.send_header("content-length", "0")
+                self.end_headers()
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def test_resumes_the_microvm_when_a_resend_of_a_running_job_meets_a_suspend(
+    fake_client: Any,
+) -> None:
+    """A resend of a running job during a suspend gets 503, not 202.
+
+    1. The worker accepts the job, and its 202 is lost.
+    2. The request step checks the state again, and sees ``RUNNING``.
+    3. Lambda sends the ``suspend`` hook, and the MicroVM is ``SUSPENDED``.
+    4. The resend reaches the worker during the suspend refusal.
+
+    A 202 at step 4 would end the delivery. Nothing would resume the
+    MicroVM, and the frozen job would never complete its callback. The 503
+    makes the request step check the state again, see ``SUSPENDED``, and
+    resume the MicroVM. The job here continues only after ResumeMicrovm, as
+    a frozen job does.
+    """
+    state = {"value": "RUNNING"}
+    lock = threading.Lock()
+    resumed = threading.Event()
+    holder: dict[Any, Any] = {}
+
+    class StatefulMicrovms(fake_client):  # type: ignore[misc, valid-type]
+        def get_microvm(self, **request: Any) -> dict[str, Any]:
+            with lock:
+                current = state["value"]
+            response = super().get_microvm(**request)
+            return {**response, "state": current}
+
+        def resume_microvm(self, **request: Any) -> dict[str, Any]:
+            super().resume_microvm(**request)
+            with lock:
+                state["value"] = "RUNNING"
+            resumed.set()
+            post_hook(holder["worker"], "resume")
+            return {}
+
+    def suspend() -> None:
+        post_hook(holder["worker"], "suspend")
+        with lock:
+            state["value"] = "SUSPENDED"
+
+    runs: list[str] = []
+
+    def job(job_input: Any, context: MicrovmJobContext) -> Any:
+        runs.append(job_input)
+        # A frozen job continues only after the MicroVM resumes.
+        return "done" if resumed.wait(10) else "still frozen"
+
+    def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
+        options = MicrovmInvokeOptions(timeout=Duration.from_minutes(1))
+        return vm.invoke(ctx, "build", job_input="build", options=options)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        return microvm_session(
+            context, "pipeline", config=holder["config"], handler=pipeline
+        )
+
+    runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
+    callbacks = RunnerCallbacks(runner)
+    worker = start_reachable_worker(
+        lambda: start_microvm_worker(
+            handler=job,
+            create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
+            port=0,
+        )
+    )
+    holder["worker"] = worker
+    proxy = LosingProxy(worker, lose={1}, before={2: suspend})
+    try:
+        client = StatefulMicrovms(launches=[run_hook_to(worker)], endpoint=proxy.url)
+        holder["config"] = MicrovmSessionConfig(
+            image_identifier="img",
+            execution_role_arn="role",
+            timeout=Duration.from_minutes(5),
+            auto_suspend_on_idle=True,
+            auto_suspend_idle_time=Duration.from_seconds(60),
+            client=client,
+        )
+        arn = runner.run_async(input="null", execution_timeout=WAIT)
+        result = runner.wait_for_result(arn, timeout=WAIT)
+        assert worker.idle(WAIT)
+    finally:
+        proxy.close()
+        worker.close()
+        runner.close()
+
+    assert result.status is InvocationStatus.SUCCEEDED, result.error
+    assert json.loads(result.result or "null") == "done"
+    assert runs == ["build"]
+    assert proxy.statuses == [None, 503, 202]
+    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
