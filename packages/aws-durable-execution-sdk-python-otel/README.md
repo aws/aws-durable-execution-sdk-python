@@ -27,9 +27,6 @@ The base package intentionally does not install OpenTelemetry libraries. The
 Lambda layer supplies a version-aligned API, SDK, exporter, and propagators,
 preventing packages in the function artifact from shadowing parts of the layer.
 
-Bundle the plugin and its Core SDK dependencies, including the required
-boto3/botocore versions, in your function's deployment package.
-
 For an application that configures its own OpenTelemetry provider instead of
 using a Lambda layer:
 
