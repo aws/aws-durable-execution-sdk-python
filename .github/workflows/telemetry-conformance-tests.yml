@@ -1,0 +1,62 @@
+name: Telemetry Conformance Tests
+
+# SDK handlers and builds live here. The shared workflow deploys and validates them.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/aws-durable-execution-sdk-python/**"
+      - "packages/aws-durable-execution-sdk-python-telemetry-exporter/**"
+      - "packages/aws-durable-execution-sdk-python-conformance-tests-telemetry/**"
+      - ".github/workflows/telemetry-conformance-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/aws-durable-execution-sdk-python/**"
+      - "packages/aws-durable-execution-sdk-python-telemetry-exporter/**"
+      - "packages/aws-durable-execution-sdk-python-conformance-tests-telemetry/**"
+      - ".github/workflows/telemetry-conformance-tests.yml"
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: AWS region
+        required: true
+        default: us-west-2
+        type: string
+      conformance_test_ref:
+        description: Optional conformance test commit SHA or branch name. Empty uses the shared workflow commit.
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  telemetry:
+    # 1. Run for non-PR events, such as pushes and manual invocations.
+    # 2. For PRs, run only same-repo branches from non-Dependabot actors. Forked PRs and Dependabot cannot read secrets.
+    if: github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      id-token: write
+    # The pinned SHA also selects the runner and telemetry-extension revision the shared
+    # workflow installs, so it must be reachable from a branch. It is the merge commit of
+    # aws-durable-execution-conformance-tests PR #150 on that repository's main branch. That
+    # commit exports PYTHON_SDK_REF and installs pip for the SAM makefile build.
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/telemetry-suite.yml@d4b7df927ea7eb7022bcca339d2cddd387d3d650
+    with:
+      language: python
+      resource_prefix: python
+      sdk_repository: aws/aws-durable-execution-sdk-python
+      sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Path relative to the conformance workspace, where this repo is checked out at .build/durable-sdk.
+      examples_dir: .build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-telemetry
+      conformance_test_ref: ${{ inputs.conformance_test_ref }}
+      aws_region: ${{ inputs.aws_region || 'us-west-2' }}
+      runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
+      timeout_minutes: 30
+    secrets:
+      CONFORMANCE_TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
+      CONFORMANCE_TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      CONFORMANCE_TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}

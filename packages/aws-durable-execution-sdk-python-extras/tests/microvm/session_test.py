@@ -38,6 +38,7 @@ from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
     DEFAULT_MICROVM_JOB_PATH,
+    MAX_JOB_INPUT_BYTES,
     MicrovmError,
     MicrovmInvokeOptions,
     MicrovmJobFailedError,
@@ -329,9 +330,16 @@ def test_fails_with_the_handlers_own_error_and_still_terminates(
     ("call", "error", "message"),
     [
         (
-            lambda vm, ctx: vm.invoke("build", "build", job_input=1, options=job()),  # type: ignore[arg-type]
+            # Python binds "build" to context, so name is missing.
+            lambda vm, ctx: vm.invoke("build", job_input=1, options=job()),  # type: ignore[call-arg, arg-type]
             "TypeError",
-            "invoke requires the durable context",
+            "missing 1 required positional argument: 'name'",
+        ),
+        (
+            # Python raises AttributeError at context.run_in_child_context.
+            lambda vm, ctx: vm.invoke("build", "build", job_input=1, options=job()),  # type: ignore[arg-type]
+            "AttributeError",
+            "'str' object has no attribute 'run_in_child_context'",
         ),
         (
             lambda vm, ctx: vm.invoke(ctx, "", job_input=1, options=job()),
@@ -380,7 +388,7 @@ def test_rejects_an_invalid_job_inside_the_handler_where_it_can_be_caught(
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
         try:
             call(vm, ctx)
-        except (TypeError, ValidationError) as raised:
+        except (AttributeError, TypeError, ValidationError) as raised:
             return [type(raised).__name__, str(raised)]
         return None
 
@@ -396,6 +404,68 @@ def test_rejects_an_invalid_job_inside_the_handler_where_it_can_be_caught(
         "pipeline.launch",
         "pipeline.terminate",
     ]
+
+
+def test_rejects_a_job_input_over_the_size_limit_before_the_job_starts(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        # The JSON of the input is the limit plus 1 byte, with the 2 quotes.
+        job_input = "x" * (MAX_JOB_INPUT_BYTES - 1)
+        try:
+            vm.invoke(ctx, "build", job_input=job_input, options=job())
+        except ValueError as error:
+            return str(error)
+        return None
+
+    result = run(session_handler(session_config(client), body))
+
+    assert outcome(result) == {
+        "result": (
+            f'MicroVM "build": the job input is {MAX_JOB_INPUT_BYTES + 1} bytes '
+            f"as JSON. The limit is {MAX_JOB_INPUT_BYTES} bytes, because the "
+            "worker accepts a job body of at most 6 MiB. Pass larger data by "
+            "reference, for example as an S3 key."
+        )
+    }
+    # Only the session's own launch ran. No job operation started, and no
+    # request reached the MicroVM.
+    assert len(client.requests("run_microvm")) == 1
+    assert client.requests("create_microvm_auth_token") == []
+    assert endpoint.requests == []
+    session = result.get_context("pipeline")
+    assert [operation.name for operation in session.child_operations] == [
+        "pipeline.session",
+        "pipeline.launch",
+        "pipeline.terminate",
+    ]
+
+
+def test_sends_a_job_input_at_the_size_limit(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    # The JSON of the input is the limit, with the 2 quotes. Each "é" takes
+    # 2 bytes.
+    job_input = "é" * ((MAX_JOB_INPUT_BYTES - 2) // 2)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return vm.invoke(ctx, "build", job_input=job_input, options=job())
+
+    result = run(
+        session_handler(session_config(client), body),
+        None,
+        [("build", succeed_with("done"))],
+    )
+
+    assert outcome(result) == {"result": "done"}
+    [posted] = endpoint.requests
+    assert posted["body"]["input"] == job_input
+    assert int(posted["headers"]["content-length"]) <= 6 * 1024 * 1024
 
 
 def test_retries_a_throttled_launch_with_the_same_client_token(
@@ -431,7 +501,6 @@ def test_fails_with_the_launch_error_and_skips_terminate(
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
-        ({"image_identifier": ""}, "image_identifier is required"),
         ({"timeout": Duration.from_hours(9)}, "timeout must be between 1 second"),
         (
             {"auto_suspend_idle_time": Duration.from_seconds(30)},
@@ -479,23 +548,30 @@ def test_rejects_an_invalid_config_before_any_durable_operation(
     assert client.calls == []
 
 
-def test_rejects_a_handler_that_is_not_callable(run: Any, fake_client: Any) -> None:
+def test_fails_inside_the_session_for_a_handler_that_is_not_callable(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    """Python raises TypeError when the session calls the handler. That call
+    runs inside the session's child context, after the launch. So the caller
+    gets ChildContextError, and the session terminates the MicroVM."""
+    client = fake_client(endpoint=fake_endpoint().url)
+
     @durable_execution
     def handler(event: Any, context: DurableContext) -> Any:
         try:
             microvm_session(
                 context,
                 "pipeline",
-                config=session_config(fake_client()),
+                config=session_config(client),
                 handler="build",  # type: ignore[arg-type]
             )
-        except TypeError as error:
-            return str(error)
+        except ChildContextError as error:
+            return [error.error_type, error.message]
         return None
 
-    assert (
-        outcome(run(handler)) == 'MicroVM session "pipeline": handler must be callable'
-    )
+    assert outcome(run(handler)) == ["TypeError", "'str' object is not callable"]
+    assert len(client.requests("run_microvm")) == 1
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
 
 
 def test_passes_an_idle_policy_through_and_resumes_before_each_job(
@@ -1242,13 +1318,13 @@ def two_jobs_with_a_wait_between(
 
 def checkpoint_launch_as(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None:
     """Make the launch step checkpoint the MicroVM fields of a real launch,
-    plus ``fields``, and no resume mode of its own. So a test controls the
-    launch checkpoint that every replay reads."""
+    plus ``fields``, and no resume mode of its own. Every replay then reads
+    that checkpoint."""
     original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def launch(self: Any, *args: Any) -> Any:
         data = original(self, *args).to_dict()
-        data.pop("resumeBeforeDelivery", None)
+        del data["resumeBeforeDelivery"]
         data.update(fields)
         return SimpleNamespace(to_dict=lambda: data)
 
@@ -1352,24 +1428,24 @@ def test_makes_no_state_check_when_a_deploy_turns_suspending_on(
 
 
 @pytest.mark.parametrize(
-    ("suspend", "state_checks"),
-    [(True, 2), (False, 0)],
-    ids=["current-config-can-suspend", "current-config-cannot-suspend"],
+    "fields",
+    [{}, {"resumeBeforeDelivery": "true"}, {"resumeBeforeDelivery": 1}],
+    ids=["missing", "string-true", "one"],
 )
-def test_follows_the_current_config_for_a_launch_checkpoint_without_a_resume_mode(
+def test_makes_no_state_check_for_a_launch_checkpoint_without_a_bool_resume_mode(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
     monkeypatch: pytest.MonkeyPatch,
-    suspend: bool,  # noqa: FBT001 - a pytest parameter
-    state_checks: int,
+    fields: dict[str, Any],
 ) -> None:
-    # Code that predates the field checkpointed the launch without
-    # resumeBeforeDelivery. That code computed the mode from the current
-    # config on every replay.
-    checkpoint_launch_as(monkeypatch)
+    # The current config asks for suspending. So only the checkpoint can make
+    # these jobs skip the state check. In Python "true" and 1 are truthy. So a
+    # truthiness check would turn the state check on. A read of `is True`
+    # keeps it off.
+    checkpoint_launch_as(monkeypatch, **fields)
     client = fake_client(endpoint=fake_endpoint().url)
-    config = session_config(client, auto_suspend_on_idle=suspend)
+    config = session_config(client, auto_suspend_on_idle=True)
 
     result = run(
         session_handler(config, two_jobs),
@@ -1378,39 +1454,10 @@ def test_follows_the_current_config_for_a_launch_checkpoint_without_a_resume_mod
     )
 
     assert outcome(result)["result"]["test"] == 2
-    assert "resumeBeforeDelivery" not in launch_checkpoint(result)
-    assert len(client.requests("get_microvm")) == state_checks
-
-
-@pytest.mark.parametrize(
-    ("recorded", "suspend", "state_checks"),
-    [("false", False, 0), (1, False, 0), (0, True, 2)],
-    ids=["string-false", "one", "zero"],
-)
-def test_follows_the_current_config_for_a_resume_mode_that_is_not_a_bool(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    recorded: Any,
-    suspend: bool,  # noqa: FBT001 - a pytest parameter
-    state_checks: int,
-) -> None:
-    # Only a bool is a resume mode. A truthy or falsy value of another type
-    # must not decide whether a job checks the MicroVM state. In Python
-    # True == 1, so a check by equality would read 1 as True and 0 as False.
-    checkpoint_launch_as(monkeypatch, resumeBeforeDelivery=recorded)
-    client = fake_client(endpoint=fake_endpoint().url)
-    config = session_config(client, auto_suspend_on_idle=suspend)
-
-    result = run(
-        session_handler(config, two_jobs),
-        None,
-        [("build", succeed_with(1)), ("test", succeed_with(2))],
-    )
-
-    assert outcome(result)["result"]["test"] == 2
-    checkpointed = launch_checkpoint(result)["resumeBeforeDelivery"]
-    assert type(checkpointed) is type(recorded)
-    assert checkpointed == recorded
-    assert len(client.requests("get_microvm")) == state_checks
+    assert launch_checkpoint(result) == {
+        "microvmId": "mvm-1",
+        "endpoint": client.endpoint,
+        "delivery": "http",
+        **fields,
+    }
+    assert client.requests("get_microvm") == []

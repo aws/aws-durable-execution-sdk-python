@@ -7,10 +7,14 @@ import pytest
 # this module.
 pytest.importorskip("aws_durable_execution_sdk_python_extras")
 
-from src.microvm import microvm_run_job, microvm_session  # noqa: E402
+from src.microvm import (  # noqa: E402
+    microvm_run_job,
+    microvm_session,
+    microvm_session_suspend,
+)
 
 
-EXAMPLES = [microvm_run_job, microvm_session]
+EXAMPLES = [microvm_run_job, microvm_session, microvm_session_suspend]
 IMAGE_ARN = "arn:aws:lambda:us-west-2:123456789012:microvm-image:img"
 ROLE_ARN = "arn:aws:iam::123456789012:role/microvm-execution"
 

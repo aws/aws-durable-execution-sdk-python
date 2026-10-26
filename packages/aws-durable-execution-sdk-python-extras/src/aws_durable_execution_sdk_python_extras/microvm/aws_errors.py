@@ -13,7 +13,7 @@ message can carry the request ID to the handler and to the execution history.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Literal
 
 from aws_durable_execution_sdk_python.retries import RetryDecision
@@ -58,14 +58,14 @@ def request_id_sentence(operation: MicrovmApiOperation, response: object) -> str
 
     ``response`` is the output of a boto3 call, or the ``response`` of a
     ``ClientError``. Both carry the request ID in
-    ``ResponseMetadata.RequestId``. A custom client can return an output
-    without it. So the function returns ``""`` when ``response`` has no
-    request ID that is a non-empty string.
+    ``ResponseMetadata.RequestId``. A custom client or a fake can return an
+    output that is not a dict, or a dict without ``ResponseMetadata``. So the
+    function returns ``""`` when ``response`` has no request ID that is a
+    non-empty string. A ``ResponseMetadata`` value that is neither a dict
+    nor empty raises ``AttributeError``. boto3 always returns a dict there.
     """
-    metadata = (
-        response.get("ResponseMetadata") if isinstance(response, Mapping) else None
-    )
-    request_id = metadata.get("RequestId") if isinstance(metadata, Mapping) else None
+    data = response if isinstance(response, dict) else {}
+    request_id = (data.get("ResponseMetadata") or {}).get("RequestId")
     if isinstance(request_id, str) and request_id:
         return f"{operation} request ID: {request_id}."
     return ""
@@ -143,8 +143,11 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
     - ``error`` is not the answer of ``operation``. See
       :func:`is_microvms_service_error`.
     - ``error`` has no request ID.
-    - The class of ``error`` builds ``str()`` from something other than
-      ``args``. The copy would not show the request ID.
+
+    A class of ``error`` can build ``str()`` from something other than
+    ``args``. Then neither ``str()`` of the copy nor ``str()`` of ``error``
+    contains the request ID. The step records the same message either way, and the
+    strategy still receives ``error``. So the function returns the copy.
     """
     if not is_microvms_service_error(operation, error):
         return error
@@ -154,8 +157,6 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
     labelled = type(error).__new__(type(error))
     labelled.__dict__.update(vars(error))
     labelled.args = (message,)
-    if str(labelled) != message:
-        return error
     labelled.__cause__ = error
     labelled.__dict__["_original_error"] = error
     return labelled

@@ -11,7 +11,6 @@ outcome to its callback.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import json
 import os
@@ -20,9 +19,9 @@ import socket
 import socketserver
 import sys
 import threading
-import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -121,14 +120,6 @@ _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 
 _MAX_CHUNK_LINE_BYTES = 1024
 
-_DISCARD_SECONDS = 10.0
-"""How long the worker reads and drops a body that it answered with 400."""
-
-_MAX_DISCARD_BYTES = 4 * MAX_JOB_BODY_BYTES
-"""How many bytes of such a body the worker reads and drops at most."""
-
-_DISCARD_READ_BYTES = 64 * 1024
-
 TERMINATE_REPORT_BUDGET_SECONDS = 5.0
 """How long the worker holds the ``terminate`` hook open while it fails the
 callbacks of running jobs.
@@ -178,135 +169,26 @@ def _start_timer(delay: float, action: Callable[[], None]) -> Callable[[], None]
     return timer.cancel
 
 
-def _failed_call_warning(
-    outcome: SuspendOutcome,
-    *,
-    terminating: bool,
-    closed: bool,
-    suspend_hook_arrived: bool,
-    suspending: bool,
-) -> str:
-    """Return the warning for a failed SuspendMicrovm call.
-
-    The text depends on the outcome and on the listener state when the
-    outcome is handled. The caller reads that state under the lock, before
-    it changes it. The conditions, their order, and the texts match the
-    JavaScript worker's ``failedCallWarning``.
-
-    1. A terminate hook during the call: ``_start_idle_time`` starts no
-       idle time. So the listener never calls again. A rejection keeps its
-       permission hint. For an unknown outcome, the text also says that the
-       listener refuses jobs, because a terminating listener refuses jobs
-       for good.
-    2. A rejection with a suspend hook during the call, while the hook's
-       refusal is still in effect: the MicroVM is suspending anyway. So the
-       refusal stays until the resume hook, or 30 seconds after the last
-       suspend hook. The text keeps the permission hint.
-    3. A rejection otherwise: the MicroVM keeps running.
-    4. A refusal for now after ``close()`` during the call:
-       ``_start_idle_time`` starts no idle time. So the listener never
-       calls again.
-    5. A refusal for now with a suspend hook during the call, while the
-       hook's refusal is still in effect: the refusal stays, as in item 2.
-    6. A refusal for now with a suspend hook during the call, after the
-       hook's refusal ended: the listener accepts jobs, and calls again one
-       idle time after the call and every job end.
-    7. A refusal for now otherwise: the next idle time lasts at least 30
-       seconds, unless a job or a resume hook starts the idle time again.
-    8. An unknown outcome after the refusal of jobs ended during the call:
-       a resume hook ended it, or the 30-second limit of a suspend hook's
-       refusal. The listener starts no new refusal after an unknown outcome
-       when ``suspending`` is false. So it accepts jobs. It calls again one
-       idle time after the call and every job end.
-    9. The same after ``close()`` during the call: the listener accepts
-       jobs. ``_start_idle_time`` starts no idle time. So the listener never
-       calls again.
-    10. An unknown outcome otherwise: the refusal continues until the resume
-        hook, or for 30 seconds.
-    """
-    if outcome is SuspendOutcome.UNKNOWN:
-        if terminating:
-            return (
-                "the suspend call for the idle MicroVM had an unknown outcome. "
-                "The MicroVM is terminating, so the worker refuses jobs and "
-                "does not try the call again."
-            )
-        if not suspending:
-            if closed:
-                return (
-                    "the suspend call for the idle MicroVM had an unknown "
-                    "outcome. The refusal of jobs already ended during the "
-                    "call, on a resume hook or after 30 seconds. So the worker "
-                    "accepts jobs. The worker is closed, so it does not try "
-                    "the call again."
-                )
-            return (
-                "the suspend call for the idle MicroVM had an unknown outcome. "
-                "The refusal of jobs already ended during the call, on a "
-                "resume hook or after 30 seconds. So the worker accepts jobs. "
-                "It tries the call again one idle time after the call and "
-                "every job end."
-            )
-        return (
-            "the suspend call for the idle MicroVM had an unknown outcome. The "
-            "worker refuses jobs until the MicroVM resumes, or for 30 seconds."
-        )
-    if outcome is SuspendOutcome.REJECTED:
-        if terminating:
-            return (
-                "could not suspend the idle MicroVM, because the service "
-                "rejected the call. The MicroVM is terminating, so the worker "
-                "does not try the call again. A missing permission needs "
-                "lambda:SuspendMicrovm on the MicroVM image in its execution "
-                "role."
-            )
-        if suspend_hook_arrived and suspending:
-            return (
-                "could not suspend the idle MicroVM, because the service "
-                "rejected the call. A suspend hook arrived during the call, so "
-                "the MicroVM is suspending anyway. The hook's refusal of jobs "
-                "stays until the resume hook, or 30 seconds after the last "
-                "suspend hook. A missing permission needs lambda:SuspendMicrovm "
-                "on the MicroVM image in its execution role."
-            )
-        return (
-            "could not suspend the idle MicroVM, because the service rejected "
-            "the call. It keeps running. A missing permission needs "
-            "lambda:SuspendMicrovm on the MicroVM image in its execution role."
-        )
-    if terminating:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. The MicroVM is terminating, so the worker does "
-            "not try the call again."
-        )
-    if closed:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. The worker is closed, so it does not try the "
-            "call again."
-        )
-    if suspend_hook_arrived and suspending:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. A suspend hook arrived during the call, so this "
-            "call does not end the hook's refusal. The idle time starts again "
-            "after the resume hook, or 30 seconds after the last suspend hook."
-        )
-    if suspend_hook_arrived:
-        return (
-            "could not suspend the idle MicroVM, because the service refused "
-            "the call for now. A suspend hook arrived during the call, and the "
-            "hook's refusal of jobs ended before the call ended. So the worker "
-            "accepts jobs. It tries the call again one idle time after the "
-            "call and every job end."
-        )
-    return (
+# The warning after a failed SuspendMicrovm call. Each outcome has one name
+# and one message. The listener state goes into the warning's fields. The
+# names and the messages match the JavaScript worker word for word.
+_FAILED_CALL_WARNINGS: Mapping[SuspendOutcome, tuple[str, str]] = {
+    SuspendOutcome.REJECTED: (
+        "rejected",
+        "could not suspend the idle MicroVM, because the service rejected the "
+        "call. A missing permission needs lambda:SuspendMicrovm on the MicroVM "
+        "image in its execution role.",
+    ),
+    SuspendOutcome.REFUSED_FOR_NOW: (
+        "refusedForNow",
         "could not suspend the idle MicroVM, because the service refused the "
-        "call for now. It keeps running. The worker tries the call again after "
-        "the next idle time. That idle time lasts at least 30 seconds, unless a "
-        "job or a resume hook starts the idle time again."
-    )
+        "call for now.",
+    ),
+    SuspendOutcome.UNKNOWN: (
+        "unknown",
+        "the suspend call for the idle MicroVM had an unknown outcome.",
+    ),
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -402,7 +284,13 @@ class MicrovmWorkerListener:
 
     A second delivery of a callback ID is answered like the first and
     ignored, while that job runs and after it ended. The listener remembers
-    the last 1,000 finished callback IDs.
+    the last 1,000 finished callback IDs. A second delivery of a finished
+    job gets this answer in every state, because it starts nothing. A
+    second delivery of a known job gets it after the ``terminate`` hook too,
+    because that hook fails a running job's callback. A second delivery of a
+    running job during a suspend refusal gets HTTP 503, as a new job does.
+    The running job can freeze with the MicroVM. The 503 makes the durable
+    function check the state and resume the MicroVM.
 
     A document that does not match the contract gets HTTP 400. If the
     document still names a callback, the listener fails that callback. So
@@ -419,9 +307,9 @@ class MicrovmWorkerListener:
     3. When the idle time ends, the listener calls SuspendMicrovm with the
        ``run`` hook's MicroVM ID. The call returns before the MicroVM
        freezes.
-    4. From the moment the idle time ends, the listener answers every job
-       with HTTP 503 and does not start it. A job accepted then would freeze
-       with the MicroVM. After a 503, the durable function resumes the
+    4. From the moment the idle time ends, the listener answers every new
+       job with HTTP 503 and does not start it. A job accepted then would
+       freeze with the MicroVM. After a 503, the durable function resumes the
        MicroVM and delivers the job again.
     5. The refusal ends when the ``resume`` hook arrives, or 30 seconds after
        the call returned. The idle time then starts again.
@@ -448,25 +336,39 @@ class MicrovmWorkerListener:
        arrives after it. A ``suspend`` hook whose refusal is still in
        effect when the call ends is the exception, as in item 6. Its
        refusal stays, and the idle time starts when it ends.
-       The default client retries a throttle. So a throttle from it usually
-       ends as an unknown outcome, as in item 8. A throttle is refused for
-       now only from a caller's client that does not retry it.
+       The default client makes one attempt. So a throttle from it is
+       refused for now. A caller's client that retries a throttle turns it
+       into an unknown outcome, as in item 8.
     8. A call whose outcome is unknown, such as a timeout, a conflict, a
        server error, or an error after a retried attempt, is handled like a
        successful call. The service may have suspended the MicroVM anyway.
-       No attempt of the call starts after 10 seconds. An attempt already in
-       flight runs until it ends, and the refusal lasts at least until then.
+       No attempt of the call starts after 10 seconds, and none starts
+       after a ``resume`` hook. An attempt already in flight runs until it
+       ends, and the refusal lasts at least until then.
        A `resume` hook during the call, or the end of a `suspend` hook's 30
        seconds during the call, has already ended the refusal. The worker
        then accepts jobs at once, and tries the call again one idle time
        after the call and every job end.
+    9. The listener logs one warning for each failed call. The message
+       names the outcome. The fields are, in order, ``microvmId``,
+       ``error``, ``outcome``, ``suspendHookArrived``, ``terminating``,
+       ``closed``, and ``refusingJobs``. ``microvmId`` is the MicroVM ID of
+       the call. ``error`` holds the name and the message of the error.
+       ``outcome`` is ``rejected``, ``refusedForNow``, or ``unknown``.
+       ``suspendHookArrived`` states whether a ``suspend`` hook arrived
+       since the idle time ended. ``terminating`` states whether a
+       ``terminate`` hook came before the listener acted on the outcome.
+       ``closed`` states whether ``close()`` came before the listener acted
+       on the outcome. ``refusingJobs`` states whether the listener answers
+       jobs with HTTP 503 after it has acted on the outcome.
 
     When the image enables the ``suspend`` and ``terminate`` hooks, the
     listener acts on them:
 
     - ``suspend``: the listener answers HTTP 200 at once, because a suspend
       hook that runs past its timeout terminates the MicroVM. It then
-      refuses jobs with HTTP 503, as after its own suspend, until the
+      refuses new jobs, and second deliveries of running jobs, with HTTP
+      503, as after its own suspend, until the
       ``resume`` hook or for 30 seconds. Running jobs freeze with the
       MicroVM. A ``run`` hook job that arrives during the refusal starts when
       the refusal ends, because the durable function cannot deliver it
@@ -476,8 +378,8 @@ class MicrovmWorkerListener:
       :class:`MicrovmTerminatedError`. It answers HTTP 200 when the reports
       end, or after 5 seconds. The answer also waits for jobs that report
       their own outcome, for ``run`` hook requests in flight, and for the
-      failure reports of invalid requests. From then on it refuses jobs with
-      HTTP 503, and fails the callback of a ``run`` hook job instead of
+      failure reports of invalid requests. From then on it refuses new jobs
+      with HTTP 503, and fails the callback of a ``run`` hook job instead of
       starting it.
 
     The listener acts on these two hooks, and on ``resume``, only when the
@@ -512,6 +414,12 @@ class MicrovmWorkerListener:
         # job, a report, a run hook, or a suspend call ends.
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
+        # The timers that could not start, as a log message and the error.
+        # _locked() logs them after it releases the lock.
+        self._timer_failures: list[tuple[str, BaseException]] = []
+        # The number of _locked() blocks that run now. It is 0 or 1, because
+        # the lock is not reentrant. A timer start checks it.
+        self._locked_depth = 0
         # The callback IDs of the jobs that run now.
         self._jobs: set[str] = set()
         # The callback IDs of jobs that ended, oldest first.
@@ -554,6 +462,19 @@ class MicrovmWorkerListener:
         # worker's own that the service rejected must not end a refusal that
         # a suspend hook started meanwhile.
         self._suspend_hooks = 0
+        # Counts the resume hooks from Lambda. Each one ends the refusal, so
+        # a job can run from then on. A SuspendMicrovm attempt after it would
+        # freeze that job. So the call's before-send handler starts no
+        # attempt once this count has changed. The handler reads the count
+        # without the lock: an int read is atomic, and the handler then
+        # waits for no listener lock inside botocore.
+        self._resume_hooks = 0
+        # The MicroVM ID of the SuspendMicrovm call in flight. It is set when
+        # the idle time ends, and cleared when the call returns or the first
+        # resume hook during the call arrives. That hook logs that it stops
+        # the call. So a second resume hook during the same call logs
+        # nothing.
+        self._stoppable_suspend: str | None = None
         # SuspendMicrovm calls in flight. idle() waits for them. At most one
         # runs at a time.
         self._suspend_calls = 0
@@ -611,7 +532,11 @@ class MicrovmWorkerListener:
                 idle, once per suspend. It never closes a client that this
                 function returns. Defaults to a client of its own per
                 suspend, from the default credential chain. The listener
-                closes that client after the call. A client that retries
+                closes that client after the call. The listener stops the
+                client's attempts once a ``resume`` hook arrived. Give the
+                client one attempt, as the default client has. A retry
+                that starts before the ``resume`` hook arrives can still
+                suspend the MicroVM after it resumed. A client that retries
                 must report its retries in ``ResponseMetadata.RetryAttempts``
                 of the error that it raises. The listener otherwise counts a
                 retried call as a first attempt. An earlier attempt of that
@@ -687,9 +612,6 @@ class MicrovmWorkerListener:
             def handle_exchange(self) -> None:
                 listener.handle_request(self)
 
-            def handle_expect_100(self) -> bool:
-                return listener.handle_expect_100(self)
-
         return _Handler
 
     def handle_request(self, request: BaseHTTPRequestHandler) -> None:
@@ -707,31 +629,6 @@ class MicrovmWorkerListener:
             )
             if not exchange.responded:
                 exchange.respond(500, {"error": "internal error"})
-        finally:
-            exchange.discard_unread_body()
-
-    def handle_expect_100(self, request: BaseHTTPRequestHandler) -> bool:
-        """Answer a request that sent ``Expect: 100-continue``.
-
-        :attr:`request_handler_class` calls it before it reads the body.
-
-        1. A request whose ``Content-Length`` is over the path's limit gets
-           its HTTP 400 now, instead of ``100 Continue``. RFC 9110 section
-           10.1.1 allows a final answer in place of ``100 Continue``. The
-           client then does not send the body.
-        2. Every other request gets ``100 Continue``.
-
-        Returns:
-            Whether the base class goes on to read the request.
-        """
-        exchange = _Exchange(request, self._logger)
-        limit = self._body_limit(exchange)
-        length = exchange.declared_length()
-        if limit is not None and length is not None and length > limit:
-            self._reject(exchange.too_large(limit), exchange)
-            exchange.discard_unread_body()
-            return False
-        return BaseHTTPRequestHandler.handle_expect_100(request)
 
     def idle(self, timeout: float | None = None) -> bool:
         """Wait until every job started so far has ended.
@@ -825,7 +722,7 @@ class MicrovmWorkerListener:
         Lambda freezes the MicroVM after the answer. A job accepted now would
         freeze with it.
         """
-        with self._lock:
+        with self._locked():
             self._suspend_hooks += 1
             self._stop_idle_time()
             self._suspending = True
@@ -836,13 +733,28 @@ class MicrovmWorkerListener:
 
         A resume without a job would otherwise leave the MicroVM running
         until the next job ends. Returns the deferred run hook jobs,
-        registered. The caller starts them after the answer.
+        registered. The caller starts them after the answer. A
+        SuspendMicrovm call in flight starts no attempt after this hook.
+        The first such hook logs that it stops the call.
         """
-        with self._lock:
+        with self._locked():
+            self._resume_hooks += 1
+            stopped = self._stoppable_suspend
+            self._stoppable_suspend = None
             if self._suspending:
-                return self._end_suspending()
-            self._start_idle_time()
-            return []
+                deferred = self._end_suspending()
+            else:
+                self._start_idle_time()
+                deferred = []
+        # The caller of the listener passes the logger. So the line is
+        # written after the lock is released. botocore cannot cancel an
+        # attempt in flight. So the call stops at its next attempt.
+        if stopped is not None:
+            self._logger.info(
+                "stopping the suspend call: the MicroVM resumed during it",
+                extra={"microvmId": stopped},
+            )
+        return deferred
 
     def _handle_terminate_hook(self, exchange: _Exchange) -> None:
         """Fail the callback of every running job, then answer the hook.
@@ -926,19 +838,6 @@ class MicrovmWorkerListener:
         """The handler for a job route, or ``None`` for another path."""
         return self._handler if path == MICROVM_JOB_PATH else self._routes.get(path)
 
-    def _body_limit(self, exchange: _Exchange) -> int | None:
-        """The largest body that the request's path reads.
-
-        ``None`` for a request whose body the worker does not read.
-        """
-        if exchange.method != "POST":
-            return None
-        if exchange.path == f"{HOOK_PATH_PREFIX}run":
-            return MAX_HOOK_BODY_BYTES
-        if self._job_handler(exchange.path) is not None:
-            return MAX_JOB_BODY_BYTES
-        return None
-
     def _handle_run_hook(self, exchange: _Exchange) -> None:
         try:
             parsed = RunHookRequest.from_dict(exchange.read_json(MAX_HOOK_BODY_BYTES))
@@ -952,7 +851,7 @@ class MicrovmWorkerListener:
         # otherwise both start the job. The body is read before these checks.
         # So a suspend or terminate hook can arrive while it is still being
         # read.
-        with self._lock:
+        with self._locked():
             later = self._run_hook_accepted
             if not later:
                 self._run_hook_accepted = True
@@ -1092,11 +991,37 @@ class MicrovmWorkerListener:
                 # arrives.
                 self._microvm_id = request.microvm_id
             microvm_id = self._microvm_id
-            terminating = self._terminating
-            suspending = self._suspending
-            duplicate = self._is_known(job.callback_id)
-            if not (terminating or suspending or duplicate):
+            # A known callback ID gets one of three answers:
+            #
+            # 1. An ID in _finished gets 202 in every state. Its job has
+            #    ended, and the answer starts nothing. A 503 would make the
+            #    durable function resume the MicroVM only to get this answer.
+            # 2. A known ID gets 202 while the MicroVM terminates. The
+            #    terminate hook fails a running job's callback. So the
+            #    durable function learns the outcome from the callback.
+            # 3. An ID in _jobs gets 503 during a suspend refusal, as a new
+            #    job does. The running job can freeze with the MicroVM. A
+            #    202 would end the delivery, and nothing would resume the
+            #    MicroVM. So the job would wait for its heartbeat timeout or
+            #    its timeout. The 503 makes the durable function check the
+            #    state, resume the MicroVM, and deliver the job again.
+            may_freeze = (
+                job.callback_id in self._jobs
+                and self._suspending
+                and not self._terminating
+            )
+            duplicate = self._is_known(job.callback_id) and not may_freeze
+            terminating = not duplicate and self._terminating
+            suspending = not duplicate and self._suspending
+            if not (duplicate or terminating or suspending):
                 self._register_job(job.callback_id, request.region)
+        if duplicate:
+            exchange.respond(202, {})
+            self._logger.warning(
+                "duplicate job ignored",
+                extra={"microvmId": microvm_id, "callbackId": job.callback_id},
+            )
+            return
         if terminating or suspending:
             # Terminating: the MicroVM is about to end, and the job could not
             # finish. Suspending: the MicroVM is about to freeze. The durable
@@ -1107,13 +1032,6 @@ class MicrovmWorkerListener:
                 extra={"microvmId": microvm_id, "callbackId": job.callback_id},
             )
             exchange.respond(503, {"error": f"the MicroVM is {state}"})
-            return
-        if duplicate:
-            exchange.respond(202, {})
-            self._logger.warning(
-                "duplicate job ignored",
-                extra={"microvmId": microvm_id, "callbackId": job.callback_id},
-            )
             return
         # The thread starts before the answer. A thread that cannot start
         # raises, and the caller gets HTTP 500, which the durable function
@@ -1184,7 +1102,7 @@ class MicrovmWorkerListener:
             # durable function delivers the job again, and the retry may run
             # it. The run hook fails the callback instead, because Lambda
             # sends it only once.
-            with self._changed:
+            with self._locked():
                 self._jobs.discard(job.callback_id)
                 self._active.pop(job.callback_id, None)
                 self._start_idle_time()
@@ -1202,7 +1120,7 @@ class MicrovmWorkerListener:
                 extra={"callbackId": job.callback_id, "error": describe(error)},
             )
         finally:
-            with self._changed:
+            with self._locked():
                 self._jobs.discard(job.callback_id)
                 self._active.pop(job.callback_id, None)
                 self._finished[job.callback_id] = None
@@ -1450,6 +1368,58 @@ class MicrovmWorkerListener:
             callback_id, self._create_client(region), logger=self._logger
         )
 
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the lock, then log the timers that could not start.
+
+        Every block that can start a timer takes the lock with this method.
+        The caller of the listener passes the logger. That logger can be
+        slow, or can call the listener. A listener method takes the lock,
+        and the lock is not reentrant. So :meth:`_start_idle_time` and
+        :meth:`_start_grace` only record a failure under the lock. This
+        method logs each failure after it releases the lock. It calls
+        describe() after the release too, because describe() calls str() on
+        the error. It logs the failures when the block raises too.
+
+        A block must not call this method again. The lock is not reentrant.
+        So the second call would wait forever for the lock that the first
+        call holds.
+
+        This method raises ``_locked_depth`` under the lock, and lowers it
+        before the release. The two timer starts check it through
+        :meth:`_check_locked`.
+        """
+        self._lock.acquire()
+        self._locked_depth += 1
+        try:
+            yield
+        finally:
+            self._locked_depth -= 1
+            failures = self._timer_failures
+            self._timer_failures = []
+            self._lock.release()
+            for message, error in failures:
+                self._logger.error(message, extra={"error": describe(error)})
+
+    def _check_locked(self) -> None:
+        """Raise RuntimeError unless a :meth:`_locked` block runs.
+
+        A timer start records a failure in ``_timer_failures``. Only
+        :meth:`_locked` logs that list. Suppose a block takes ``self._lock``
+        directly and starts a timer that fails. Then the next
+        :meth:`_locked` block logs the failure, possibly on another thread.
+        If no such block runs, the failure is never logged. So each timer
+        start calls this method first.
+
+        Under a plain ``with self._lock:`` block, no other thread can run a
+        :meth:`_locked` block. So the depth is 0, and this method raises.
+        The check is an explicit raise, because ``python -O`` removes an
+        assert.
+        """
+        if self._locked_depth == 0:
+            msg = "a timer start needs the lock through _locked()"
+            raise RuntimeError(msg)
+
     def _start_idle_time(self, *, after_refusal: bool = False) -> None:
         """Start the idle time, when the session asked for it and no job runs.
 
@@ -1460,8 +1430,10 @@ class MicrovmWorkerListener:
         call as fast as the client can make it. Every other start uses the
         session's idle time.
 
-        The caller holds the lock.
+        The caller holds the lock through :meth:`_locked`. A timer that
+        cannot start is logged after the caller releases the lock.
         """
+        self._check_locked()
         self._stop_idle_time()
         auto_suspend = self._auto_suspend
         if (
@@ -1494,9 +1466,7 @@ class MicrovmWorkerListener:
         except Exception as error:  # noqa: BLE001
             # Without a timer thread, the MicroVM keeps running until a job
             # ends and the idle time starts again.
-            self._logger.error(
-                "could not start the idle time", extra={"error": describe(error)}
-            )
+            self._timer_failures.append(("could not start the idle time", error))
 
     def _stop_idle_time(self) -> None:
         """Cancel the idle time. The caller holds the lock."""
@@ -1527,10 +1497,14 @@ class MicrovmWorkerListener:
             # thread starts, while the client is created, or during the call.
             # Each path that ends the refusal compares with this count.
             hooks_before = self._suspend_hooks
+            # A resume hook from here on ends the refusal. The call then
+            # starts no further attempt.
+            resumes_before = self._resume_hooks
+            self._stoppable_suspend = auto_suspend.microvm_id
         try:
             threading.Thread(
                 target=self._suspend_self,
-                args=(auto_suspend, hooks_before, waited_seconds),
+                args=(auto_suspend, hooks_before, resumes_before, waited_seconds),
                 name="microvm-suspend",
                 daemon=True,
             ).start()
@@ -1541,18 +1515,24 @@ class MicrovmWorkerListener:
                 "could not start the suspend of the idle MicroVM",
                 extra={"microvmId": auto_suspend.microvm_id, "error": describe(error)},
             )
-            with self._changed:
+            with self._locked():
                 deferred = self._end_own_refusal(hooks_before)
                 self._suspend_call_ended()
             self._launch_deferred(deferred)
 
     def _suspend_self(
-        self, auto_suspend: _AutoSuspend, hooks_before: int, waited_seconds: float
+        self,
+        auto_suspend: _AutoSuspend,
+        hooks_before: int,
+        resumes_before: int,
+        waited_seconds: float,
     ) -> None:
         try:
-            self._call_suspend(auto_suspend, hooks_before, waited_seconds)
+            self._call_suspend(
+                auto_suspend, hooks_before, resumes_before, waited_seconds
+            )
         finally:
-            with self._changed:
+            with self._locked():
                 self._suspend_call_ended()
 
     def _end_own_refusal(
@@ -1571,15 +1551,21 @@ class MicrovmWorkerListener:
     def _suspend_call_ended(self) -> None:
         """Count a SuspendMicrovm call as ended, and start the idle time that
         a resume hook, a job, or a refusal for now asked for during it. The
-        caller holds the lock."""
+        caller holds the lock through :meth:`_locked`."""
         self._suspend_calls -= 1
+        # The thread or the client could fail before the call was sent.
+        self._stoppable_suspend = None
         if self._idle_after_call:
             self._idle_after_call = False
             self._start_idle_time(after_refusal=self._idle_after_call_floor)
         self._changed.notify_all()
 
     def _call_suspend(
-        self, auto_suspend: _AutoSuspend, hooks_before: int, waited_seconds: float
+        self,
+        auto_suspend: _AutoSuspend,
+        hooks_before: int,
+        resumes_before: int,
+        waited_seconds: float,
     ) -> None:
         target = auto_suspend.microvm_id
         fields = {"microvmId": target}
@@ -1613,52 +1599,55 @@ class MicrovmWorkerListener:
                 "waitedSeconds": waited_seconds,
             },
         )
+        # The block after the client is closed decides whether the refusal
+        # continues after an unknown outcome. The warning reads its fields in
+        # that block. So for an unknown outcome, the warning comes after
+        # close().
+        unknown_described: object | None = None
         try:
-            suspend_microvm(client, target, SUSPEND_CALL_TIMEOUT_SECONDS)
+            self._send_suspend(client, target, resumes_before)
         except Exception as error:  # noqa: BLE001
             outcome = classify_suspend_error(error)
-            deferred = []
-            with self._lock:
-                # The warning depends on this state. The block reads it
-                # before it changes it. For a rejection and a refusal for
-                # now, this block also makes the decision. So for these two
-                # outcomes, the text matches the decision, whatever another
-                # thread does after the lock is released. For an unknown
-                # outcome, the block at the end of this method decides
-                # whether the 30-second refusal starts. See issue #820.
-                hook_arrived = self._suspend_hooks != hooks_before
-                terminating = self._terminating
-                closed = self._closed
-                suspending = self._suspending
-                # The service did nothing. So jobs can run again at once. A
-                # suspend hook that arrived since the idle time ended means
-                # that the MicroVM is suspending anyway, so its refusal stays.
-                if outcome is not SuspendOutcome.UNKNOWN and not hook_arrived:
-                    deferred = self._stop_refusing()
-                    # A rejection, such as a missing permission, is not
-                    # retried until a job ends. A refusal for now is retried
-                    # after the next idle time. That idle time lasts at least
-                    # 30 seconds, because the same error can repeat on every
-                    # call.
-                    if outcome is SuspendOutcome.REFUSED_FOR_NOW:
-                        self._start_idle_time(after_refusal=True)
-            self._logger.warning(
-                _failed_call_warning(
-                    outcome,
-                    terminating=terminating,
-                    closed=closed,
-                    suspend_hook_arrived=hook_arrived,
-                    suspending=suspending,
-                ),
-                extra={**fields, "error": describe(error)},
-            )
-            if outcome is not SuspendOutcome.UNKNOWN:
+            # describe() calls str(error). A client from
+            # create_microvms_client can raise any exception type. So the
+            # caller of the listener controls __str__(). That method can be
+            # slow, or can call the listener. A listener method takes the
+            # lock, and the lock is not reentrant. So the error is described
+            # here, before either locked block.
+            described = describe(error)
+            if outcome is SuspendOutcome.UNKNOWN:
+                # A timeout, a conflict, a server error, or an error after a
+                # retried attempt does not show whether the service suspended
+                # the MicroVM. So the refusal continues, as after a successful
+                # call. The block after the client is closed acts on it. A
+                # resume hook can stop any attempt, the first one included. An
+                # earlier attempt, if there was one, may have suspended the
+                # MicroVM. That resume hook has already ended the refusal. So
+                # that block starts a grace period only for a suspend hook
+                # that came after the resume.
+                unknown_described = described
+            else:
+                deferred = []
+                with self._locked():
+                    # The service did nothing. So jobs can run again at once.
+                    # A suspend hook that arrived since the idle time ended
+                    # means that the MicroVM is suspending anyway, so its
+                    # refusal stays.
+                    if self._suspend_hooks == hooks_before:
+                        deferred = self._stop_refusing()
+                        # A rejection, such as a missing permission, is not
+                        # retried until a job ends. A refusal for now is
+                        # retried after the next idle time. That idle time
+                        # lasts at least 30 seconds, because the same error
+                        # can repeat on every call.
+                        if outcome is SuspendOutcome.REFUSED_FOR_NOW:
+                            self._start_idle_time(after_refusal=True)
+                    message, extra = self._failed_call_log(
+                        outcome, described, target, hooks_before
+                    )
+                self._logger.warning(message, extra=extra)
                 self._launch_deferred(deferred)
                 return
-            # A timeout, a conflict, a server error, or an error after a
-            # retried attempt does not show whether the service suspended
-            # the MicroVM. So the refusal continues, as after a successful
-            # call.
         finally:
             if owns_client:
                 # Each suspend creates its own client. Closing it releases
@@ -1670,19 +1659,83 @@ class MicrovmWorkerListener:
                         "could not close the Lambda MicroVMs client",
                         extra={**fields, "error": describe(close_error)},
                     )
-        with self._lock:
+        with self._locked():
             # A resume hook that arrived during the call has already ended
             # the refusal. The grace timer also runs after close(), so a
             # closed listener does not refuse jobs forever.
             if self._suspending:
                 self._start_grace()
+            if unknown_described is None:
+                return
+            message, extra = self._failed_call_log(
+                SuspendOutcome.UNKNOWN, unknown_described, target, hooks_before
+            )
+        self._logger.warning(message, extra=extra)
+
+    def _send_suspend(
+        self, client: LambdaMicrovmsClient, target: str, resumes_before: int
+    ) -> None:
+        """Make the SuspendMicrovm call. Start no attempt after a resume hook
+        that arrived since the idle time ended."""
+        try:
+            # The before-send handler calls resumed() inside botocore, in
+            # this thread. It reads one int without the lock. So it runs no
+            # code of the caller, and waits for no listener lock.
+            suspend_microvm(
+                client,
+                target,
+                SUSPEND_CALL_TIMEOUT_SECONDS,
+                resumed=lambda: self._resume_hooks != resumes_before,
+            )
+        finally:
+            # The call has returned. A resume hook from now on stops nothing,
+            # so it logs no stop.
+            with self._lock:
+                self._stoppable_suspend = None
+
+    def _failed_call_log(
+        self,
+        outcome: SuspendOutcome,
+        described: object,
+        microvm_id: str,
+        hooks_before: int,
+    ) -> tuple[str, dict[str, object]]:
+        """Return the warning for a failed SuspendMicrovm call, and its fields.
+
+        The message names only the outcome. The fields state whether a
+        suspend hook arrived since the idle time ended, whether the listener
+        is terminating or closed, and whether it refuses jobs.
+
+        The caller holds the lock, and has already acted on the outcome in
+        the same locked block. So the fields state what the listener does
+        after the outcome. The caller logs the warning after it releases the
+        lock.
+
+        This method runs under the lock. So it must not call code that the
+        caller of the listener controls. ``described`` is the result of
+        :func:`describe`, which calls ``str()`` on the error. So the caller
+        describes the error before it takes the lock.
+        """
+        name, message = _FAILED_CALL_WARNINGS[outcome]
+        return message, {
+            "microvmId": microvm_id,
+            "error": described,
+            "outcome": name,
+            "suspendHookArrived": self._suspend_hooks != hooks_before,
+            "terminating": self._terminating,
+            "closed": self._closed,
+            # The job path refuses a job with HTTP 503 in both states.
+            "refusingJobs": self._terminating or self._suspending,
+        }
 
     def _start_grace(self) -> None:
         """End the refusal after the grace period, unless the ``resume`` hook
         ends it first. A timer started earlier is replaced.
 
-        The caller holds the lock.
+        The caller holds the lock through :meth:`_locked`. A timer that
+        cannot start is logged after the caller releases the lock.
         """
+        self._check_locked()
         self._cancel_grace()
         generation = self._grace_generation
         try:
@@ -1691,9 +1744,8 @@ class MicrovmWorkerListener:
             )
         except Exception as error:  # noqa: BLE001
             # Without a timer thread, only the resume hook ends the refusal.
-            self._logger.error(
-                "could not start the end of the refusal",
-                extra={"error": describe(error)},
+            self._timer_failures.append(
+                ("could not start the end of the refusal", error)
             )
 
     def _cancel_grace(self) -> None:
@@ -1704,7 +1756,7 @@ class MicrovmWorkerListener:
             self._cancel_grace_timer = None
 
     def _grace_ended(self, generation: int) -> None:
-        with self._lock:
+        with self._locked():
             if generation != self._grace_generation:
                 return
             self._cancel_grace_timer = None
@@ -1714,8 +1766,9 @@ class MicrovmWorkerListener:
     def _end_suspending(self) -> list[tuple[MicrovmJobDocument, str]]:
         """End the refusal of jobs, and start the idle time again.
 
-        The caller holds the lock, and the listener is suspending. The caller
-        starts the returned jobs after it releases the lock.
+        The caller holds the lock through :meth:`_locked`, and the listener
+        is suspending. The caller starts the returned jobs after it releases
+        the lock.
         """
         deferred = self._stop_refusing()
         self._start_idle_time()
@@ -1911,30 +1964,16 @@ class _Outcome:
         raises ``SystemExit``, which would otherwise end the job thread
         without a report.
 
-        A handler can still return an awaitable, for example a plain function
-        that calls an async function and returns its coroutine. The worker
-        cannot run it. So the outcome is a ``TypeError`` that names the
-        cause, and a coroutine is closed, so that Python does not warn that
-        it was never awaited.
+        A plain function can return a coroutine, for example by calling an
+        async function without ``await``. The coroutine is kept as the
+        value. It is not JSON-serializable, so the report fails the job with
+        ``ResultSerializationError``. Python then warns that the coroutine was
+        never awaited.
         """
         try:
-            value = run()
+            return cls(value=run())
         except BaseException as error:  # noqa: BLE001
             return cls(error=error)
-        if inspect.isawaitable(value):
-            if inspect.iscoroutine(value):
-                # close() raises when the coroutine has started and ignores
-                # GeneratorExit, for example with an await in a finally
-                # block. The TypeError below must still be reported.
-                with contextlib.suppress(Exception):
-                    value.close()
-            return cls(
-                error=TypeError(
-                    "the job handler returned an awaitable. A job handler must "
-                    "be a plain function that returns its result."
-                )
-            )
-        return cls(value=value)
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
@@ -1989,8 +2028,6 @@ class _Exchange:
         self._request = request
         self._logger = logger
         self.responded = False
-        # Set when the worker answers before it has read the whole body.
-        self._body_unread = False
 
     @property
     def method(self) -> str:
@@ -2003,20 +2040,6 @@ class _Exchange:
     def header(self, name: str) -> str | None:
         """A request header, or ``None``. The name is not case-sensitive."""
         return self._request.headers.get(name)
-
-    def declared_length(self) -> int | None:
-        """The body length from ``Content-Length``.
-
-        ``None`` when the body is chunked, or the header is absent or not
-        valid. Reading the body reports an invalid header.
-        """
-        headers = self._request.headers
-        if "chunked" in headers.get("Transfer-Encoding", "").lower():
-            return None
-        raw = headers.get("Content-Length")
-        if raw is None or not _CONTENT_LENGTH.fullmatch(raw.strip()):
-            return None
-        return int(raw)
 
     def read_json(self, max_bytes: int) -> Any:
         """Read the body, and parse it as JSON.
@@ -2032,17 +2055,6 @@ class _Exchange:
         except ValueError as error:
             msg = "request body is not valid JSON"
             raise InvalidRunHookPayloadError(msg) from error
-
-    def too_large(
-        self, max_bytes: int, part: str = "request body"
-    ) -> InvalidRunHookPayloadError:
-        """Return the error for a request part over ``max_bytes``.
-
-        The worker answers such a request before it reads the rest of the
-        body. So this method also marks the body unread.
-        """
-        self._body_unread = True
-        return InvalidRunHookPayloadError(f"{part} exceeds {max_bytes} bytes")
 
     def respond(self, status: int, body: Mapping[str, object]) -> None:
         """Send the answer. A client that has gone away is logged."""
@@ -2063,54 +2075,19 @@ class _Exchange:
                 extra={"status": status, "error": describe(error)},
             )
 
-    def discard_unread_body(self) -> None:
-        """Read and drop the rest of a body that the worker did not read.
-
-        1. The worker answers a body over the limit without reading it.
-        2. The connection then closes with unread bytes in its receive
-           buffer. So the kernel sends a TCP reset instead of a normal close.
-        3. A client that is still sending gets the reset before it reads the
-           answer. So the client never sees the 400.
-        4. The durable function fails at once on a 400, and retries a reset.
-           So the reset turns a clear rejection into retries.
-
-        So after the answer, the worker ends its side of the connection, and
-        reads and drops input until the client closes. The read stops after
-        :data:`_DISCARD_SECONDS` or :data:`_MAX_DISCARD_BYTES`. A client that
-        sends more still gets the reset.
-        """
-        if not self._body_unread:
-            return
-        connection = self._request.connection
-        try:
-            connection.shutdown(socket.SHUT_WR)
-            deadline = time.monotonic() + _DISCARD_SECONDS
-            discarded = 0
-            while discarded < _MAX_DISCARD_BYTES:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return
-                connection.settimeout(remaining)
-                data = connection.recv(_DISCARD_READ_BYTES)
-                if not data:
-                    return
-                discarded += len(data)
-        except OSError:
-            # The client has gone, or the time ran out in recv.
-            return
-
     def _read_body(self, max_bytes: int) -> bytes:
         headers = self._request.headers
         if "chunked" in headers.get("Transfer-Encoding", "").lower():
             return self._read_chunked(max_bytes)
-        if headers.get("Content-Length") is None:
+        raw = headers.get("Content-Length")
+        if raw is None:
             return b""
-        length = self.declared_length()
-        if length is None:
+        if not _CONTENT_LENGTH.fullmatch(raw.strip()):
             msg = "request Content-Length is not valid"
             raise InvalidRunHookPayloadError(msg)
+        length = int(raw)
         if length > max_bytes:
-            raise self.too_large(max_bytes)
+            raise _too_large(max_bytes)
         return self._read_exactly(length)
 
     def _read_chunked(self, max_bytes: int) -> bytes:
@@ -2139,9 +2116,7 @@ class _Exchange:
             line = self._request.rfile.readline(_MAX_CHUNK_LINE_BYTES)
             framing += len(line)
             if framing > max_bytes:
-                raise self.too_large(
-                    max_bytes, "the chunked framing of the request body"
-                )
+                raise _too_large(max_bytes, "the chunked framing of the request body")
             return line
 
         while True:
@@ -2159,7 +2134,7 @@ class _Exchange:
                 return b"".join(chunks)
             size += chunk_size
             if size > max_bytes:
-                raise self.too_large(max_bytes)
+                raise _too_large(max_bytes)
             chunks.append(self._read_exactly(chunk_size))
             if self._read_exactly(2) != b"\r\n":
                 raise _malformed_chunks()
@@ -2169,6 +2144,28 @@ class _Exchange:
         if len(data) < length:
             raise _ended_early()
         return data
+
+
+def _too_large(
+    max_bytes: int, part: str = "request body"
+) -> InvalidRunHookPayloadError:
+    """Return the error for a request part over ``max_bytes``.
+
+    1. The worker answers HTTP 400 without reading the rest of the body.
+    2. The answer closes the connection. So the unread bytes are never
+       parsed as the next request.
+    3. The connection closes with unread bytes. So the kernel sends a TCP
+       reset in place of a normal close.
+    4. A client that is still sending can get the reset before it reads
+       the 400.
+
+    The MicroVM operations of both SDK extras packages, JS
+    (``@aws/durable-execution-sdk-js-extras``) and Python
+    (``aws-durable-execution-sdk-python-extras``), reject a job input that
+    does not fit before they send the job. So only another sender can get
+    the reset.
+    """
+    return InvalidRunHookPayloadError(f"{part} exceeds {max_bytes} bytes")
 
 
 def _malformed_chunks() -> InvalidRunHookPayloadError:

@@ -181,7 +181,7 @@ The tag should be the version of the package being bumped, prepended with a desc
 - **SDK only:** `sdk-v<version>` (e.g., `sdk-v1.6.0`)
 - **OTel only:** `otel-v<version>` (e.g., `otel-v0.3.0`)
 - **Testing only:** `testing-v<version>` (e.g., `testing-v1.2.1`)
-- **Telemetry Exporter only:** `telemetry-exporter-v<version>` (e.g., `telemetry-exporter-v1.0.0`)
+- **Telemetry Exporter only:** `telemetry-exporter-v<version>` (e.g., `telemetry-exporter-v0.0.1`)
 - **Multiple packages in a single release:** comma-separate the sub-tags (e.g., `sdk-v1.6.0,otel-v0.3.0`)
 
 Examples:
@@ -190,7 +190,7 @@ Examples:
 sdk-v1.6.0
 otel-v0.3.0
 testing-v1.2.1
-telemetry-exporter-v1.0.0
+telemetry-exporter-v0.0.1
 sdk-v1.6.0,otel-v0.3.0
 ```
 
@@ -299,6 +299,10 @@ The publishing role must allow `lambda:PublishLayerVersion` and
 `lambda:GetLayerVersion` for identity-checked, idempotent release retries.
 
 ## Release Notes Format
+
+For the coordinated Core 3.0 / OTel 2.0 release, include the
+[2.x to 3.0 migration guide](docs/migration-2.x-to-3.0.md) in the release notes.
+It covers dependency and layer upgrades, custom providers, and validation.
 
 Release notes should maintain separate timelines for each package. Use the following structure:
 

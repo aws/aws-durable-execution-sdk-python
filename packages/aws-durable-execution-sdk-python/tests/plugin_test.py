@@ -391,6 +391,35 @@ class TestDataClasses(unittest.TestCase):
 
         self.assertIs(info.operation_type, OperationType.WAIT)
 
+    def test_operation_info_carries_custom_subtype_as_plain_string(self):
+        """A caller-defined subtype reaches plugins as the recorded string."""
+        operation = Operation(
+            operation_id="step-1",
+            operation_type=ServiceOperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            sub_type="OrderCharge",
+        )
+
+        info = OperationInfo.from_operation(operation)
+
+        self.assertEqual(info.sub_type, "OrderCharge")
+        self.assertIs(type(info.sub_type), str)
+        self.assertIs(info.operation_type, OperationType.STEP)
+
+    def test_operation_info_carries_sdk_subtype_member(self):
+        """An SDK subtype compares with its member and with its string value."""
+        operation = Operation(
+            operation_id="map-1",
+            operation_type=ServiceOperationType.CONTEXT,
+            status=OperationStatus.SUCCEEDED,
+            sub_type=OperationSubType.MAP,
+        )
+
+        info = OperationInfo.from_operation(operation)
+
+        self.assertEqual(info.sub_type, OperationSubType.MAP)
+        self.assertEqual(info.sub_type, "Map")
+
     def test_invocation_end_info_converts_service_invocation_status(self):
         output = DurableExecutionInvocationOutput(
             status=ServiceInvocationStatus.PENDING,

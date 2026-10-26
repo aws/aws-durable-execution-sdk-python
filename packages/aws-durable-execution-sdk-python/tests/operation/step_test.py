@@ -284,7 +284,7 @@ def test_step_handler_success_at_least_once():
     start_operation = start_call[1]["operation_update"]
     assert start_operation.operation_id == "step6"
     assert start_operation.operation_type is OperationType.STEP
-    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.sub_type == OperationSubType.STEP
     assert start_operation.action is OperationAction.START
 
     # Verify success checkpoint
@@ -293,7 +293,7 @@ def test_step_handler_success_at_least_once():
     assert success_operation.operation_id == "step6"
     assert success_operation.payload == json.dumps("success_result")
     assert success_operation.operation_type is OperationType.STEP
-    assert success_operation.sub_type is OperationSubType.STEP
+    assert success_operation.sub_type == OperationSubType.STEP
     assert success_operation.action is OperationAction.SUCCEED
 
 
@@ -399,7 +399,7 @@ def test_step_handler_success_at_most_once():
     assert start_operation.operation_id == "step7"
     assert start_operation.name == "test_step"
     assert start_operation.operation_type is OperationType.STEP
-    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.sub_type == OperationSubType.STEP
     assert start_operation.action is OperationAction.START
 
     # Verify success checkpoint
@@ -407,7 +407,7 @@ def test_step_handler_success_at_most_once():
     success_operation = success_call[1]["operation_update"]
     assert success_operation.payload == json.dumps("success_result")
     assert success_operation.operation_type is OperationType.STEP
-    assert success_operation.sub_type is OperationSubType.STEP
+    assert success_operation.sub_type == OperationSubType.STEP
     assert success_operation.action is OperationAction.SUCCEED
 
 
@@ -477,7 +477,7 @@ def test_step_handler_retry_success():
     start_operation = start_call[1]["operation_update"]
     assert start_operation.operation_id == "step9"
     assert start_operation.operation_type is OperationType.STEP
-    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.sub_type == OperationSubType.STEP
     assert start_operation.action is OperationAction.START
 
     # Verify retry checkpoint
@@ -485,7 +485,7 @@ def test_step_handler_retry_success():
     retry_operation = retry_call[1]["operation_update"]
     assert retry_operation.operation_id == "step9"
     assert retry_operation.operation_type is OperationType.STEP
-    assert retry_operation.sub_type is OperationSubType.STEP
+    assert retry_operation.sub_type == OperationSubType.STEP
     assert retry_operation.action is OperationAction.RETRY
 
 
@@ -527,7 +527,7 @@ def test_step_handler_retry_exhausted():
     start_operation = start_call[1]["operation_update"]
     assert start_operation.operation_id == "step10"
     assert start_operation.operation_type is OperationType.STEP
-    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.sub_type == OperationSubType.STEP
     assert start_operation.action is OperationAction.START
 
     # Verify fail checkpoint
@@ -535,7 +535,7 @@ def test_step_handler_retry_exhausted():
     fail_operation = fail_call[1]["operation_update"]
     assert fail_operation.operation_id == "step10"
     assert fail_operation.operation_type is OperationType.STEP
-    assert fail_operation.sub_type is OperationSubType.STEP
+    assert fail_operation.sub_type == OperationSubType.STEP
     assert fail_operation.action is OperationAction.FAIL
     # The checkpoint records the raw escaping error's type; the StepError wrapper
     # is surfaced to the caller and recorded one level up.
@@ -1445,7 +1445,7 @@ def test_step_creates_start_checkpoint_when_status_is_ready():
     start_operation = start_call[1]["operation_update"]
     assert start_operation.operation_id == "step_ready_1"
     assert start_operation.operation_type is OperationType.STEP
-    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.sub_type == OperationSubType.STEP
     assert start_operation.action is OperationAction.START
 
     # Verify SUCCEED checkpoint was also created after execution
