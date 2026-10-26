@@ -27,11 +27,8 @@ The base package intentionally does not install OpenTelemetry libraries. The
 Lambda layer supplies a version-aligned API, SDK, exporter, and propagators,
 preventing packages in the function artifact from shadowing parts of the layer.
 
-The generated `aws-durable-execution-sdk-python-otel-plugin` Lambda layer includes
-Core's runtime dependencies, including its required boto3/botocore service model.
-It still leaves OpenTelemetry provider packages to the ADOT/community layer.
-Dependencies bundled in the function artifact take precedence over layer packages;
-those application-owned boto3/botocore versions must also meet Core's minimum.
+Bundle the plugin and its Core SDK dependencies, including the required
+boto3/botocore versions, in your function's deployment package.
 
 For an application that configures its own OpenTelemetry provider instead of
 using a Lambda layer:

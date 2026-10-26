@@ -3,7 +3,6 @@ name: Test GitHub Scripts
 on:
   pull_request:
     paths:
-      - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/check_otel_wheel_dependencies.py'
       - '.github/scripts/current_latest_version.py'
       - '.github/scripts/parse_sdk_branch.py'
@@ -23,7 +22,6 @@ on:
   push:
     branches: [ main ]
     paths:
-      - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/check_otel_wheel_dependencies.py'
       - '.github/scripts/current_latest_version.py'
       - '.github/scripts/parse_sdk_branch.py'
@@ -68,15 +66,12 @@ jobs:
         activate-environment: true
 
     - name: Install test dependencies
-      # build_lambda_layer.py shells out to `python -m pip`; a uv-created venv
-      # has no pip, so install it alongside the test dependencies.
-      run: uv pip install packaging pytest pip PyYAML==6.0.2
+      run: uv pip install packaging pytest PyYAML==6.0.2
 
     - name: Run script tests
       run: |
         python -m pytest \
           .github/scripts/tests/test_ai_pr_review_workflow.py \
-          .github/scripts/tests/test_build_lambda_layer.py \
           .github/scripts/tests/test_check_otel_wheel_dependencies.py \
           .github/scripts/tests/test_current_latest_version.py \
           .github/scripts/tests/test_js_examples.py \
