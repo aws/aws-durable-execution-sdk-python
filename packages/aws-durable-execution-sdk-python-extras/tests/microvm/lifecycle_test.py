@@ -82,13 +82,71 @@ def test_waits_for_a_suspend_in_progress_then_resumes_once(fake_client: Any) -> 
 def test_keeps_polling_when_resume_reports_a_transition_in_progress(
     fake_client: Any, make_error: Any
 ) -> None:
+    # An auto-resume is in progress. Each SUSPENDED answer sends
+    # ResumeMicrovm again, and the service answers ConflictException. A
+    # PENDING answer after a resume is a step of the resume, not a boot.
     client = fake_client(
-        states=["SUSPENDED", "SUSPENDED"],
-        resumes=[make_error("ConflictException", 409)],
+        states=["SUSPENDED", "SUSPENDED", "PENDING", "RUNNING"],
+        resumes=[make_error("ConflictException", 409)] * 2,
     )
 
     assert run_with(client) == "mvm-1.microvm.example"
-    assert len(client.requests("resume_microvm")) == 1
+    assert calls(client) == [
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+        "get_microvm",
+    ]
+
+
+def test_resumes_again_when_a_resume_conflicts_with_the_suspend(
+    fake_client: Any, make_error: Any
+) -> None:
+    # The service rejects the first ResumeMicrovm with ConflictException.
+    # The MicroVM stays SUSPENDED until a resume succeeds. So the next
+    # SUSPENDED answer sends ResumeMicrovm again.
+    client = fake_client(
+        states=["SUSPENDING", "SUSPENDED"],
+        resumes=[make_error("ConflictException", 409)],
+        suspended_until_resumed=True,
+    )
+    sleeps: list[float] = []
+
+    assert run_with(client, max_wait_seconds=3, sleeps=sleeps) == (
+        "mvm-1.microvm.example"
+    )
+    assert calls(client) == [
+        "get_microvm",
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+    ]
+    assert sleeps == [0.25, 0.5, 1.0]
+
+
+def test_gives_up_after_the_wait_limit_when_each_resume_conflicts(
+    fake_client: Any, make_error: Any
+) -> None:
+    client = fake_client(
+        resumes=[make_error("ConflictException", 409)] * 10,
+        suspended_until_resumed=True,
+    )
+
+    with pytest.raises(MicrovmEndpointUnavailableError, match="Last state: SUSPENDED"):
+        run_with(client, max_wait_seconds=0.5)
+
+    # One ResumeMicrovm call per GetMicrovm call. The wait of 0.5 seconds
+    # after the second GetMicrovm call does not fit in the limit.
+    assert calls(client) == [
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+        "resume_microvm",
+    ]
 
 
 def test_raises_a_resume_error_that_is_not_a_conflict(
@@ -301,6 +359,58 @@ def test_check_keeps_polling_after_a_resume_conflict(
 
     assert check_with(client) == "mvm-1.microvm.example"
     assert calls(client) == ["get_microvm", "resume_microvm", "get_microvm"]
+
+
+def test_check_resumes_again_after_a_conflict_during_the_suspend(
+    fake_client: Any, make_error: Any
+) -> None:
+    # The service rejects the resume during SUSPENDING with
+    # ConflictException. The suspend then ends, and the MicroVM stays
+    # SUSPENDED until a resume succeeds. So the first SUSPENDED answer sends
+    # ResumeMicrovm again.
+    client = fake_client(
+        states=["SUSPENDING", "SUSPENDING"],
+        resumes=[make_error("ConflictException", 409)],
+        suspended_until_resumed=True,
+    )
+    sleeps: list[float] = []
+
+    assert check_with(client, max_wait_seconds=3, sleeps=sleeps) == (
+        "mvm-1.microvm.example"
+    )
+    assert calls(client) == [
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+    ]
+    assert sleeps == [0.25, 0.5]
+
+
+def test_check_gives_up_after_the_wait_limit_when_each_resume_conflicts(
+    fake_client: Any, make_error: Any
+) -> None:
+    client = fake_client(
+        states=["SUSPENDING"],
+        resumes=[make_error("ConflictException", 409)] * 10,
+        suspended_until_resumed=True,
+    )
+
+    with pytest.raises(MicrovmEndpointUnavailableError, match="Last state: SUSPENDED"):
+        check_with(client, max_wait_seconds=0.5)
+
+    # One ResumeMicrovm call per GetMicrovm call. The wait of 0.5 seconds
+    # after the third GetMicrovm call does not fit in the limit.
+    assert calls(client) == [
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+        "resume_microvm",
+        "get_microvm",
+        "resume_microvm",
+    ]
 
 
 @pytest.mark.parametrize("state", ["TERMINATING", "TERMINATED"])

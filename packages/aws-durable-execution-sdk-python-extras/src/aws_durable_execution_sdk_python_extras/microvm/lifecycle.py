@@ -113,10 +113,10 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
     2. ``PENDING``: the function returns at once. A new MicroVM reports
        ``PENDING`` until it boots. The request's own retries wait for the
        ``run`` hook.
-    3. ``SUSPENDED``: it calls ``ResumeMicrovm`` once, then waits for
+    3. ``SUSPENDED``: it calls ``ResumeMicrovm``, then waits for
        ``RUNNING``. The MicroVM stays ``SUSPENDED`` while its ``resume`` hook
-       runs. So the function does not call ``ResumeMicrovm`` again for each
-       ``SUSPENDED`` answer.
+       runs. So after a successful call, the function does not call
+       ``ResumeMicrovm`` again for each ``SUSPENDED`` answer.
     4. ``SUSPENDING``: it waits. The MicroVM becomes ``SUSPENDED``, and the
        function then resumes it.
     5. ``TERMINATING``, ``TERMINATED``, or not found: it raises
@@ -129,7 +129,9 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
     ``AccessDeniedException``, is raised with its class and its
     ``response``. Its message then ends with the request ID of the call. See
     :func:`add_request_id`. A ``ConflictException`` from ``ResumeMicrovm``
-    is not an error: polling continues.
+    is not an error: polling continues. The call did not resume the
+    MicroVM. So the next ``SUSPENDED`` answer calls ``ResumeMicrovm`` again,
+    at most once per poll.
 
     It polls after 250 milliseconds, and doubles the wait up to 2 seconds. It
     stops after ``max_wait_seconds``, or 10 seconds before the invocation
@@ -149,7 +151,7 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
         ClientError: When ``GetMicrovm`` or ``ResumeMicrovm`` fails
             otherwise.
     """
-    return _wait_until_running(options, resume_sent=False)
+    return _wait_until_running(options, resuming=False, resume_accepted=False)
 
 
 def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
@@ -174,7 +176,9 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
        :class:`MicrovmStateError`.
 
     A denied ``ResumeMicrovm`` raises :class:`MicrovmResumeDeniedError`.
-    ``ConflictException`` is not an error: polling continues. Any other
+    ``ConflictException`` is not an error: polling continues. A resume that
+    the service rejects with a conflict while the MicroVM is still
+    suspending is sent again once the MicroVM is suspended. Any other
     ``ResumeMicrovm`` error is raised with its class and its ``response``,
     as in :func:`ensure_running`. So is any error of a ``GetMicrovm`` call
     after the resume.
@@ -229,6 +233,7 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
             reserve,
             unavailable,
         )
+        accepted = True
     except ClientError as error:
         code = error_code(error)
         if code == "ResourceNotFoundException":
@@ -249,10 +254,16 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
             ) from error
         if code != "ConflictException":
             raise add_request_id("ResumeMicrovm", error)
+        # A conflict can mean that the suspend has not ended. The MicroVM
+        # then becomes SUSPENDED and needs a new resume. So the loop sends
+        # ResumeMicrovm again at the next SUSPENDED answer.
+        accepted = False
     options.logger.info("resuming MicroVM", extra={"state": state})
     remaining = options.max_wait_seconds - (time.monotonic() - started)
     return _wait_until_running(
-        replace(options, max_wait_seconds=remaining), resume_sent=True
+        replace(options, max_wait_seconds=remaining),
+        resuming=True,
+        resume_accepted=accepted,
     )
 
 
@@ -269,10 +280,16 @@ def _raise_if_ended(microvm_id: str, current: Any) -> None:
 
 
 def _wait_until_running(
-    options: EnsureRunningOptions, *, resume_sent: bool
+    options: EnsureRunningOptions, *, resuming: bool, resume_accepted: bool
 ) -> str | None:
-    """The loop of :func:`ensure_running`. ``resume_sent`` states that the
-    caller has already called ``ResumeMicrovm``."""
+    """The loop of :func:`ensure_running`.
+
+    ``resuming`` states that the caller has already called
+    ``ResumeMicrovm``. A ``PENDING`` answer is then a step of the resume, so
+    the loop waits for ``RUNNING``. ``resume_accepted`` states that a
+    ``ResumeMicrovm`` call succeeded. A call that answered
+    ``ConflictException`` leaves it ``False``. So the next ``SUSPENDED``
+    answer sends ``ResumeMicrovm`` again."""
     started = time.monotonic()
     reserve = reserve_starts_at(options.remaining_seconds)
     deadline = started + options.max_wait_seconds
@@ -319,22 +336,25 @@ def _wait_until_running(
             raise add_request_id("GetMicrovm", error)
         state = current.get("state")
         last_state = state
-        if state == "RUNNING" or (state == "PENDING" and not resume_sent):
-            if resume_sent:
+        if state == "RUNNING" or (state == "PENDING" and not resuming):
+            if resuming:
                 options.logger.info(
                     "MicroVM resumed",
                     extra={"waitedMs": round((time.monotonic() - started) * 1000)},
                 )
             return current.get("endpoint")
         _raise_if_ended(microvm_id, current)
-        if state == "SUSPENDED" and not resume_sent:
+        if state == "SUSPENDED" and not resume_accepted:
             try:
                 resume_microvm()
+                resume_accepted = True
             except ClientError as error:
-                # ConflictException means that a transition is already in
-                # progress, for example an auto-resume. Polling continues
-                # either way. ResourceNotFoundException means that the
-                # MicroVM was removed after the state check.
+                # ConflictException means that a transition is in progress,
+                # for example a suspend that has not ended, or an
+                # auto-resume. The resume stays unaccepted, so the next
+                # SUSPENDED answer sends it again. The poll interval and the
+                # deadline bound those calls. ResourceNotFoundException
+                # means that the MicroVM was removed after the state check.
                 code = error_code(error)
                 if code == "ResourceNotFoundException":
                     raise microvm_not_found(
@@ -342,8 +362,9 @@ def _wait_until_running(
                     ) from error
                 if code != "ConflictException":
                     raise add_request_id("ResumeMicrovm", error)
-            resume_sent = True
-            options.logger.info("resuming MicroVM", extra={"state": state})
+            if not resuming:
+                options.logger.info("resuming MicroVM", extra={"state": state})
+            resuming = True
 
         if time.monotonic() + delay > deadline:
             raise unavailable()

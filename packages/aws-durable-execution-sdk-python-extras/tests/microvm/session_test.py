@@ -715,6 +715,49 @@ def test_checks_the_state_again_after_a_gateway_error(
     assert len(client.requests("resume_microvm")) == 1
 
 
+@pytest.mark.parametrize(
+    ("statuses", "states"),
+    [([], ["SUSPENDED"]), ([502], ["RUNNING", "SUSPENDED"])],
+    ids=["before-delivery", "after-a-gateway-error"],
+)
+def test_resumes_again_when_a_resume_conflicts(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    make_error: Any,
+    statuses: list[int],
+    states: list[str],
+) -> None:
+    # The service rejects the first ResumeMicrovm with ConflictException.
+    # The MicroVM stays SUSPENDED until a resume succeeds. So the next
+    # SUSPENDED answer sends ResumeMicrovm again.
+    endpoint = fake_endpoint(statuses)
+    client = fake_client(
+        endpoint=endpoint.url,
+        states=states,
+        resumes=[make_error("ConflictException", 409)],
+        suspended_until_resumed=True,
+    )
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return vm.invoke(
+            ctx,
+            "build",
+            job_input=1,
+            options=job(retry_window=Duration.from_seconds(5)),
+        )
+
+    result = run(
+        session_handler(session_config(client, auto_suspend_on_idle=True), body),
+        None,
+        [("build", succeed_with("done"))],
+    )
+
+    assert outcome(result) == {"result": "done"}
+    assert len(client.requests("resume_microvm")) == 2
+    assert len(endpoint.requests) == len(statuses) + 1
+
+
 def test_does_not_check_the_state_again_after_a_rejection(
     run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
@@ -1041,16 +1084,17 @@ def test_runs_jobs_in_parallel_branches(
     assert len(client.requests("terminate_microvm")) == 1
 
 
-def test_resumes_once_when_two_items_find_the_microvm_suspended(
+def test_runs_both_items_when_a_resume_finds_another_in_progress(
     run: Any, fake_client: Any, fake_endpoint: Any, make_error: Any
 ) -> None:
     # Both items find the MicroVM SUSPENDED and call ResumeMicrovm. The
-    # second call finds the resume in progress.
+    # service accepts the first call. It answers ConflictException to each
+    # later call while the resume runs.
     endpoint = fake_endpoint()
     client = fake_client(
         endpoint=endpoint.url,
         states=["SUSPENDED"] * 4,
-        resumes=[None, make_error("ConflictException", 409)],
+        resumes=[None] + [make_error("ConflictException", 409)] * 4,
     )
 
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
@@ -1069,7 +1113,10 @@ def test_resumes_once_when_two_items_find_the_microvm_suspended(
     )
 
     assert outcome(result) == {"result": ["A", "B"]}
-    assert len(client.requests("resume_microvm")) == 2
+    # The item whose call conflicts calls ResumeMicrovm again at each later
+    # SUSPENDED answer. The order of the threads sets how many answers it
+    # gets. The other item calls once.
+    assert 2 <= len(client.requests("resume_microvm")) <= 4
     assert len(endpoint.requests) == 2
 
 
@@ -1646,6 +1693,44 @@ def test_resumes_through_the_fallback_after_a_map_item_lost_the_flag(
         2,
         2,
     ]
+
+
+def test_the_fallback_resumes_again_after_a_conflict_during_the_suspend(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    make_error: Any,
+    connect_failed: Any,
+) -> None:
+    # The check finds the MicroVM SUSPENDING. The service rejects the resume
+    # with ConflictException. The suspend then ends, and the MicroVM stays
+    # SUSPENDED until a resume succeeds. So the first SUSPENDED answer sends
+    # ResumeMicrovm again.
+    endpoint = fake_endpoint([connect_failed])
+    client = fake_client(
+        endpoint=endpoint.url,
+        states=["SUSPENDING"],
+        resumes=[make_error("ConflictException", 409)],
+        suspended_until_resumed=True,
+    )
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return vm.invoke(
+            ctx,
+            "build",
+            job_input=1,
+            options=job(retry_window=Duration.from_seconds(5)),
+        )
+
+    result = run(
+        session_handler(session_config(client), body),
+        None,
+        [("build", succeed_with("done"))],
+    )
+
+    assert outcome(result) == {"result": "done"}
+    assert len(client.requests("resume_microvm")) == 2
+    assert len(endpoint.requests) == 2
 
 
 def test_a_session_that_never_suspends_checks_the_state_after_no_answer(

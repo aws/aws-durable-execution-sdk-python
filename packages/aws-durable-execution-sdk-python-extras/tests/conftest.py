@@ -39,7 +39,9 @@ class FakeMicrovmsClient:
 
     ``states`` holds the answers of ``get_microvm``: a state such as
     ``"SUSPENDED"``, or an exception to raise. After the list ends, the state
-    is ``RUNNING``.
+    is ``RUNNING``. With ``suspended_until_resumed``, the state after the
+    list ends is ``SUSPENDED`` until a ``resume_microvm`` call succeeds, and
+    ``RUNNING`` after it.
 
     ``run_microvm`` and ``get_microvm`` return ``endpoint``. The Nth auth
     token is ``{"x-test-token": "token-N"}``.
@@ -54,9 +56,11 @@ class FakeMicrovmsClient:
         resumes: list[Answer] | None = None,
         states: list[str | BaseException] | None = None,
         endpoint: str | None = "mvm-1.microvm.example",
+        suspended_until_resumed: bool = False,
     ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.endpoint = endpoint
+        self._suspended = suspended_until_resumed
         self._answers: dict[str, list[Answer]] = {
             "run_microvm": list(launches or []),
             "create_microvm_auth_token": list(tokens or []),
@@ -99,12 +103,17 @@ class FakeMicrovmsClient:
 
     def resume_microvm(self, **request: Any) -> dict[str, Any]:
         self._answer("resume_microvm", request)
+        with self._lock:
+            self._suspended = False
         return {}
 
     def get_microvm(self, **request: Any) -> dict[str, Any]:
         with self._lock:
             self.calls.append(("get_microvm", request))
-            state = self._states.pop(0) if self._states else "RUNNING"
+            if self._states:
+                state = self._states.pop(0)
+            else:
+                state = "SUSPENDED" if self._suspended else "RUNNING"
         if isinstance(state, BaseException):
             raise state
         response: dict[str, Any] = {"microvmId": "mvm-1", "state": state}
