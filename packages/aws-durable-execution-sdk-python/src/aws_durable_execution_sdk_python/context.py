@@ -509,8 +509,15 @@ class DurableContext(DurableContextProtocol):
         )
 
     def _peek_next_checkpoint(self) -> CheckpointedResult:
-        """Return the checkpoint for this context's next operation, without consuming it."""
-        return self.state.get_checkpoint_result(self._peek_next_operation_id())
+        """Return the checkpoint for this context's next operation, without consuming it.
+
+        The read takes no plugin end hook: the hook of an operation a
+        checkpoint response completed during this invocation belongs to the
+        read that consumes the result, the operation's own.
+        """
+        return self.state.get_checkpoint_result(
+            self._peek_next_operation_id(), claim_end_hook=False
+        )
 
     def _next_operation_exists(self) -> bool:
         """True if a checkpoint exists for this context's next operation."""
@@ -548,9 +555,14 @@ class DurableContext(DurableContextProtocol):
         # Only look up a checkpoint when replaying. Operation call sites pass
         # their atomically allocated identifier so concurrent callers inspect
         # the checkpoint for their own ID rather than peeking at shared state.
+        # Both reads inspect: neither consumes the result, so neither takes
+        # the plugin end hook a checkpoint response may have recorded for the
+        # operation. The operation's own read, which consumes the result, does.
         next_checkpoint: CheckpointedResult | None = (
             (
-                self.state.get_checkpoint_result(operation_identifier.operation_id)
+                self.state.get_checkpoint_result(
+                    operation_identifier.operation_id, claim_end_hook=False
+                )
                 if operation_identifier is not None
                 else self._peek_next_checkpoint()
             )
@@ -610,7 +622,7 @@ class DurableContext(DurableContextProtocol):
     @contextmanager
     def _operation_replay_aware(
         self,
-        sub_type: OperationSubType,
+        sub_type: str,
         name: str | None = None,
         *,
         operation_type: OperationType,
@@ -644,14 +656,16 @@ class DurableContext(DurableContextProtocol):
         Args:
             name (str): Optional name for the operation.
             config (CallbackConfig): Configuration for the callback.
+                ``config.sub_type`` labels the operation; see CallbackConfig.
 
         Return:
-            Callback future. Use result() on this future to wait for the callback resuilt.
+            Callback future. Use result() on this future to wait for the callback result.
         """
         if not config:
             config = CallbackConfig()
+        sub_type = config.sub_type or OperationSubType.CALLBACK.value
         with self._operation_replay_aware(
-            OperationSubType.CALLBACK, name, operation_type=OperationType.CALLBACK
+            sub_type, name, operation_type=OperationType.CALLBACK
         ) as operation_identifier:
             executor: CallbackOperationExecutor = CallbackOperationExecutor(
                 state=self.state,
@@ -687,7 +701,7 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = InvokeConfig[P, R]()
         with self._operation_replay_aware(
-            OperationSubType.CHAINED_INVOKE,
+            OperationSubType.CHAINED_INVOKE.value,
             name,
             operation_type=OperationType.CHAINED_INVOKE,
         ) as operation_identifier:
@@ -717,7 +731,7 @@ class DurableContext(DurableContextProtocol):
             config.completion_config._validate_for_total(len(inputs))
 
         with self._operation_replay_aware(
-            OperationSubType.MAP, map_name, operation_type=OperationType.CONTEXT
+            OperationSubType.MAP.value, map_name, operation_type=OperationType.CONTEXT
         ) as operation_identifier:
             operation_id = operation_identifier.operation_id
             map_context = self.create_child_context(operation_id=operation_id)
@@ -742,7 +756,6 @@ class DurableContext(DurableContextProtocol):
                 state=self.state,
                 operation_identifier=operation_identifier,
                 config=ChildConfig(
-                    sub_type=OperationSubType.MAP,
                     serdes=config.serdes if config else None,
                     # The SDK-owned envelope records the completion decision for
                     # replay. A configured summary_generator only contributes the
@@ -768,7 +781,7 @@ class DurableContext(DurableContextProtocol):
             config.completion_config._validate_for_total(len(functions))
 
         with self._operation_replay_aware(
-            OperationSubType.PARALLEL, name, operation_type=OperationType.CONTEXT
+            OperationSubType.PARALLEL.value, name, operation_type=OperationType.CONTEXT
         ) as operation_identifier:
             operation_id = operation_identifier.operation_id
             parallel_context = self.create_child_context(operation_id=operation_id)
@@ -792,7 +805,6 @@ class DurableContext(DurableContextProtocol):
                 state=self.state,
                 operation_identifier=operation_identifier,
                 config=ChildConfig(
-                    sub_type=OperationSubType.PARALLEL,
                     serdes=config.serdes if config else None,
                     # The SDK-owned envelope records the completion decision for
                     # replay. A configured summary_generator only contributes the
@@ -815,19 +827,33 @@ class DurableContext(DurableContextProtocol):
         Use this to nest and group operations.
 
         Args:
-            callable (Callable[[DurableContext], T]): Run this callable and pass the child context as the argument to it.
+            func (Callable[[DurableContext], T]): Run this callable and pass the child context as the argument to it.
             name (str | None): name for the operation.
-            config (ChildConfig | None = None): c
+            config (ChildConfig | None = None): Configuration for the child
+                context. ``config.sub_type`` labels the operation; see
+                ChildConfig.
 
         Returns:
             T: The result of the callable.
         """
         step_name: str | None = self._resolve_step_name(name, func)
         sub_type = (
-            config.sub_type
-            if config and config.sub_type
-            else OperationSubType.RUN_IN_CHILD_CONTEXT
-        )
+            config.sub_type if config else None
+        ) or OperationSubType.RUN_IN_CHILD_CONTEXT.value
+        return self._run_in_child_context(func, step_name, config, sub_type)
+
+    def _run_in_child_context(
+        self,
+        func: Callable[[DurableContext], T],
+        step_name: str | None,
+        config: ChildConfig | None,
+        sub_type: str,
+    ) -> T:
+        """Run ``func`` in a child context that records ``sub_type``.
+
+        ``run_in_child_context`` resolves the caller's ``config.sub_type``
+        into ``sub_type``; ``wait_for_callback`` passes its own SDK subtype.
+        """
         is_virtual: bool = config.is_virtual if config else False
 
         with self._operation_replay_aware(
@@ -858,12 +884,24 @@ class DurableContext(DurableContextProtocol):
         name: str | None = None,
         config: StepConfig | None = None,
     ) -> T:
+        """Run a function once and checkpoint its result.
+
+        Args:
+            func (Callable[[StepContext], T]): The function to run.
+            name (str | None): Optional name for the operation.
+            config (StepConfig | None): Configuration for the step.
+                ``config.sub_type`` labels the operation; see StepConfig.
+
+        Returns:
+            T: The function's result, from the checkpoint on replay.
+        """
         step_name = self._resolve_step_name(name, func)
         logger.debug("Step name: %s", step_name)
         if not config:
             config = StepConfig()
+        sub_type = config.sub_type or OperationSubType.STEP.value
         with self._operation_replay_aware(
-            OperationSubType.STEP, step_name, operation_type=OperationType.STEP
+            sub_type, step_name, operation_type=OperationType.STEP
         ) as operation_identifier:
             executor: StepOperationExecutor[T] = StepOperationExecutor(
                 func=func,
@@ -886,7 +924,7 @@ class DurableContext(DurableContextProtocol):
             msg = "duration must be at least 1 second"
             raise ValidationError(msg)
         with self._operation_replay_aware(
-            OperationSubType.WAIT, name, operation_type=OperationType.WAIT
+            OperationSubType.WAIT.value, name, operation_type=OperationType.WAIT
         ) as operation_identifier:
             wait_seconds = duration.seconds
             executor: WaitOperationExecutor = WaitOperationExecutor(
@@ -912,10 +950,11 @@ class DurableContext(DurableContextProtocol):
         # inner failure on __cause__; translate to callback-typed errors here, at
         # the call site, so it re-fires identically on replay.
         try:
-            return self.run_in_child_context(
+            return self._run_in_child_context(
                 wait_in_child_context,
                 step_name,
-                ChildConfig(sub_type=OperationSubType.WAIT_FOR_CALLBACK),
+                None,
+                OperationSubType.WAIT_FOR_CALLBACK.value,
             )
         except ChildContextError as e:
             inner: BaseException | None = e.__cause__
@@ -956,7 +995,9 @@ class DurableContext(DurableContextProtocol):
             raise ValidationError(msg)
 
         with self._operation_replay_aware(
-            OperationSubType.WAIT_FOR_CONDITION, name, operation_type=OperationType.STEP
+            OperationSubType.WAIT_FOR_CONDITION.value,
+            name,
+            operation_type=OperationType.STEP,
         ) as operation_identifier:
             executor: WaitForConditionOperationExecutor[T] = (
                 WaitForConditionOperationExecutor(

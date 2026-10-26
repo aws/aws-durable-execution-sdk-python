@@ -165,16 +165,15 @@ def microvm_session(
     Raises:
         ValidationError: When ``name`` or ``config`` is not valid, or the
             Region cannot be determined. No durable operation starts.
-        TypeError: When ``handler`` is not callable. No durable operation
-            starts.
-        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
+        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries, or
+            rejects the config, for example an empty ``image_identifier``.
         MicrovmError: A MicroVM error that the handler did not catch.
-        ChildContextError: Any other error that the handler raised.
+        ChildContextError: Any other error that the handler raised. A
+            ``handler`` that is not callable raises Python's ``TypeError``
+            after the launch, inside the child context. So it also reaches
+            the caller as ``ChildContextError``, after the terminate step.
     """
     scope = _SessionScope.create(context, name, config)
-    if not callable(handler):
-        msg = f'MicroVM session "{name}": handler must be callable'
-        raise TypeError(msg)
 
     def run(child: DurableContext) -> _T:
         return scope.run_session(child, handler)
@@ -245,9 +244,14 @@ class MicrovmSession:
             ``SendDurableExecutionCallbackSuccess``, parsed as JSON.
 
         Raises:
-            TypeError: When ``context`` is not a durable context, or is the
-                context that ``microvm_session`` was called with, or
-                ``job_input`` is not JSON-serializable.
+            TypeError: When ``context`` is the context that
+                ``microvm_session`` was called with, or ``job_input`` is not
+                JSON-serializable.
+            AttributeError: When ``context`` is not a durable context, for
+                example a job name passed as the first argument. Python
+                raises it at ``context.run_in_child_context``.
+            ValueError: When the JSON of ``job_input`` is over
+                ``MAX_JOB_INPUT_BYTES`` UTF-8 bytes.
             ValidationError: When ``name`` or ``options`` is not valid.
             MicrovmNotRunningError: When the session's MicroVM has ended. The
                 session reports it when it checks the MicroVM state before
@@ -260,15 +264,6 @@ class MicrovmSession:
             MicrovmTimeoutError: When no result or heartbeat arrives in time.
         """
         scope = self._scope
-        # A call in the shape vm.invoke("build", ...) passes a string here.
-        # This check names the mistake, instead of an AttributeError from
-        # inside.
-        if not callable(getattr(context, "run_in_child_context", None)):
-            msg = (
-                f'MicroVM session "{scope.name}": invoke requires the durable '
-                "context to create the job in, as its first argument"
-            )
-            raise TypeError(msg)
         # The caller's own context is often in scope in the handler's
         # closure. A job created in it lands outside the session's child
         # context. The core SDK does not refuse that, and the next replay
@@ -359,7 +354,7 @@ class _SessionScope(_MicrovmScope):
             ValidationError: When ``name`` or ``config`` is not valid, or the
                 Region cannot be determined.
         """
-        timeout_seconds = _validate_base(name, config, config.timeout)
+        timeout_seconds = _validate_base(name, config.timeout)
         auto_suspend_idle_seconds = _validate_auto_suspend(
             name, config, timeout_seconds
         )
@@ -409,19 +404,14 @@ class _SessionScope(_MicrovmScope):
         #    502. The request step retries a 502 until both retry tiers end.
         # 5. So each job follows the resume mode that the launch recorded,
         #    not the current config.
-        # A launch checkpoint from code that predates the resumeBeforeDelivery
-        # field has no such field. That code computed the mode from the
-        # current config on every replay. So the session does the same for
-        # such a checkpoint.
-        resume_before_delivery = (
-            launched.resume_before_delivery
-            if launched.resume_before_delivery is not None
-            else self.resume_from_config
-        )
+        # Every session launch records a boolean. So only `True` turns the
+        # state check on. A missing field, or any other value, reads as False.
         try:
             result = handler(
                 MicrovmSession(
-                    self, launched, resume_before_delivery=resume_before_delivery
+                    self,
+                    launched,
+                    resume_before_delivery=launched.resume_before_delivery is True,
                 ),
                 child,
             )

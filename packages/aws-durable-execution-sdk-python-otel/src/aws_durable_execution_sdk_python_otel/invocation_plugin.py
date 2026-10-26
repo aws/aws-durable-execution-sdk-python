@@ -893,9 +893,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
           on such a thread is still correlated to this finished invocation's
           spans.
         * ``_tracing_enabled`` is cleared so a hook that arrives after the
-          invocation end -- one dispatched off the checkpointing path, for
-          instance -- cannot start a span after the invocation span was ended and
-          the provider flushed.
+          invocation end cannot start a span after the invocation span was ended
+          and the provider flushed. The SDK dispatches no operation hook after
+          the end hook; this guard covers a caller that does.
         """
         self._detach_remaining_contexts()
         unbind_invocation(self)
@@ -1129,7 +1129,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if hasattr(info, "operation_type") and info.operation_type is not None:
             attributes["durable.operation.type"] = info.operation_type.value
         if hasattr(info, "sub_type") and info.sub_type is not None:
-            attributes["durable.operation.subtype"] = info.sub_type.value
+            attributes["durable.operation.subtype"] = info.sub_type
         # STEP user-function spans represent attempts, not durable operations.
         if (
             not (

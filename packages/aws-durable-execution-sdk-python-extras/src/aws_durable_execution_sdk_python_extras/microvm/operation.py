@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import boto3
 from botocore.config import Config
@@ -57,8 +56,10 @@ from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmTimeoutError,
 )
 from aws_durable_execution_sdk_python_extras.microvm.job import (
+    MAX_JOB_INPUT_BYTES,
     JobRequest,
     RunHookPayload,
+    dumps,
     fits_run_hook,
     run_hook_payload_without_job,
 )
@@ -156,15 +157,16 @@ class LaunchResult:
     """Whether each session job checks the MicroVM state, and resumes a
     suspended MicroVM, before delivery. Only a session launch records it.
     Replay reads it from the checkpoint. So every replay follows the mode that
-    the launch prepared the MicroVM for. A launch checkpoint from code that
-    predates this field does not have it."""
+    the launch prepared the MicroVM for. A ``microvm`` launch leaves it
+    ``None``. ``from_dict`` keeps only a bool, and reads any other value as
+    ``None``. ``run_session`` reads only ``True`` as a resume mode."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
-        # Only a bool is a resume mode. In Python True == 1, so a check by
-        # equality would accept 1. Any other value reads as no resume mode.
+        # The field is typed bool | None. to_dict() writes it back. So
+        # from_dict keeps only a bool, and reads any other value as None.
         resume_before_delivery = data.get("resumeBeforeDelivery")
         return cls(
             microvm_id=data["microvmId"],
@@ -257,7 +259,11 @@ def microvm(
             value.
         TypeError: When ``job_input`` is not JSON-serializable. No durable
             operation starts.
-        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
+        ValueError: When the JSON of ``job_input`` is over
+            :data:`MAX_JOB_INPUT_BYTES` UTF-8 bytes. No durable operation
+            starts.
+        MicrovmLaunchError: When ``RunMicrovm`` fails after all retries, or
+            rejects the config, for example an empty ``image_identifier``.
         MicrovmNotRunningError: When ``CreateMicrovmAuthToken`` reports that
             the MicroVM no longer exists. It is a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
@@ -301,8 +307,13 @@ def step_retry_strategy(
     )
 
 
-def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> int:
+def _validate_base(name: str, timeout: Duration) -> int:
     """Validate the settings that every MicroVM operation shares.
+
+    ``image_identifier`` and ``execution_role_arn`` are not checked here.
+    The boto3 client rejects an empty value before it sends ``RunMicrovm``,
+    and the service rejects any other invalid value. Either way, the launch
+    step fails, and the operation raises ``MicrovmLaunchError``.
 
     Returns:
         The timeout in seconds.
@@ -312,12 +323,6 @@ def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> i
     """
     if not isinstance(name, str) or not name:
         msg = "a MicroVM operation requires a non-empty name"
-        raise ValidationError(msg)
-    if not config.image_identifier:
-        msg = f'MicroVM "{name}": image_identifier is required'
-        raise ValidationError(msg)
-    if not config.execution_role_arn:
-        msg = f'MicroVM "{name}": execution_role_arn is required'
         raise ValidationError(msg)
     return _validate_timeout(name, "timeout", timeout)
 
@@ -355,16 +360,29 @@ def _validate_heartbeat(name: str, heartbeat_timeout: Duration | None) -> int | 
 
 
 def _validate_input(name: str, job_input: Any) -> None:
-    """Check that the job input is JSON-serializable.
+    """Check that the job input is JSON-serializable, and fits in a job body.
+
+    The size is the UTF-8 length of the JSON that the job body holds. So it
+    is measured on the output of :func:`dumps`.
 
     Raises:
-        TypeError: When it is not.
+        TypeError: When it is not JSON-serializable.
+        ValueError: When its JSON is over :data:`MAX_JOB_INPUT_BYTES` bytes.
     """
     try:
-        json.dumps(job_input, allow_nan=False)
+        text = dumps(job_input)
     except (TypeError, ValueError) as error:
         msg = f'MicroVM "{name}": the job input must be JSON-serializable: {error}'
         raise TypeError(msg) from error
+    size = len(text.encode())
+    if size > MAX_JOB_INPUT_BYTES:
+        msg = (
+            f'MicroVM "{name}": the job input is {size} bytes as JSON. The limit '
+            f"is {MAX_JOB_INPUT_BYTES} bytes, because the worker accepts a job "
+            "body of at most 6 MiB. Pass larger data by reference, for example "
+            "as an S3 key."
+        )
+        raise ValueError(msg)
 
 
 def _validate_region(context: DurableContext, name: str) -> tuple[str, str]:
@@ -499,20 +517,14 @@ class _MicrovmScope:
         port = DEFAULT_MICROVM_PORT if request.port is None else request.port
 
         def attempt(step_context: StepContext) -> None:
-            # The launch records an endpoint for every HTTP delivery. So a
-            # missing endpoint is a defect, not a transient failure. The
-            # default retry strategy does not retry RuntimeError.
-            if launched.endpoint is None:
-                msg = (
-                    f"the launch recorded no endpoint for MicroVM "
-                    f"{launched.microvm_id}, so the job cannot be sent over HTTP"
-                )
-                raise RuntimeError(msg)
             client = self._client()
             # The state check before delivery and the request's retries share
             # one window. So the wait for a resume counts toward it.
             window_started_at = time.monotonic()
-            endpoint = launched.endpoint
+            # _launch_call raises when RunMicrovm returns no endpoint for an
+            # HTTP delivery. The launch step checkpoints only what
+            # _launch_call returned. So an HTTP launch always has an endpoint.
+            endpoint = cast("str", launched.endpoint)
             recheck: Callable[[float], str | None] | None = None
             if resume:
                 require_time_for_call(remaining_seconds)
@@ -725,8 +737,9 @@ class _OperationScope(_MicrovmScope):
             ValidationError: When ``name`` or ``config`` is not valid, or the
                 Region cannot be determined.
             TypeError: When ``job_input`` is not JSON-serializable.
+            ValueError: When the JSON of ``job_input`` is too large.
         """
-        timeout_seconds = _validate_base(name, config, config.timeout)
+        timeout_seconds = _validate_base(name, config.timeout)
         heartbeat_timeout_seconds = _validate_heartbeat(name, config.heartbeat_timeout)
         request = config.request or MicrovmRequestConfig()
         retry_window_seconds = _validate_request(name, request)

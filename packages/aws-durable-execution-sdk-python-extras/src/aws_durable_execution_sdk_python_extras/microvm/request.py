@@ -283,10 +283,14 @@ def send_job(options: SendJobOptions) -> int:
     The function does not follow a redirect, and neither does the JavaScript
     operation. A followed 301, 302, or 303 would turn the POST into a GET
     without the job. A followed 307 or 308 to another host would receive the
-    auth token. So a redirect fails the delivery at once, with the
-    ``Location`` in the message. The headers are added as unredirected
-    headers, so an opener that follows a redirect does not send the auth
-    token on either.
+    auth token. So a redirect fails the delivery at once. The headers are
+    added as unredirected headers, so an opener that follows a redirect does
+    not send the auth token on either.
+
+    The execution history stores the message. A query in the ``Location``
+    can hold a secret, for example a presigned signature. So the message
+    names the path, and the status of a 3xx answer. It omits the
+    ``Location``, and the URL that a followed redirect reached.
 
     The delay starts at 250 milliseconds and doubles up to 4 seconds. The
     tier ends at the retry window, or 10 seconds before the invocation times
@@ -396,9 +400,9 @@ def send_job(options: SendJobOptions) -> int:
             # the job: a 301, 302, or 303 turns the POST into a GET.
             msg = (
                 f"The MicroVM answered the job at {options.path} with a "
-                f"redirect to {answer.location}, and the opener followed it. "
-                "The operation does not follow redirects, so set the path that "
-                "the route serves."
+                "redirect, and the opener followed it. The operation does not "
+                "follow redirects, so set the path that the route serves, and "
+                "pass an opener that follows no redirect."
             )
             raise MicrovmRequestRejectedError(msg, status or 0)
 
@@ -429,11 +433,13 @@ def send_job(options: SendJobOptions) -> int:
                 continue
             if 300 <= status < 400:  # noqa: PLR2004
                 msg = (
-                    f"The MicroVM answered the job at {options.path} with HTTP "
-                    f"{status}, a redirect to {answer.location or 'no location'}. "
-                    "The operation does not follow redirects, so set the path "
-                    "that the route serves."
+                    f"The MicroVM answered the job at {options.path} with HTTP {status}"
                 )
+                if answer.has_location:
+                    msg += (
+                        ", a redirect. The operation does not follow redirects, "
+                        "so set the path that the route serves."
+                    )
                 raise MicrovmRequestRejectedError(msg, status)
             if 400 <= status < 500 and status != 429:  # noqa: PLR2004
                 msg = (
@@ -535,9 +541,8 @@ class _Answer:
     """The HTTP status. ``None`` when no answer arrived."""
     failure: str = ""
     """Why no answer arrived."""
-    location: str | None = None
-    """The ``Location`` header of a redirect, or the URL that a followed
-    redirect reached."""
+    has_location: bool = False
+    """Whether the answer has a ``Location`` header."""
     followed_redirect: bool = False
     """Whether the opener followed a redirect."""
 
@@ -587,14 +592,12 @@ def _post(
         with opener.open(request, timeout=timeout) as response:
             # An opener that follows redirects reports the URL it reached.
             if response.geturl() != url:
-                return _Answer(
-                    response.status, location=response.geturl(), followed_redirect=True
-                )
+                return _Answer(response.status, followed_redirect=True)
             return _Answer(response.status)
     except urllib.error.HTTPError as error:
-        location = error.headers.get("Location") if error.headers else None
+        has_location = bool(error.headers and error.headers.get("Location"))
         error.close()
-        return _Answer(error.code, location=location)
+        return _Answer(error.code, has_location=has_location)
     except (OSError, http.client.HTTPException, ValueError) as error:
         # URLError, a refused connection, and a timeout are OSError. An
         # invalid response from the endpoint raises an HTTPException.
