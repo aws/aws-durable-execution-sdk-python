@@ -2531,19 +2531,27 @@ def test_answers_a_resent_finished_job_with_202_during_a_suspend_refusal(
     assert h.job("cb-new") == 503
 
 
-def test_answers_a_resent_running_job_with_202_during_a_suspend_refusal(
+def test_refuses_a_resent_running_job_with_503_during_a_suspend_refusal(
     start: Any, logger: Any
 ) -> None:
-    # The job runs and freezes with the MicroVM anyway. A resend starts
-    # nothing.
+    # The running job can freeze with the MicroVM. A 202 would end the
+    # delivery, and nothing would resume the MicroVM. After the 503, the
+    # durable function checks the state, resumes the MicroVM, and delivers
+    # the job again.
     h = start()
     h.run_hook(IDLE)
     assert h.job("cb-1") == 202
     assert eventually(lambda: h.started("cb-1"))
     assert h.hook("suspend") == 200
 
-    assert h.job("cb-1") == 202
+    assert h.job("cb-1") == 503
     assert h.job("cb-2") == 503
+    assert h.jobs.started() == ["cb-1"]
+    assert logger.messages("warning").count("duplicate job ignored") == 0
+    assert logger.messages("info").count("job refused: the MicroVM is suspending") == 2
+
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
     h.finish_job("cb-1")
 
     assert h.jobs.started() == ["cb-1"]
@@ -2554,6 +2562,31 @@ def test_answers_a_resent_running_job_with_202_during_a_suspend_refusal(
     assert eventually(
         lambda: logger.messages("warning").count("duplicate job ignored") == 1
     )
+
+
+def test_answers_a_resent_running_job_with_202_after_suspend_and_terminate_hooks(
+    start: Any, logger: Any
+) -> None:
+    # The terminate hook fails the running job's callback. So the durable
+    # function learns the outcome from the callback, also when a suspend
+    # refusal is still in effect.
+    h = start()
+    h.run_hook()
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+    assert h.hook("terminate") == 200
+
+    assert h.job("cb-1") == 202
+    assert h.job("cb-2") == 503
+    h.jobs.release_all()
+    assert h.worker.idle(WAIT)
+
+    assert h.jobs.started() == ["cb-1"]
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 1
+    )
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
 
 
 def test_never_suspends_after_the_terminate_hook(start: Any) -> None:
@@ -3563,6 +3596,66 @@ def test_sends_no_acknowledgement_with_a_refusal(start: Any) -> None:
     h.hook("suspend")
 
     assert post_job(h, "cb-1", suspendAfter=True) == (503, None)
+
+
+def test_refuses_a_resent_running_suspend_after_job_without_acknowledgement(
+    start: Any,
+) -> None:
+    # The suspend refusal answers the resend of a running job with 503, so
+    # the copy carries no acknowledgement. The delivery after the resume gets
+    # the duplicate 202 with the acknowledgement of the first request.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+
+    assert post_job(h, "cb-1", suspendAfter=True) == (503, None)
+    assert post_job(h, "cb-1") == (503, None)
+
+    assert h.hook("resume") == 200
+    assert post_job(h, "cb-1") == (202, "accepted")
+    end_job(h, "cb-1")
+
+    assert h.jobs.started() == ["cb-1"]
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_acknowledges_a_resent_running_suspend_after_job_after_the_terminate_hook(
+    start: Any,
+) -> None:
+    # A known job gets the duplicate 202 while terminating, also during a
+    # suspend refusal. That 202 carries the acknowledgement of the first
+    # request.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+    assert h.hook("terminate") == 200
+
+    assert post_job(h, "cb-1") == (202, "accepted")
+    h.jobs.release_all()
+    assert h.worker.idle(WAIT)
+
+    assert h.jobs.started() == ["cb-1"]
+    assert h.microvms.suspended == []
+
+
+def test_acknowledges_a_resent_finished_suspend_after_job_during_its_own_suspend(
+    start: Any,
+) -> None:
+    # The job has ended, and the worker suspends after it. A resend during
+    # that refusal gets the duplicate 202 with the acknowledgement.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == ["mvm-1"]
+
+    assert post_job(h, "cb-1") == (202, "accepted")
+    assert post_job(h, "cb-2", suspendAfter=True) == (503, None)
+    assert h.jobs.started() == ["cb-1"]
 
 
 def test_suspends_after_a_suspend_after_job_in_a_session_without_auto_suspend(

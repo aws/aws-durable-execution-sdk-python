@@ -334,8 +334,13 @@ class MicrovmWorkerListener:
 
     A second delivery of a callback ID is answered like the first and
     ignored, while that job runs and after it ended. The listener remembers
-    the last 1,000 finished callback IDs. A second delivery gets this answer
-    during a suspend or terminate refusal too, because it starts nothing.
+    the last 1,000 finished callback IDs. A second delivery of a finished
+    job gets this answer in every state, because it starts nothing. A
+    second delivery of a known job gets it after the ``terminate`` hook too,
+    because that hook fails a running job's callback. A second delivery of a
+    running job during a suspend refusal gets HTTP 503, as a new job does.
+    The running job can freeze with the MicroVM. The 503 makes the durable
+    function check the state and resume the MicroVM.
 
     A document that does not match the contract gets HTTP 400. If the
     document still names a callback, the listener fails that callback. So
@@ -412,8 +417,9 @@ class MicrovmWorkerListener:
     suspend its MicroVM after the job, in any session:
 
     1. The 202 answer carries ``X-Microvm-Suspend-After: accepted``. A
-       second delivery gets the header when the first one carried the
-       field. Only a JSON ``true`` counts. Any other value is ignored.
+       second delivery that gets the duplicate 202 carries the header when
+       the first one carried the field. A 503 never carries it. Only a
+       JSON ``true`` counts. Any other value is ignored.
     2. When the job's outcome reports have ended, the listener sets a
        pending request. The request fires when no job, failure report,
        ``run`` hook request, or SuspendMicrovm call runs, and the listener
@@ -432,7 +438,8 @@ class MicrovmWorkerListener:
 
     - ``suspend``: the listener answers HTTP 200 at once, because a suspend
       hook that runs past its timeout terminates the MicroVM. It then
-      refuses new jobs with HTTP 503, as after its own suspend, until the
+      refuses new jobs, and second deliveries of running jobs, with HTTP
+      503, as after its own suspend, until the
       ``resume`` hook or for 30 seconds. Running jobs freeze with the
       MicroVM. A ``run`` hook job that arrives during the refusal starts when
       the refusal ends, because the durable function cannot deliver it
@@ -1076,13 +1083,26 @@ class MicrovmWorkerListener:
                 # arrives.
                 self._microvm_id = request.microvm_id
             microvm_id = self._microvm_id
-            # A known callback ID gets the duplicate answer before the refusal
-            # checks. Its job runs now or has ended, and the answer starts
-            # nothing. So nothing can freeze with the MicroVM or end with it.
-            # After a 503, the durable function resumes the MicroVM and
-            # delivers the job again. That delivery gets this answer. So the
-            # MicroVM ran again for nothing.
-            duplicate = self._is_known(job.callback_id)
+            # A known callback ID gets one of three answers:
+            #
+            # 1. An ID in _finished gets 202 in every state. Its job has
+            #    ended, and the answer starts nothing. A 503 would make the
+            #    durable function resume the MicroVM only to get this answer.
+            # 2. A known ID gets 202 while the MicroVM terminates. The
+            #    terminate hook fails a running job's callback. So the
+            #    durable function learns the outcome from the callback.
+            # 3. An ID in _jobs gets 503 during a suspend refusal, as a new
+            #    job does. The running job can freeze with the MicroVM. A
+            #    202 would end the delivery, and nothing would resume the
+            #    MicroVM. So the job would wait for its heartbeat timeout or
+            #    its timeout. The 503 makes the durable function check the
+            #    state, resume the MicroVM, and deliver the job again.
+            may_freeze = (
+                job.callback_id in self._jobs
+                and self._suspending
+                and not self._terminating
+            )
+            duplicate = self._is_known(job.callback_id) and not may_freeze
             terminating = not duplicate and self._terminating
             suspending = not duplicate and self._suspending
             if not (duplicate or terminating or suspending):
@@ -1091,8 +1111,9 @@ class MicrovmWorkerListener:
                     request.region,
                     suspend_after=request.suspend_after,
                 )
-            # A resent copy gets the acknowledgement that the first request
-            # got, because only the first request decides the suspend.
+            # A resent copy that gets the duplicate 202 carries the
+            # acknowledgement that the first request got, because only the
+            # first request decides the suspend. A 503 carries none.
             acknowledge = (
                 self._carried_suspend_after(job.callback_id)
                 if duplicate

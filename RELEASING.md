@@ -152,6 +152,10 @@ The publishing role must allow `lambda:PublishLayerVersion` and
 
 ## Release Notes Format
 
+For the coordinated Core 3.0 / OTel 2.0 release, include the
+[2.x to 3.0 migration guide](docs/migration-2.x-to-3.0.md) in the release notes.
+It covers dependency and layer upgrades, custom providers, and validation.
+
 Release notes should maintain separate timelines for each package. Use the following structure:
 
 ```markdown
