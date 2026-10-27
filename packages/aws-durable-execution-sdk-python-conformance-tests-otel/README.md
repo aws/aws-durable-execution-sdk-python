@@ -255,11 +255,12 @@ write access; the runner identity needs list, read, and cleanup access.
 `.github/workflows/opentelemetry-conformance-tests.yml` calls the shared
 orchestrator in the conformance repository and points it at this package with
 `examples_dir`, so orchestration stays centralized while the handlers run from
-the commit under test. The workflow and catalog are pinned to the merged
-27-case catalog in shared conformance PR #131. Pull requests run the invocation
-and execution suites, with cases 25 and 26 reported as `NOT_IMPLEMENTED`. The
-pinned orchestrator no longer runs the legacy long-running suite; its templates
-and local contract tests remain in this package.
+the commit under test. The shared workflow tracks the conformance repository's
+`main` branch, and the test catalog defaults to `main`. Manual runs can override
+the catalog with the `conformance_test_ref` input. Pull requests run the
+invocation and execution suites, with cases 25 and 26 reported as
+`NOT_IMPLEMENTED`. The orchestrator no longer runs the legacy long-running
+suite; its templates and local contract tests remain in this package.
 
 Case 27 (`chained-invoke-suspend`) invokes a child that performs a one-second
 durable wait and returns the original payload after resuming. Both views

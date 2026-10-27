@@ -4,8 +4,8 @@ from pathlib import Path
 import yaml
 
 
-SHARED_WORKFLOW_REF = "9a5ead5e9ab8051bedfd300726472cbd443923cb"
-CONFORMANCE_TEST_REF = "9a5ead5e9ab8051bedfd300726472cbd443923cb"
+SHARED_WORKFLOW_REF = "main"
+CONFORMANCE_TEST_REF = "main"
 
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
@@ -22,9 +22,9 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "uses: aws/aws-durable-execution-conformance-tests/.github/workflows/"
         "opentelemetry-orchestrator.yml@"
     )
-    pinned_ref = re.search(re.escape(orchestrator) + r"([0-9a-f]{40})", workflow)
-    assert pinned_ref is not None
-    assert pinned_ref.group(1) == SHARED_WORKFLOW_REF
+    shared_ref = re.search(re.escape(orchestrator) + r"(\S+)", workflow)
+    assert shared_ref is not None
+    assert shared_ref.group(1) == SHARED_WORKFLOW_REF
     assert f"default: {CONFORMANCE_TEST_REF}" in workflow
     assert "python-opentelemetry.yml@" not in workflow
     assert "\n      otlp_endpoint:" not in workflow
