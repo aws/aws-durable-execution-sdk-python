@@ -121,7 +121,7 @@ def test_parallel_invokes_carry_distinct_actual_operation_parents(
                 "Id": update.operation_id,
                 "Type": update.operation_type.value,
                 "Name": update.name,
-                "SubType": update.sub_type.value,
+                "SubType": update.sub_type,
                 "ParentId": update.parent_id,
                 "StartTimestamp": timestamp,
                 "Status": "STARTED" if update.action.value == "START" else "SUCCEEDED",

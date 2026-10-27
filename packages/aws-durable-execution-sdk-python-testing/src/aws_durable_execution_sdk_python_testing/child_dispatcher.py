@@ -136,7 +136,7 @@ def chained_invoke_timeout_error(timeout_seconds: int) -> ErrorObject:
 
 def payload_size_bytes(payload: str) -> int:
     """Size of ``payload`` as the service measures it: UTF-8 bytes."""
-    return len(payload.encode("utf-8"))
+    return len(payload.encode("utf-8", errors="replace"))
 
 
 @dataclass(frozen=True)

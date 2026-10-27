@@ -14,6 +14,9 @@ OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Pyth
 
 ## Installation
 
+For an existing Core 2.x / OTel 1.x application, start with the
+[Core 3.0 / OTel 2.0 migration guide](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/migration-2.x-to-3.0.md#migrate-opentelemetry-registrations).
+
 When using an ADOT or community OpenTelemetry Lambda layer:
 
 ```bash
@@ -23,12 +26,6 @@ pip install aws-durable-execution-sdk-python-otel
 The base package intentionally does not install OpenTelemetry libraries. The
 Lambda layer supplies a version-aligned API, SDK, exporter, and propagators,
 preventing packages in the function artifact from shadowing parts of the layer.
-
-The generated `aws-durable-execution-sdk-python-otel-plugin` Lambda layer includes
-Core's runtime dependencies, including its required boto3/botocore service model.
-It still leaves OpenTelemetry provider packages to the ADOT/community layer.
-Dependencies bundled in the function artifact take precedence over layer packages;
-those application-owned boto3/botocore versions must also meet Core's minimum.
 
 For an application that configures its own OpenTelemetry provider instead of
 using a Lambda layer:

@@ -1,6 +1,7 @@
 """Tests for the service module."""
 
 import datetime
+import json
 from datetime import UTC
 from unittest.mock import Mock, patch
 
@@ -796,7 +797,7 @@ def test_operation_update_create_callback():
     assert update.action is OperationAction.START
     assert update.name == "test_callback"
     assert update.callback_options == callback_options
-    assert update.sub_type is OperationSubType.CALLBACK
+    assert update.sub_type == OperationSubType.CALLBACK
 
 
 def test_operation_update_create_wait_start():
@@ -818,7 +819,7 @@ def test_operation_update_create_wait_start():
     assert update.action is OperationAction.START
     assert update.name == "test_wait"
     assert update.wait_options == wait_options
-    assert update.sub_type is OperationSubType.WAIT
+    assert update.sub_type == OperationSubType.WAIT
 
 
 @patch("aws_durable_execution_sdk_python.lambda_service.datetime")
@@ -852,7 +853,7 @@ def test_operation_update_create_step_succeed():
     assert update.action is OperationAction.SUCCEED
     assert update.name == "test_step"
     assert update.payload == "step_payload"
-    assert update.sub_type is OperationSubType.STEP
+    assert update.sub_type == OperationSubType.STEP
 
 
 def test_operation_update_to_dict_includes_empty_payload():
@@ -889,11 +890,10 @@ def test_operation_update_factory_methods():
             "test_context",
             operation_type=OperationType.CONTEXT,
         ),
-        OperationSubType.RUN_IN_CHILD_CONTEXT,
     )
     assert update.operation_type is OperationType.CONTEXT
     assert update.action is OperationAction.START
-    assert update.sub_type is OperationSubType.RUN_IN_CHILD_CONTEXT
+    assert update.sub_type == OperationSubType.RUN_IN_CHILD_CONTEXT
 
     # Test create_context_succeed
     update = OperationUpdate.create_context_succeed(
@@ -905,11 +905,10 @@ def test_operation_update_factory_methods():
             operation_type=OperationType.CONTEXT,
         ),
         "payload",
-        OperationSubType.RUN_IN_CHILD_CONTEXT,
     )
     assert update.action is OperationAction.SUCCEED
     assert update.payload == "payload"
-    assert update.sub_type is OperationSubType.RUN_IN_CHILD_CONTEXT
+    assert update.sub_type == OperationSubType.RUN_IN_CHILD_CONTEXT
 
     # Test create_context_fail
     update = OperationUpdate.create_context_fail(
@@ -921,11 +920,10 @@ def test_operation_update_factory_methods():
             operation_type=OperationType.CONTEXT,
         ),
         error,
-        OperationSubType.RUN_IN_CHILD_CONTEXT,
     )
     assert update.action is OperationAction.FAIL
     assert update.error == error
-    assert update.sub_type is OperationSubType.RUN_IN_CHILD_CONTEXT
+    assert update.sub_type == OperationSubType.RUN_IN_CHILD_CONTEXT
 
     # Test create_execution_fail
     update = OperationUpdate.create_execution_fail(error)
@@ -945,7 +943,7 @@ def test_operation_update_factory_methods():
     )
     assert update.operation_type is OperationType.STEP
     assert update.action is OperationAction.FAIL
-    assert update.sub_type is OperationSubType.STEP
+    assert update.sub_type == OperationSubType.STEP
 
     # Test create_step_start
     update = OperationUpdate.create_step_start(
@@ -958,7 +956,7 @@ def test_operation_update_factory_methods():
         )
     )
     assert update.action is OperationAction.START
-    assert update.sub_type is OperationSubType.STEP
+    assert update.sub_type == OperationSubType.STEP
 
     # Test create_step_retry
     update = OperationUpdate.create_step_retry(
@@ -974,7 +972,7 @@ def test_operation_update_factory_methods():
     )
     assert update.action is OperationAction.RETRY
     assert update.step_options.next_attempt_delay_seconds == 30
-    assert update.sub_type is OperationSubType.STEP
+    assert update.sub_type == OperationSubType.STEP
 
 
 def test_operation_update_with_parent_id():
@@ -1676,7 +1674,8 @@ def test_operation_from_dict_with_subtype():
     assert operation.operation_id == "op1"
     assert operation.operation_type is OperationType.STEP
     assert operation.status is OperationStatus.SUCCEEDED
-    assert operation.sub_type is OperationSubType.STEP
+    assert operation.sub_type == OperationSubType.STEP
+    assert type(operation.sub_type) is str
 
 
 def test_operation_from_dict_complete():
@@ -1710,7 +1709,8 @@ def test_operation_from_dict_complete():
     assert operation.name == "test_step"
     assert operation.start_timestamp == start_time
     assert operation.end_timestamp == end_time
-    assert operation.sub_type is OperationSubType.STEP
+    assert operation.sub_type == OperationSubType.STEP
+    assert type(operation.sub_type) is str
     assert operation.execution_details.input_payload == "exec_payload"
     assert operation.context_details.result == "context_result"
     assert operation.step_details.result == "step_result"
@@ -3084,3 +3084,127 @@ def test_operation_to_dict_omits_absent_context_error_and_replay_children():
     context = op.to_dict()["ContextDetails"]
 
     assert context == {"Result": '"hello"'}
+
+
+# region subtypes
+
+
+def test_operation_sub_type_members_are_strings():
+    """Members compare equal to their service value and serialize as it."""
+    assert OperationSubType.MAP == "Map"
+    assert isinstance(OperationSubType.MAP, str)
+    assert json.dumps({"SubType": OperationSubType.MAP}) == '{"SubType": "Map"}'
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("Step", "Step"), ("OrderCharge", "OrderCharge"), ("", None), (None, None)],
+    ids=["sdk-value", "custom-value", "empty", "missing"],
+)
+def test_operation_from_dict_keeps_sub_type_as_plain_string(raw, expected):
+    """A loaded subtype is the string the service stores; it is never an enum."""
+    data = {"Id": "op1", "Type": "STEP", "Status": "SUCCEEDED"}
+    if raw is not None:
+        data["SubType"] = raw
+    operation = Operation.from_dict(data)
+    assert operation.sub_type == expected
+    if expected is not None:
+        assert type(operation.sub_type) is str
+    # An SDK value still compares equal to its member.
+    if raw == "Step":
+        assert operation.sub_type == OperationSubType.STEP
+
+
+def test_operation_from_dict_keeps_custom_sub_type():
+    """An execution that recorded a custom subtype loads its own state."""
+    operation = Operation.from_dict(
+        {
+            "Id": "op1",
+            "Type": "STEP",
+            "Status": "SUCCEEDED",
+            "SubType": "OrderCharge",
+            "Name": "charge",
+        }
+    )
+    assert operation.sub_type == "OrderCharge"
+    assert operation.to_dict()["SubType"] == "OrderCharge"
+
+
+def test_operation_to_dict_writes_sdk_sub_type_as_its_value():
+    """A member is a str, so it serializes as the value the service stores."""
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=OperationSubType.STEP,
+    )
+    sub_type = operation.to_dict()["SubType"]
+    assert sub_type == "Step"
+    assert json.dumps(sub_type) == '"Step"'
+
+
+def test_operation_update_round_trips_custom_sub_type():
+    identifier = OperationIdentifier(
+        "step1", "OrderCharge", None, "charge", operation_type=OperationType.STEP
+    )
+    update = OperationUpdate.create_step_start(identifier)
+    assert update.sub_type == "OrderCharge"
+    serialized = update.to_dict()
+    assert serialized["SubType"] == "OrderCharge"
+    assert OperationUpdate.from_dict(serialized).sub_type == "OrderCharge"
+
+
+@pytest.mark.parametrize(
+    ("factory", "args"),
+    [
+        (OperationUpdate.create_step_start, ()),
+        (OperationUpdate.create_step_succeed, ("payload",)),
+        (
+            OperationUpdate.create_step_fail,
+            (ErrorObject(message="m", type="T", data=None, stack_trace=None),),
+        ),
+        (
+            OperationUpdate.create_step_retry,
+            (ErrorObject(message="m", type="T", data=None, stack_trace=None), 1),
+        ),
+        (OperationUpdate.create_callback, (CallbackOptions(),)),
+        (OperationUpdate.create_context_start, ()),
+        (OperationUpdate.create_context_succeed, ("payload",)),
+        (
+            OperationUpdate.create_context_fail,
+            (ErrorObject(message="m", type="T", data=None, stack_trace=None),),
+        ),
+        (OperationUpdate.create_wait_start, (WaitOptions(wait_seconds=1),)),
+        (
+            OperationUpdate.create_invoke_start,
+            ("payload", ChainedInvokeOptions(function_name="fn")),
+        ),
+        (OperationUpdate.create_wait_for_condition_start, ()),
+        (OperationUpdate.create_wait_for_condition_succeed, ("payload",)),
+        (OperationUpdate.create_wait_for_condition_retry, ("payload", 1)),
+        (
+            OperationUpdate.create_wait_for_condition_fail,
+            (ErrorObject(message="m", type="T", data=None, stack_trace=None),),
+        ),
+    ],
+)
+def test_operation_update_factories_record_identifier_sub_type(factory, args):
+    """Every factory records the identifier's subtype, custom or SDK."""
+    identifier = OperationIdentifier(
+        "op1", "Custom", None, "name", operation_type=OperationType.STEP
+    )
+    assert factory(identifier, *args).sub_type == "Custom"
+
+
+def test_create_context_succeed_rejects_the_removed_positional_sub_type():
+    """A 2.x call that passed sub_type positionally fails at the call site."""
+    identifier = OperationIdentifier(
+        "ctx1", "RunInChildContext", None, "ctx", operation_type=OperationType.CONTEXT
+    )
+    with pytest.raises(TypeError):
+        OperationUpdate.create_context_succeed(
+            identifier, "payload", OperationSubType.RUN_IN_CHILD_CONTEXT
+        )  # type: ignore[misc]
+
+
+# endregion subtypes

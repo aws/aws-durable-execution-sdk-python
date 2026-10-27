@@ -1238,7 +1238,7 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     mock_callable = Mock()
     mock_callable._original_name = "original_function"  # noqa: SLF001
 
-    config = ChildConfig(sub_type=OperationSubType.STEP)
+    config = ChildConfig(sub_type="OrderSaga")
 
     context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(3)]  # Set counter to 3 # noqa: SLF001
@@ -1253,12 +1253,99 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     call_args = mock_handler.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
         expected_id,
-        OperationSubType.STEP,
+        "OrderSaga",
         None,
         "original_function",
         operation_type=OperationType.CONTEXT,
     )
     assert call_args[1]["config"] is config
+
+
+# region custom subtypes
+
+
+@pytest.mark.parametrize("sub_type", [None, ""], ids=["none", "empty"])
+@patch("aws_durable_execution_sdk_python.context.child_handler")
+def test_run_in_child_context_default_subtype(mock_handler, sub_type):
+    """None and the empty string select the default, as in the JS SDK."""
+    mock_handler.return_value = "child"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+
+    context.run_in_child_context(
+        Mock(), name="child", config=ChildConfig(sub_type=sub_type)
+    )
+
+    identifier = mock_handler.call_args[1]["operation_identifier"]
+    assert identifier.sub_type == OperationSubType.RUN_IN_CHILD_CONTEXT
+
+
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_custom_subtype_reaches_identifier(mock_executor_class):
+    mock_executor_class.return_value.process.return_value = "stepped"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+
+    result = context.step(
+        Mock(), name="charge", config=StepConfig(sub_type="OrderCharge")
+    )
+
+    assert result == "stepped"
+    identifier = mock_executor_class.call_args[1]["operation_identifier"]
+    assert identifier.sub_type == "OrderCharge"
+    assert identifier.type is OperationType.STEP
+
+
+@pytest.mark.parametrize("sub_type", [None, ""], ids=["none", "empty"])
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_default_subtype(mock_executor_class, sub_type):
+    mock_executor_class.return_value.process.return_value = "stepped"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+
+    context.step(Mock(), name="charge", config=StepConfig(sub_type=sub_type))
+
+    identifier = mock_executor_class.call_args[1]["operation_identifier"]
+    assert identifier.sub_type == OperationSubType.STEP
+
+
+@patch("aws_durable_execution_sdk_python.context.CallbackOperationExecutor")
+def test_create_callback_custom_subtype_reaches_identifier(mock_executor_class):
+    mock_executor_class.return_value.process.return_value = "callback-id"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+
+    callback = context.create_callback(
+        name="approval", config=CallbackConfig(sub_type="Approval")
+    )
+
+    assert callback.callback_id == "callback-id"
+    identifier = mock_executor_class.call_args[1]["operation_identifier"]
+    assert identifier.sub_type == "Approval"
+    assert identifier.type is OperationType.CALLBACK
+
+
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_with_rejected_subtype_never_runs_the_body(mock_executor_class):
+    """The config raises before the step is built, so no START checkpoint is
+    sent and the step body never runs under a subtype the service rejects."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+    body = Mock()
+
+    with pytest.raises(ValidationError, match="1 to 32 characters"):
+        context.step(body, name="charge", config=StepConfig(sub_type="Order Charge"))
+
+    body.assert_not_called()
+    mock_executor_class.assert_not_called()
+
+
+# endregion custom subtypes
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
@@ -1419,7 +1506,7 @@ def test_wait_for_callback_basic(mock_executor_class):
         mock_submitter._original_name  # noqa: SLF001
     )  # Ensure _original_name doesn't exist
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
+    with patch.object(DurableContext, "_run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "callback_result"
         context = create_test_context(state=mock_state)
 
@@ -1431,7 +1518,8 @@ def test_wait_for_callback_basic(mock_executor_class):
         # Verify the child context callable
         call_args = mock_run_in_child.call_args
         assert call_args[0][1] is None  # name should be None
-        assert call_args[0][2].sub_type is OperationSubType.WAIT_FOR_CALLBACK
+        assert call_args[0][2] is None  # no ChildConfig: the SDK sets the subtype
+        assert call_args[0][3] == OperationSubType.WAIT_FOR_CALLBACK
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
@@ -1450,7 +1538,7 @@ def test_wait_for_callback_with_name_and_config(mock_executor_class):
     mock_submitter._original_name = "submit_function"  # noqa: SLF001
     config = CallbackConfig()
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
+    with patch.object(DurableContext, "_run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "configured_callback_result"
         context = create_test_context(state=mock_state)
 
@@ -1461,7 +1549,8 @@ def test_wait_for_callback_with_name_and_config(mock_executor_class):
         assert (
             call_args[0][1] == "submit_function"
         )  # name should be from _original_name
-        assert call_args[0][2].sub_type is OperationSubType.WAIT_FOR_CALLBACK
+        assert call_args[0][2] is None  # no ChildConfig: the SDK sets the subtype
+        assert call_args[0][3] == OperationSubType.WAIT_FOR_CALLBACK
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
@@ -1479,7 +1568,7 @@ def test_wait_for_callback_resolves_name_from_submitter(mock_executor_class):
     mock_submitter = Mock()
     mock_submitter._original_name = "submit_task"  # noqa: SLF001
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
+    with patch.object(DurableContext, "_run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "named_callback_result"
         context = create_test_context(state=mock_state)
 
@@ -1487,7 +1576,8 @@ def test_wait_for_callback_resolves_name_from_submitter(mock_executor_class):
 
         call_args = mock_run_in_child.call_args
         assert call_args[0][1] == "submit_task"
-        assert call_args[0][2].sub_type is OperationSubType.WAIT_FOR_CALLBACK
+        assert call_args[0][2] is None  # no ChildConfig: the SDK sets the subtype
+        assert call_args[0][3] == OperationSubType.WAIT_FOR_CALLBACK
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
@@ -1506,11 +1596,12 @@ def test_wait_for_callback_passes_child_context(mock_executor_class):
 
     mock_executor_class.side_effect = capture_handler_call
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
+    with patch.object(DurableContext, "_run_in_child_context") as mock_run_in_child:
 
-        def run_child_context(callable_func, name, config):
+        def run_child_context(callable_func, name, config, sub_type):
             # Execute the child context callable
-            assert config.sub_type is OperationSubType.WAIT_FOR_CALLBACK
+            assert config is None
+            assert sub_type == OperationSubType.WAIT_FOR_CALLBACK
             child_context = create_test_context(state=mock_state, parent_id="test")
             return callable_func(child_context)
 
@@ -1552,7 +1643,7 @@ def test_wait_for_callback_passes_callback_errors_through(inner):
 
     with patch.object(
         DurableContext,
-        "run_in_child_context",
+        "_run_in_child_context",
         side_effect=_child_context_error_with_cause(inner),
     ):
         with pytest.raises(CallbackError) as exc_info:
@@ -1569,7 +1660,7 @@ def test_wait_for_callback_translates_submitter_step_failure():
     inner = StepError("submitter blew up", data="payload", stack_trace=["frame"])
     with patch.object(
         DurableContext,
-        "run_in_child_context",
+        "_run_in_child_context",
         side_effect=_child_context_error_with_cause(inner),
     ):
         with pytest.raises(CallbackSubmitterError) as exc_info:
@@ -1592,7 +1683,7 @@ def test_wait_for_callback_reraises_unrelated_child_context_error():
     child_error = _child_context_error_with_cause(inner)
     with patch.object(
         DurableContext,
-        "run_in_child_context",
+        "_run_in_child_context",
         side_effect=child_error,
     ):
         with pytest.raises(ChildContextError) as exc_info:
@@ -1630,7 +1721,8 @@ def test_map_basic(mock_handler):
 
     # Verify the child handler was called with correct parameters
     call_args = mock_handler.call_args
-    assert call_args[1]["config"].sub_type.value == "Map"
+    assert call_args[1]["operation_identifier"].sub_type == OperationSubType.MAP
+    assert call_args[1]["config"].sub_type is None
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
@@ -1762,7 +1854,8 @@ def test_parallel_basic(mock_handler):
 
     # Verify the child handler was called with correct parameters
     call_args = mock_handler.call_args
-    assert call_args[1]["config"].sub_type.value == "Parallel"
+    assert call_args[1]["operation_identifier"].sub_type == OperationSubType.PARALLEL
+    assert call_args[1]["config"].sub_type is None
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
