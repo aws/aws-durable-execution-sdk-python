@@ -14,6 +14,9 @@ OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Pyth
 
 ## Installation
 
+For an existing Core 2.x / OTel 1.x application, start with the
+[Core 3.0 / OTel 2.0 migration guide](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/migration-2.x-to-3.0.md#migrate-opentelemetry-registrations).
+
 When using an ADOT or community OpenTelemetry Lambda layer:
 
 ```bash
@@ -23,12 +26,6 @@ pip install aws-durable-execution-sdk-python-otel
 The base package intentionally does not install OpenTelemetry libraries. The
 Lambda layer supplies a version-aligned API, SDK, exporter, and propagators,
 preventing packages in the function artifact from shadowing parts of the layer.
-
-The generated `aws-durable-execution-sdk-python-otel-plugin` Lambda layer includes
-Core's runtime dependencies, including its required boto3/botocore service model.
-It still leaves OpenTelemetry provider packages to the ADOT/community layer.
-Dependencies bundled in the function artifact take precedence over layer packages;
-those application-owned boto3/botocore versions must also meet Core's minimum.
 
 For an application that configures its own OpenTelemetry provider instead of
 using a Lambda layer:
@@ -405,109 +402,12 @@ each durable span in the same invocation.
 
 `durable.invocation.status` uses `RETRYING` when the core plugin hook reports
 `InvocationStatus.RETRY`. The core enum remains unchanged. Operation spans use
-OTel `ERROR` for explicit `FAILED`, `TIMED_OUT`, or `STOPPED` outcomes even when
-error details are absent. Supplied error details continue to set `ERROR` and
-record an exception event; a failure status alone does not invent that event.
-Without error details, `SUCCEEDED` is `OK` and other statuses, including
-`CANCELLED`, remain `UNSET`. The original durable operation status remains in
-`durable.operation.status`. A handler that catches an operation failure and
-returns successfully still has a successful invocation/workflow outcome; the
-failed operation retains its own error status on initial completion and replay.
-
-Exception events use the same normalized end timestamp as their operation or
-attempt span. This keeps events inside the exported span when a completion has
-no durable start time or arrives later than its backend end time; the existing
-view-specific span-boundary rules remain intact.
-
-When a terminal completion arrives before replay creates its parent span, the
-plugin retains it until that span is registered. Parent registration exports the
-pending child inside the actual parent segment. Completions whose parents remain
-unavailable are exported at invocation End: Invocation view uses the invocation
-span, and Execution view derives a logical parent context from the operation ID.
-Each fallback is logged. A derived context is not a reconstructed recording span
-or proof of an unavailable virtual context's original span identity.
-
-### Invocation flushing
-
-After span and ContextVar cleanup, the plugins wait up to the OpenTelemetry
-provider's existing 30-second default budget for `force_flush()`. Only provider
-I/O runs on a background daemon worker; invocation Start/End hooks and token
-cleanup stay on their original worker and Context. The I/O receives a snapshot
-of that post-cleanup Context.
-
-There is at most one outstanding flush per provider and no pending I/O queue.
-Distinct providers can flush independently. Concurrent requests for the same
-provider wait for admission within the same absolute deadline used for completion,
-then perform a fresh flush so spans added during the earlier attempt are covered.
-A timeout does not cancel the exporter or free that provider's slot. A request
-whose budget expires before admission returns with a warning without starting
-more work.
-A failed or skipped flush is not an export
-acknowledgment, and late exports may continue. Applications still own exporter
-transport timeouts and provider shutdown. This bound does not cover synchronous
-span-processor `on_end` work that runs before flushing.
-
-Ordinary provider exceptions that finish within the budget retain the existing
-plugin exception isolation; fatal exceptions are propagated on the lifecycle
-owner. Exceptions after the caller has stopped waiting are logged and cannot be
-raised retroactively into the completed invocation.
+OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
+`UNSET` for other outcomes without error details, including `FAILED`,
+`CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
+remains in `durable.operation.status`.
 
 ### Invocation context isolation
-
-Factories create a separate plugin instance for each invocation. Each instance
-owns its trace IDs, span registry, deferred completions, timestamps and scope
-tokens, so one invocation's cleanup cannot clear another's trace. Factories share
-provider configuration across instances. SDK user-code workers capture the
-invocation Context; Start/End hooks and token reset retain their owner and order.
-
-Each OTel plugin retains visible terminal operations from
-`InvocationStartInfo.updated_operations` and checkpoint `on_operation_change`
-snapshots. Natural `on_operation_end` hooks export those operations and remove
-them from the pending dictionary. Pending children are also indexed by parent,
-so replay registration can export them under the actual parent before it closes.
-The plugin exports any unvisited completions before ending the invocation span.
-An invocation-local set suppresses repeated input, replay and checkpoint exports;
-core does not synthesize additional completion hooks for other plugins.
-
-A completion enters that set only after its span ends successfully. An in-progress
-claim prevents concurrent attempts, and a failed attempt leaves the completion
-pending for a later notification or invocation-End retry. If a processor delivers
-a span and then raises, retrying can repeat that delivery; the plugin has no
-exporter acknowledgment that would distinguish partial delivery from failure.
-
-During invocation End, an ordinary completion-export failure receives at most one
-retry. Failures do not prevent other completions or the Invocation/Workflow spans
-from finishing. Errors are reported after scope cleanup and flushing, including
-recovered transient failures. Control exceptions are not retried and propagate
-after cleanup; they are not converted into ordinary export failures.
-
-Invocation view can open another context segment within the same invocation
-when a timed branch resumes and re-enters a completed child, or when a virtual
-context runs again. Each new segment receives its own terminal outcome. Repeated
-durable checkpoint observations still do not close or re-export that segment.
-
-The service omits descendants of completed contexts unless their ancestors retain
-children through `ReplayChildren`. An `UpdatedOperationIds` entry alone does not
-provide missing operation metadata, and the plugin does not synthesize an
-operation span from that missing record. Public input-delivery tests use a real
-large child result to retain metadata, while still asserting one saved-step
-execution and terminal export with the correct parent in each view.
-
-Known completed context metadata is retained from the full visible input snapshot
-for descendants delivered by later checkpoint responses. Both views retain actual
-completed parent contexts until invocation cleanup. Invocation view prefers its
-current replay segment, including a large-result ReplayChildren parent; only at
-End can a completion without such a segment use a known completed input parent's
-identity. Remaining unknown parents use the logged fallback described above.
-Queue draining does not re-enter public hooks.
-
-Completion metadata can be redelivered after a failed invocation or checkpoint
-transport attempt that has no successful response acknowledgment. There is no
-exporter acknowledgment in durable state, so this does not promise exactly-once
-telemetry across failed/redelivered invocations. Successful replay preserves
-checkpointed work; this limit is not a claim that already-checkpointed step
-bodies run again. The plugin does not use a global exported-operation cache that
-could discard a first delivery after a failed attempt.
 
 With core 3.x, invocation hooks and the handler run on one worker in an
 invocation-local Context initialized from the host's bindings. Start bindings

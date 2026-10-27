@@ -10,7 +10,7 @@ import threading
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, Protocol, Self, cast
+from typing import Any, Callable, MutableMapping, Protocol, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -20,7 +20,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationAction,
     OperationStatus,
-    OperationSubType,
     OperationType as ServiceOperationType,
     OperationUpdate,
 )
@@ -89,7 +88,11 @@ def _extract_error(operation: Operation) -> ErrorObject | None:
 class OperationInfo:
     operation_id: str
     operation_type: OperationType
-    sub_type: OperationSubType | None
+    sub_type: str | None
+    """The recorded subtype as a plain ``str``, or None for the execution root.
+    Compare it with ``==`` against an ``OperationSubType`` member, which
+    equals its value, or against a caller-defined string. Do not read
+    ``.value`` or compare with ``is``."""
     name: str | None
     parent_id: str | None
     start_time: datetime.datetime | None
@@ -108,14 +111,13 @@ class OperationInfo:
     """The operation error, when available."""
     attempt: int | None = field(default=None, kw_only=True)
 
-    @classmethod
+    @staticmethod
     def from_operation(
-        cls,
         operation: Operation,
         *,
         is_replayed: bool = False,
-    ) -> Self:
-        return cls(
+    ) -> OperationInfo:
+        return OperationInfo(
             operation_id=operation.operation_id,
             operation_type=_to_operation_type(operation.operation_type),
             sub_type=operation.sub_type,
@@ -138,7 +140,7 @@ def _copy_error(error: ErrorObject | None) -> ErrorObject | None:
 
     The checkpointed ``ErrorObject`` is handed straight to user code on replay,
     and its ``stack_trace`` is a mutable list. Without a copy a plugin reading
-    operation hooks or ``info.operations`` could change that list and the error
+    ``info.operations`` could append to (or clear) that list and change the error
     the execution later raises. Only the list needs cloning -- the other fields
     are immutable strings -- so this is cheaper than a full deep copy.
     """
@@ -1630,6 +1632,8 @@ class PluginExecutor:
                 if operation_id in operations
             },
         )
+        # Build this invocation's plugin instances from the very info their first
+        # hook receives, and before that hook is dispatched.
         self._create_plugins(self._invocation_status)
         self.execute_plugins(self._invocation_status)
 
@@ -1852,7 +1856,22 @@ class PluginExecutor:
             self._submit_change(change_info)
 
     def _end_info(self, operation: Operation) -> OperationEndInfo:
-        return OperationEndInfo.from_operation(operation)
+        return OperationEndInfo(
+            operation_id=operation.operation_id,
+            operation_type=_to_operation_type(operation.operation_type),
+            sub_type=operation.sub_type,
+            name=operation.name,
+            parent_id=operation.parent_id,
+            start_time=operation.start_timestamp,
+            end_time=operation.end_timestamp,
+            result=_extract_result(operation),
+            status=operation.status,
+            error=self._extract_error(operation),
+            attempt=(
+                operation.step_details.attempt if operation.step_details else None
+            ),
+            is_replayed=False,
+        )
 
     def _change_info(
         self,

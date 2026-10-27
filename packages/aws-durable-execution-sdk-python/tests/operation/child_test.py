@@ -59,20 +59,19 @@ class _NonIdentitySerDes(SerDes[Any]):
 
 
 # region child_handler
+# The executor records the identifier's subtype. run_in_child_context resolves
+# config.sub_type into the identifier before the executor runs, so the config
+# value is never read here: a config carrying a different value proves that.
 @pytest.mark.parametrize(
-    ("config", "expected_sub_type"),
+    ("config", "sub_type"),
     [
-        (
-            ChildConfig(sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT),
-            OperationSubType.RUN_IN_CHILD_CONTEXT,
-        ),
-        (ChildConfig(sub_type=OperationSubType.STEP), OperationSubType.STEP),
+        (ChildConfig(), OperationSubType.RUN_IN_CHILD_CONTEXT),
+        (ChildConfig(sub_type="Ignored"), "OrderSaga"),
         (None, OperationSubType.RUN_IN_CHILD_CONTEXT),
     ],
+    ids=["sdk-subtype", "custom-subtype", "no-config"],
 )
-def test_child_handler_not_started(
-    config: ChildConfig | None, expected_sub_type: OperationSubType
-):
+def test_child_handler_not_started(config: ChildConfig | None, sub_type: str):
     """Test child_handler when operation not started.
 
     Verifies:
@@ -97,7 +96,7 @@ def test_child_handler_not_started(
         mock_state,
         OperationIdentifier(
             "op1",
-            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            sub_type,
             None,
             "test_name",
             operation_type=OperationType.CONTEXT,
@@ -120,7 +119,7 @@ def test_child_handler_not_started(
     assert start_operation.operation_id == "op1"
     assert start_operation.name == "test_name"
     assert start_operation.operation_type is OperationType.CONTEXT
-    assert start_operation.sub_type is expected_sub_type
+    assert start_operation.sub_type == sub_type
     assert start_operation.action is OperationAction.START
     # CRITICAL: Verify is_sync=False for START checkpoint (async, no immediate response)
     assert start_call[1]["is_sync"] is False
@@ -131,7 +130,7 @@ def test_child_handler_not_started(
     assert success_operation.operation_id == "op1"
     assert success_operation.name == "test_name"
     assert success_operation.operation_type is OperationType.CONTEXT
-    assert success_operation.sub_type is expected_sub_type
+    assert success_operation.sub_type == sub_type
     assert success_operation.action is OperationAction.SUCCEED
     assert success_operation.payload == json.dumps("fresh_result")
 
@@ -244,20 +243,19 @@ def test_child_handler_already_failed():
     assert mock_state.get_checkpoint_result.call_count == 1
 
 
+# The executor records the identifier's subtype. run_in_child_context resolves
+# config.sub_type into the identifier before the executor runs, so the config
+# value is never read here: a config carrying a different value proves that.
 @pytest.mark.parametrize(
-    ("config", "expected_sub_type"),
+    ("config", "sub_type"),
     [
-        (
-            ChildConfig(sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT),
-            OperationSubType.RUN_IN_CHILD_CONTEXT,
-        ),
-        (ChildConfig(sub_type=OperationSubType.STEP), OperationSubType.STEP),
+        (ChildConfig(), OperationSubType.RUN_IN_CHILD_CONTEXT),
+        (ChildConfig(sub_type="Ignored"), "OrderSaga"),
         (None, OperationSubType.RUN_IN_CHILD_CONTEXT),
     ],
+    ids=["sdk-subtype", "custom-subtype", "no-config"],
 )
-def test_child_handler_already_started(
-    config: ChildConfig | None, expected_sub_type: OperationSubType
-):
+def test_child_handler_already_started(config: ChildConfig | None, sub_type: str):
     """Test child_handler when operation already started.
 
     Verifies:
@@ -281,7 +279,7 @@ def test_child_handler_already_started(
         mock_state,
         OperationIdentifier(
             "op5",
-            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            sub_type,
             None,
             "test_name",
             operation_type=OperationType.CONTEXT,
@@ -301,27 +299,26 @@ def test_child_handler_already_started(
     assert success_operation.operation_id == "op5"
     assert success_operation.name == "test_name"
     assert success_operation.operation_type is OperationType.CONTEXT
-    assert success_operation.sub_type == expected_sub_type
+    assert success_operation.sub_type == sub_type
     assert success_operation.action is OperationAction.SUCCEED
     assert success_operation.payload == json.dumps("started_result")
 
     mock_callable.assert_called_once()
 
 
+# The executor records the identifier's subtype. run_in_child_context resolves
+# config.sub_type into the identifier before the executor runs, so the config
+# value is never read here: a config carrying a different value proves that.
 @pytest.mark.parametrize(
-    ("config", "expected_sub_type"),
+    ("config", "sub_type"),
     [
-        (
-            ChildConfig(sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT),
-            OperationSubType.RUN_IN_CHILD_CONTEXT,
-        ),
-        (ChildConfig(sub_type=OperationSubType.STEP), OperationSubType.STEP),
+        (ChildConfig(), OperationSubType.RUN_IN_CHILD_CONTEXT),
+        (ChildConfig(sub_type="Ignored"), "OrderSaga"),
         (None, OperationSubType.RUN_IN_CHILD_CONTEXT),
     ],
+    ids=["sdk-subtype", "custom-subtype", "no-config"],
 )
-def test_child_handler_callable_exception(
-    config: ChildConfig | None, expected_sub_type: OperationSubType
-):
+def test_child_handler_callable_exception(config: ChildConfig | None, sub_type: str):
     """Test child_handler when callable raises exception.
 
     Verifies:
@@ -346,7 +343,7 @@ def test_child_handler_callable_exception(
             mock_state,
             OperationIdentifier(
                 "op6",
-                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                sub_type,
                 None,
                 "test_name",
                 operation_type=OperationType.CONTEXT,
@@ -367,7 +364,7 @@ def test_child_handler_callable_exception(
     assert start_operation.operation_id == "op6"
     assert start_operation.name == "test_name"
     assert start_operation.operation_type is OperationType.CONTEXT
-    assert start_operation.sub_type is expected_sub_type
+    assert start_operation.sub_type == sub_type
     assert start_operation.action is OperationAction.START
     assert start_call[1]["is_sync"] is False
 
@@ -377,7 +374,7 @@ def test_child_handler_callable_exception(
     assert fail_operation.operation_id == "op6"
     assert fail_operation.name == "test_name"
     assert fail_operation.operation_type is OperationType.CONTEXT
-    assert fail_operation.sub_type is expected_sub_type
+    assert fail_operation.sub_type == sub_type
     assert fail_operation.action is OperationAction.FAIL
     # The checkpoint records the escaping error as-is (its own type); the
     # ChildContextError wrapper is raised and recorded one level up.

@@ -9,14 +9,10 @@ import unittest
 from collections.abc import Iterator
 from copy import deepcopy
 from dataclasses import asdict, fields
-from itertools import product
 from unittest.mock import MagicMock, patch
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
-    CallbackDetails,
-    ChainedInvokeDetails,
-    ContextDetails,
     DurableExecutionInvocationOutput,
     ErrorObject,
     InvocationStatus as ServiceInvocationStatus,
@@ -395,24 +391,34 @@ class TestDataClasses(unittest.TestCase):
 
         self.assertIs(info.operation_type, OperationType.WAIT)
 
-    def test_operation_info_factory_preserves_subclass_and_replay_flag(self) -> None:
+    def test_operation_info_carries_custom_subtype_as_plain_string(self):
+        """A caller-defined subtype reaches plugins as the recorded string."""
         operation = Operation(
-            operation_id="wait-1",
-            operation_type=ServiceOperationType.WAIT,
+            operation_id="step-1",
+            operation_type=ServiceOperationType.STEP,
             status=OperationStatus.SUCCEEDED,
-            start_timestamp=START_TS,
-            end_timestamp=END_TS,
+            sub_type="OrderCharge",
         )
 
-        for info_type in (OperationInfo, OperationStartInfo, OperationEndInfo):
-            with self.subTest(info_type=info_type):
-                info = info_type.from_operation(operation, is_replayed=True)
+        info = OperationInfo.from_operation(operation)
 
-                self.assertIs(type(info), info_type)
-                self.assertIs(info.operation_type, OperationType.WAIT)
-                self.assertEqual(info.start_time, START_TS)
-                self.assertEqual(info.end_time, END_TS)
-                self.assertTrue(info.is_replayed)
+        self.assertEqual(info.sub_type, "OrderCharge")
+        self.assertIs(type(info.sub_type), str)
+        self.assertIs(info.operation_type, OperationType.STEP)
+
+    def test_operation_info_carries_sdk_subtype_member(self):
+        """An SDK subtype compares with its member and with its string value."""
+        operation = Operation(
+            operation_id="map-1",
+            operation_type=ServiceOperationType.CONTEXT,
+            status=OperationStatus.SUCCEEDED,
+            sub_type=OperationSubType.MAP,
+        )
+
+        info = OperationInfo.from_operation(operation)
+
+        self.assertEqual(info.sub_type, OperationSubType.MAP)
+        self.assertEqual(info.sub_type, "Map")
 
     def test_invocation_end_info_converts_service_invocation_status(self):
         output = DurableExecutionInvocationOutput(
@@ -2282,161 +2288,6 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
             self.executor.on_operation_update(op)
 
         self.assertIn("operation_end:op-1", self.plugin.calls)
-
-    def test_repeated_checkpoint_observations_reach_plugins_once(self):
-        """Replay and checkpoint observations share one terminal hook per invocation."""
-        for status in (
-            OperationStatus.SUCCEEDED,
-            OperationStatus.FAILED,
-            OperationStatus.CANCELLED,
-            OperationStatus.TIMED_OUT,
-            OperationStatus.STOPPED,
-        ):
-            with self.subTest(status=status):
-                plugin = _TrackingPlugin()
-                executor = PluginExecutor(plugins=[plugin_factory(plugin)])
-                operation = self._make_operation(status=status)
-                with _invocation(executor, plugin):
-                    # Natural replay delivery of an UpdatedOperationIds result.
-                    executor.on_operation_update(operation)
-                    # The next response carries the already observed state.
-                    executor.on_operation_update(
-                        [operation],
-                        operations={operation.operation_id: operation},
-                        previous_operations={operation.operation_id: operation},
-                    )
-                self.assertEqual(plugin.calls.count("operation_end:op-1"), 1)
-
-    def test_checkpoint_terminal_transition_still_emits(self):
-        previous = self._make_operation(status=OperationStatus.STARTED)
-        operation = self._make_operation(status=OperationStatus.SUCCEEDED)
-        with _invocation(self.executor, self.plugin):
-            self.executor.on_operation_update(
-                [operation],
-                operations={operation.operation_id: operation},
-                previous_operations={previous.operation_id: previous},
-            )
-        self.assertEqual(self.plugin.calls.count("operation_end:op-1"), 1)
-
-    def test_checkpoint_preserves_first_terminal_notification(self):
-        """State can predate notification, e.g. without UpdatedOperationIds."""
-        operation = self._make_operation(status=OperationStatus.SUCCEEDED)
-        with _invocation(self.executor, self.plugin):
-            self.executor.on_operation_update(
-                [operation],
-                operations={operation.operation_id: operation},
-                previous_operations={operation.operation_id: operation},
-            )
-        self.assertEqual(self.plugin.calls.count("operation_end:op-1"), 1)
-
-    def test_terminal_notification_resets_between_invocations(self):
-        operation = self._make_operation(status=OperationStatus.SUCCEEDED)
-        for _ in range(2):
-            executor = PluginExecutor([plugin_factory(self.plugin)])
-            with _invocation(executor, self.plugin):
-                executor.on_operation_update(operation)
-                self.assertEqual(self.plugin.calls.count("operation_end:op-1"), 1)
-
-    def test_plugin_error_mutations_do_not_change_checkpoint_or_later_hooks(
-        self,
-    ) -> None:
-        """Snapshots and terminal hooks must own their mutable error stack traces."""
-        for operation_type, checkpoint_delivery in product(
-            (
-                ServiceOperationType.STEP,
-                ServiceOperationType.CALLBACK,
-                ServiceOperationType.CHAINED_INVOKE,
-                ServiceOperationType.CONTEXT,
-            ),
-            (False, True),
-        ):
-            with self.subTest(
-                operation_type=operation_type, checkpoint_delivery=checkpoint_delivery
-            ):
-                error = ErrorObject(
-                    message="saved error",
-                    type="ExternalError",
-                    data="details",
-                    stack_trace=["original frame"],
-                )
-                operation = Operation(
-                    operation_id="op-1",
-                    operation_type=operation_type,
-                    status=OperationStatus.FAILED,
-                    step_details=(
-                        StepDetails(attempt=2, error=error)
-                        if operation_type is ServiceOperationType.STEP
-                        else None
-                    ),
-                    callback_details=(
-                        CallbackDetails(callback_id="callback-1", error=error)
-                        if operation_type is ServiceOperationType.CALLBACK
-                        else None
-                    ),
-                    chained_invoke_details=(
-                        ChainedInvokeDetails(error=error)
-                        if operation_type is ServiceOperationType.CHAINED_INVOKE
-                        else None
-                    ),
-                    context_details=(
-                        ContextDetails(error=error)
-                        if operation_type is ServiceOperationType.CONTEXT
-                        else None
-                    ),
-                )
-                seen: list[list[str]] = []
-
-                class MutatingPlugin(DurableInstrumentationPlugin):
-                    def on_invocation_start(self, info: InvocationStartInfo) -> None:
-                        snapshot_error = info.updated_operations["op-1"].error
-                        assert snapshot_error is not None
-                        assert snapshot_error.stack_trace is not None
-                        snapshot_error.stack_trace.clear()
-
-                    def on_operation_end(self, info: OperationEndInfo) -> None:
-                        assert info.error is not None
-                        assert info.error.stack_trace is not None
-                        seen.append(list(info.error.stack_trace))
-                        info.error.stack_trace.clear()
-
-                    def on_invocation_end(self, info: InvocationEndInfo) -> None:
-                        snapshot_error = info.operations["op-1"].error
-                        assert snapshot_error is not None
-                        assert snapshot_error.stack_trace is not None
-                        seen.append(list(snapshot_error.stack_trace))
-
-                executor = PluginExecutor([plugin_factory(MutatingPlugin())])
-                with executor.run():
-                    executor.on_invocation_start(
-                        execution_arn="arn:exec",
-                        lambda_context=LAMBDA_CTX,
-                        execution_start_time=START_TS,
-                        is_first_invocation=False,
-                        operations_provider=lambda: {"op-1": operation},
-                        updated_operation_ids=["op-1"],
-                    )
-                    self.assertEqual(error.stack_trace, ["original frame"])
-                    self.assertEqual(seen, [])
-                    # Both delivery paths must snapshot errors before hooks run.
-                    if checkpoint_delivery:
-                        executor.record_end_hooks([operation])
-                        executor.drain_end_hooks()
-                    else:
-                        executor.on_operation_update(operation)
-                    # A later observation must not repeat the terminal hook.
-                    executor.on_operation_update(
-                        [operation],
-                        operations={"op-1": operation},
-                        previous_operations={"op-1": operation},
-                    )
-                    executor.on_invocation_end(
-                        DurableExecutionInvocationOutput(
-                            status=ServiceInvocationStatus.SUCCEEDED,
-                        )
-                    )
-
-                self.assertEqual(seen, [["original frame"]] * 2)
-                self.assertEqual(error.stack_trace, ["original frame"])
 
     def test_non_terminal_status_without_step_details_fires_nothing(self):
         op = self._make_operation(status=OperationStatus.STARTED, step_details=None)

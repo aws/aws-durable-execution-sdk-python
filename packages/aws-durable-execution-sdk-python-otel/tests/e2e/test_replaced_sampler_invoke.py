@@ -79,7 +79,7 @@ def test_replaced_sampler_carrier_and_public_replay(
                 dict(
                     Id=update.operation_id,
                     Type=update.operation_type.value,
-                    SubType=update.sub_type.value,
+                    SubType=update.sub_type,
                     Name=update.name,
                     Status="SUCCEEDED",
                     StartTimestamp=timestamp,

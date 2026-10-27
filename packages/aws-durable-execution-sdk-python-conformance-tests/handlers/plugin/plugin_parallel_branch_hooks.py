@@ -15,6 +15,7 @@ from typing import Any
 from aws_durable_execution_sdk_python.config import ParallelConfig
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationStartInfo,
@@ -33,7 +34,7 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
 
 
 def _is_branch(info: UserFunctionStartInfo | UserFunctionEndInfo) -> bool:
-    return info.sub_type is not None and info.sub_type.name == "PARALLEL_BRANCH"
+    return info.sub_type == OperationSubType.PARALLEL_BRANCH
 
 
 class ParallelBranchPlugin(DurableInstrumentationPlugin):

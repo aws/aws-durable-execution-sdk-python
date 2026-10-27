@@ -29,6 +29,9 @@ Build reliable, long-running AWS Lambda workflows with checkpointed steps, waits
 
 ## Dynamic instrumentation plugins
 
+Upgrading an existing application? Follow the [2.x to 3.0 migration guide](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/migration-2.x-to-3.0.md)
+for dependency versions, before/after examples, provider packaging, and validation.
+
 Instrumentation plugins can be selected at Lambda cold start without importing
 them in the function artifact. Install a provider package in the function or a
 Lambda layer, then set an ordered allow-list:
@@ -166,14 +169,6 @@ error, checkpoints large results when necessary, joins registered branches while
 checkpointing is available, stops and waits for checkpoint processing, then calls
 End before returning the outcome. The caller shuts down the handler executor.
 There is no separate handler-context hook or context-manager plugin API.
-
-Invocation Start exposes the input's visible `UpdatedOperationIds` through
-`InvocationStartInfo.updated_operations`. The operation hooks follow ordinary
-execution and replay. Repeated observations of a terminal checkpoint deliver one
-operation-end hook per invocation. Cached parent scopes can skip their descendant
-hooks when the completion is present only in the invocation input. Plugins that
-require completion delivery for those unvisited operations use the invocation
-snapshots and lifecycle hooks.
 
 When plugins are registered, the worker begins with a copy of the caller's
 context-variable bindings. Start hooks, the handler, serialization, resource

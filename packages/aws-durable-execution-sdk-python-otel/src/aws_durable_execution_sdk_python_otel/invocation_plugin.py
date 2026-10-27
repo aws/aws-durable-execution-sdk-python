@@ -12,9 +12,7 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationEndInfo,
     InvocationStatus,
     InvocationStartInfo,
-    OperationChangeInfo,
     OperationEndInfo,
-    OperationInfo,
     OperationStartInfo,
     OperationStatus,
     OperationType,
@@ -24,7 +22,6 @@ from aws_durable_execution_sdk_python.plugin import (
 )
 from opentelemetry import context, trace
 from opentelemetry.context import Context
-from opentelemetry.sdk.trace import Span as SdkSpan
 from opentelemetry.sdk.trace import Tracer as SdkTracer
 from opentelemetry.sdk.trace.sampling import Sampler
 from opentelemetry.trace import (
@@ -37,18 +34,12 @@ from opentelemetry.trace import (
     TraceState,
 )
 
-from aws_durable_execution_sdk_python_otel._invocation_state import (
-    InvocationFinalization,
-    completed_input_parents,
-    terminal_updates,
-)
 from aws_durable_execution_sdk_python_otel.context_extractors import (
     ContextExtractor,
     ExtractedContext,
     _ensure_extracted_context,
     xray_context_extractor,
 )
-from aws_durable_execution_sdk_python_otel._flush import flush_provider
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
     derive_workflow_span_id,
@@ -63,6 +54,9 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
 )
 from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
+)
+from aws_durable_execution_sdk_python_otel.exception_events import (
+    record_error_object_exception,
 )
 from aws_durable_execution_sdk_python_otel.execution_root import ExecutionRoot
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
@@ -204,16 +198,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # owns is released through _detach_context so the plugin never leaves a
         # scope on the context stack.
         self._context_tokens: dict[str, tuple[int, object]] = {}
-        self._pending_completions: dict[str, OperationInfo] = {}
-        self._ended_operation_ids: set[str] = set()
-        self._ending_operation_ids: set[str] = set()
-        self._finalization: InvocationFinalization | None = None
-        self._failed_operation_ids: set[str] = set()
-        self._exception_recorded_spans: dict[str, Span] = {}
-        self._completion_end_timestamps: dict[str, int] = {}
-        self._pending_operation_ends: dict[str, dict[str, OperationInfo]] = {}
-        self._input_parent_refs: dict[str, OperationInfo] = {}
-        self._completed_parent_spans: dict[str, Span] = {}
         self._operation_spans_lock = threading.RLock()
         self._tracing_enabled = False
 
@@ -424,13 +408,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         raise ValueError("No parent span found")
 
-    def _completion_parent_span(self, parent_id: str | None) -> Span | None:
-        """Prefer the current segment, retaining its identity after context End."""
-        with self._operation_spans_lock:
-            return self._operation_spans.get(parent_id) or (
-                self._completed_parent_spans.get(parent_id) if parent_id else None
-            )
-
     def _invocation_parent_context(self) -> Context:
         """Return same-trace ambient context, else execution ancestor context."""
         execution_trace_context = self._execution_trace_context
@@ -579,28 +556,14 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                     links=links,
                 )
             self._operation_spans[registry_key] = span
-            pending_ends = (
-                self._pending_operation_ends.pop(registry_key, {})
-                if registry_key is not None
-                else {}
-            )
             if operation_id is None:
                 self._span_time_floor_ns = span_start_time
 
         logger.debug("Started OTel span: %s", span)
-        # Registration and dequeue share the lock, so an arriving completion
-        # either sees its parent or is drained here. Do not hold it in callbacks.
-        for pending_end in pending_ends.values():
-            self._render_operation_end(pending_end)
         return span
 
     def _end_span(
-        self,
-        operation_id: str | None,
-        end_timestamp: datetime.datetime | None = None,
-        *,
-        exception: Exception | None = None,
-        operation_completion: bool = False,
+        self, operation_id: str | None, end_timestamp: datetime.datetime | None = None
     ):
         """End and unregister the active span for an operation ID.
 
@@ -609,38 +572,14 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 span.
             end_timestamp: Optional durable end timestamp to use as the span end
                 time. When omitted, OpenTelemetry uses the current time.
-            exception: Existing failure details to record at the same normalized
-                timestamp as the span end.
-            operation_completion: Deduplicate the terminal exception event when
-                retrying a completion whose prior end failed.
         """
         logger.debug("Ending OTel span: operation_id=%s", operation_id)
         with self._operation_spans_lock:
-            span = self._operation_spans.get(operation_id)
+            span = self._operation_spans.pop(operation_id, None)
         if span:
             # the span is not going to be populated if it has the same end_time and start_time
-            with self._operation_spans_lock:
-                end_time = (
-                    self._completion_end_timestamps.get(operation_id)
-                    if operation_completion and operation_id is not None
-                    else None
-                )
-                if end_time is None:
-                    end_time = self._next_ordered_timestamp(end_timestamp)
-                    if operation_completion and operation_id is not None:
-                        self._completion_end_timestamps[operation_id] = end_time
-            if exception is not None and (
-                not operation_completion
-                or operation_id is None
-                or self._exception_recorded_spans.get(operation_id) is not span
-            ):
-                span.record_exception(exception, timestamp=end_time)
-                if operation_completion and operation_id is not None:
-                    self._exception_recorded_spans[operation_id] = span
+            end_time = self._next_ordered_timestamp(end_timestamp)
             span.end(end_time=end_time)
-            with self._operation_spans_lock:
-                if self._operation_spans.get(operation_id) is span:
-                    del self._operation_spans[operation_id]
             logger.debug("Ended OTel span: %s", span)
 
     # ------------------------------------------------------------------
@@ -761,12 +700,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             name="Invocation",
             attributes=self._extract_attributes(info),
         )
-        # A terminal checkpoint can still use ReplayChildren. Give the handler
-        # a chance to register its current segment before using an old identity.
-        self._input_parent_refs = {
-            parent.operation_id: parent for parent in completed_input_parents(info)
-        }
-        self._remember_completions(info.updated_operations)
 
         # Last, so that everything this hook makes current is accounted for.
         # Start and End now run in the same worker Context. Attach the
@@ -869,106 +802,36 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             self._release_invocation_scope()
             return
 
-        finalization = InvocationFinalization()
-        self._finalization = finalization
         try:
-            # Release owner bindings before invoking customer span processors.
-            finalization.run(self._detach_remaining_contexts)
-            finalization.run(lambda: self._end_invocation_spans(info))
+            # Start and End share the owner Context. Release its bindings before
+            # span processors run while closing this invocation's spans.
+            self._detach_remaining_contexts()
+            self._end_invocation_spans(info)
         finally:
-            try:
-                finalization.run(self._release_invocation_scope)
-                finalization.run(self._force_flush)
-            finally:
-                self._finalization = None
-        finalization.raise_errors()
+            self._release_invocation_scope()
+            # Flush before Lambda freeze.
+            self._force_flush()
 
     def _end_invocation_spans(self, info: InvocationEndInfo) -> None:
-        """Finish each phase even when another completion or root export fails."""
-        finalization = self._finalization
-        assert finalization is not None
-        finalization.run(self._drain_pending_completions)
-        # Failed completions already exhausted their bounded attempts. Do not
-        # retry them a third time as ordinary open-span cleanup.
+        """End this invocation's open spans and export the Workflow span."""
+        # Spans are registered parent-first, so close pending spans in reverse
+        # order to keep every child contained within its parent.
         with self._operation_spans_lock:
             operation_ids = list(reversed(self._operation_spans))
             incomplete_attempt_span_keys = set(self._incomplete_attempt_span_keys)
         for operation_id in operation_ids:
-            if operation_id and operation_id not in self._pending_completions:
-                finalization.run(
-                    lambda: self._finish_open_span(
-                        operation_id, operation_id in incomplete_attempt_span_keys
+            if operation_id:
+                span = self._get_span(operation_id)
+                if (
+                    operation_id in incomplete_attempt_span_keys
+                    and span is not None
+                    and span.is_recording()
+                ):
+                    span.set_attribute(
+                        "durable.span.truncated_at_invocation_boundary", True
                     )
-                )
-        finalization.run(lambda: self._finish_invocation_span(info))
-        if info.status in _TERMINAL_INVOCATION_STATUSES:
-            finalization.run(lambda: self._export_workflow_span(info))
+                self._end_span(operation_id)
 
-    def _finish_open_span(self, operation_id: str, incomplete_attempt: bool) -> None:
-        span = self._get_span(operation_id)
-        if incomplete_attempt and span is not None and span.is_recording():
-            span.set_attribute("durable.span.truncated_at_invocation_boundary", True)
-        self._end_span(operation_id)
-
-    def _drain_pending_completions(self) -> None:
-        """Drain visible completions; the finalization ledger bounds retries."""
-        with self._operation_spans_lock:
-            pending = tuple(self._pending_completions.values())
-        for operation in pending:
-            self._render_operation_end(operation)
-        # Actual replay parent segments drain their children on registration.
-        # Only now can an input completion with no such segment use the known
-        # completed checkpoint's identity.
-        pending_ends: list[OperationInfo] = []
-        with self._operation_spans_lock:
-            for parent_id in tuple(self._pending_operation_ends):
-                parent = self._input_parent_refs.get(parent_id)
-                if parent is None or parent_id in self._operation_spans:
-                    continue
-                parent_context = self._operation_link_context(parent_id)
-                if parent_context is not None:
-                    self._operation_spans[parent_id] = DurableParentSpan(
-                        parent_context, start_time=parent.start_time
-                    )
-                    pending_ends.extend(
-                        self._pending_operation_ends.pop(parent_id).values()
-                    )
-        for pending_end in pending_ends:
-            self._render_operation_end(pending_end)
-
-        invocation_span = self._get_span(None)
-        if invocation_span is None and self._pending_operation_ends:
-            raise ValueError("No invocation span available for completion fallback")
-        while True:
-            with self._operation_spans_lock:
-                if not self._pending_operation_ends:
-                    break
-                # Materialize pending ancestors before their descendants. A
-                # cycle has no outermost entry, so break it with one fallback.
-                pending_ids = {
-                    operation_id
-                    for group in self._pending_operation_ends.values()
-                    for operation_id in group
-                }
-                parent_id = next(
-                    (
-                        key
-                        for key in self._pending_operation_ends
-                        if key not in pending_ids
-                    ),
-                    next(iter(self._pending_operation_ends)),
-                )
-                operations = self._pending_operation_ends.pop(parent_id)
-            for operation in operations.values():
-                logger.warning(
-                    "Using invocation fallback parent for operation %s: parent %s "
-                    "has no available span",
-                    operation.operation_id,
-                    parent_id,
-                )
-                self._render_operation_end(operation, fallback_parent=invocation_span)
-
-    def _finish_invocation_span(self, info: InvocationEndInfo) -> None:
         invocation_span = self._get_span(None)
         if invocation_span:
             invocation_span.set_attribute(
@@ -992,6 +855,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # end the invocation span
         self._end_span(None)
 
+        # The Workflow span (execution view) is a non-recording placeholder
+        # during the invocation, so only a terminal status materializes and ends
+        # the recording span. SUCCEEDED -> OK, FAILED -> ERROR; RETRY/PENDING are
+        # non-terminal and leave it unexported until a later terminal invocation.
+        if info.status in _TERMINAL_INVOCATION_STATUSES:
+            self._export_workflow_span(info)
+
     def _force_flush(self) -> None:
         """Flush pending spans, containing any error the flush raises.
 
@@ -1003,7 +873,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if not hasattr(self._provider, "force_flush"):
             return
         try:
-            flush_provider(self._provider)
+            self._provider.force_flush()
         except Exception:  # noqa: BLE001
             logger.exception("force_flush failed at invocation end")
 
@@ -1033,15 +903,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._detach_remaining_contexts()
         unbind_invocation(self)
         self._tracing_enabled = False
-        with self._operation_spans_lock:
-            self._pending_operation_ends.clear()
-            self._pending_completions.clear()
-            self._ending_operation_ids.clear()
-            self._failed_operation_ids.clear()
-            self._exception_recorded_spans.clear()
-            self._completion_end_timestamps.clear()
-            self._input_parent_refs.clear()
-            self._completed_parent_spans.clear()
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """Called when an operation begins. Creates a span for the operation."""
@@ -1081,122 +942,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         invocation is completing an operation that began earlier, so a short
         continuation span with a fresh span ID is created and ended.
         """
-        self._render_operation_end(info)
-
-    def on_operation_change(self, info: OperationChangeInfo) -> None:
-        """Remember checkpoint completions not already exported by their End hook."""
-        if not self._tracing_enabled:
-            return
-        self._remember_completions(info.updated_operations)
-
-    def _remember_completions(self, updates: dict[str, OperationInfo]) -> None:
-        with self._operation_spans_lock:
-            for operation_id, operation in terminal_updates(updates).items():
-                if operation_id in self._ended_operation_ids:
-                    continue
-                self._pending_completions[operation_id] = operation
-                if operation.parent_id is not None:
-                    # Index by parent so replay registration drains children
-                    # inside that actual segment, without scanning other input.
-                    self._pending_operation_ends.setdefault(operation.parent_id, {})[
-                        operation_id
-                    ] = operation
-
-    def _render_operation_end(
-        self, info: OperationInfo, *, fallback_parent: Span | None = None
-    ) -> None:
-        """Render or defer one delivery without re-entering a public hook."""
         logger.debug("Durable operation ended: %s", info)
         if not self._tracing_enabled:
             return
-        with self._operation_spans_lock:
-            if info.operation_id in self._ending_operation_ids:
-                return
-            span = self._operation_spans.get(info.operation_id)
-            # ReplayChildren and virtual contexts can open another segment in
-            # this invocation after their logical operation already completed.
-            # Their checkpointless End closes that segment; a repeated durable
-            # checkpoint must not close it while its user function is running.
-            ends_active_context = (
-                info.operation_type is OperationType.CONTEXT
-                and info.start_time is None
-                and (
-                    info.is_replayed
-                    or info.operation_id not in self._context_operation_replays
-                )
-                and span is not None
-                and span.is_recording()
-            )
-            if (
-                info.operation_id in self._ended_operation_ids
-                and not ends_active_context
-                and self._pending_completions.get(info.operation_id) != info
-            ):
-                return
-            # An already-exported logical context may have a new segment whose
-            # finalization failed. Keep that exact End retryable, without letting
-            # an old checkpoint consume the segment in its place.
-            self._pending_completions[info.operation_id] = info
-            if (
-                span is None
-                and info.parent_id is not None
-                and self._completion_parent_span(info.parent_id) is None
-                and fallback_parent is None
-            ):
-                self._pending_operation_ends.setdefault(info.parent_id, {})[
-                    info.operation_id
-                ] = info
-                return
-            finalization = self._finalization
-            if finalization is not None and not finalization.claim_operation(
-                info.operation_id
-            ):
-                return
-            self._ending_operation_ids.add(info.operation_id)
-        try:
-            self._finish_operation_end(info, span, fallback_parent)
-            with self._operation_spans_lock:
-                self._ended_operation_ids.add(info.operation_id)
-                self._failed_operation_ids.discard(info.operation_id)
-                self._pending_completions.pop(info.operation_id, None)
-                self._exception_recorded_spans.pop(info.operation_id, None)
-                self._completion_end_timestamps.pop(info.operation_id, None)
-                if info.parent_id is not None:
-                    siblings = self._pending_operation_ends.get(info.parent_id)
-                    if siblings is not None:
-                        siblings.pop(info.operation_id, None)
-                        if not siblings:
-                            del self._pending_operation_ends[info.parent_id]
-        except BaseException as error:
-            with self._operation_spans_lock:
-                self._failed_operation_ids.add(info.operation_id)
-                if finalization is not None:
-                    finalization.operation_failed(info.operation_id, error)
-            if finalization is None:
-                raise
-        finally:
-            with self._operation_spans_lock:
-                self._ending_operation_ids.discard(info.operation_id)
-        if finalization is not None and finalization.can_retry(info.operation_id):
-            # Retry before falling back to a completed-parent reference, so
-            # descendants keep this invocation's actual parent segment.
-            self._render_operation_end(info, fallback_parent=fallback_parent)
-
-    def _finish_operation_end(
-        self, info: OperationInfo, span: Span | None, fallback_parent: Span | None
-    ) -> None:
-        """Finish the claimed segment without allowing another End to overtake it."""
-        if isinstance(span, SdkSpan) and span.end_time is not None:
-            span = self._retry_ended_span(info.operation_id, span)
+        span = self._get_span(info.operation_id)
         if span is None:
             # The operation started in a prior invocation. Create a new
             # correlated segment and link it to the deterministic logical
             # operation context shared across invocations.
-            parent_span = fallback_parent or self._completion_parent_span(
-                info.parent_id
-            )
-            if parent_span is None:
-                parent_span = self._resolve_parent_span(info.parent_id)
+            parent_span = self._resolve_parent_span(info.parent_id)
             attributes = self._extract_attributes(info)
             span = self._start_span(
                 operation_id=info.operation_id,
@@ -1209,62 +963,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         else:
             span.set_attributes(self._extract_attributes(info))
 
-        exception: Exception | None = None
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
-            exception = Exception(
-                info.error.message or info.error.type or "Unknown error"
-            )
-        elif info.status in (
-            OperationStatus.FAILED,
-            OperationStatus.TIMED_OUT,
-            OperationStatus.STOPPED,
-        ):
-            span.set_status(StatusCode.ERROR)
+            record_error_object_exception(span, info.error)
         elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
-        self._end_span(
-            info.operation_id,
-            info.end_time,
-            exception=exception,
-            operation_completion=True,
-        )
-        if info.operation_type is OperationType.CONTEXT:
-            with self._operation_spans_lock:
-                self._completed_parent_spans[info.operation_id] = DurableParentSpan(
-                    span.get_span_context(), start_time=info.start_time
-                )
-
-    def _retry_ended_span(self, operation_id: str, failed: SdkSpan) -> Span:
-        """Recreate a span whose processor failed after OTel marked it ended."""
-        parent_context = self._with_sampling(Context())
-        if failed.parent is not None:
-            parent_context = self._with_sampling(
-                trace.set_span_in_context(DurableParentSpan(failed.parent), Context())
-            )
-        failed_context = failed.get_span_context()
-        with self._id_generator.use_ids(
-            trace_id=failed_context.trace_id, span_id=failed_context.span_id
-        ):
-            span = self._tracer.start_span(
-                name=failed.name,
-                kind=failed.kind,
-                attributes=dict(failed.attributes or {}),
-                start_time=failed.start_time,
-                context=parent_context,
-                links=failed.links,
-            )
-        for event in failed.events:
-            span.add_event(
-                event.name, attributes=event.attributes, timestamp=event.timestamp
-            )
-        span.set_status(failed.status)
-        with self._operation_spans_lock:
-            self._operation_spans[operation_id] = span
-            if self._exception_recorded_spans.get(operation_id) is failed:
-                self._exception_recorded_spans[operation_id] = span
-        return span
+        self._end_span(info.operation_id, info.end_time)
 
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         """Called when a context or step operation starts user code.
@@ -1289,19 +994,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_start should only be called for CONTEXT and STEP operations"
             )
-        if info.operation_type is OperationType.CONTEXT:
-            with self._operation_spans_lock:
-                failed_completion = (
-                    self._pending_completions.get(info.operation_id)
-                    if info.operation_id in self._failed_operation_ids
-                    else None
-                )
-            # A failed completed segment must not be mistaken for an incomplete
-            # segment to continue or replaced by a fresh replay segment. Only
-            # explicitly failed Ends are retried here; input snapshots still
-            # wait for their normal operation/parent hooks or invocation End.
-            if failed_completion is not None:
-                self._render_operation_end(failed_completion)
         if info.operation_type is OperationType.STEP:
             parent_span = self._get_span(
                 info.operation_id
@@ -1392,23 +1084,18 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             and info.outcome is not UserFunctionOutcome.INCOMPLETE
         ):
             span.set_attributes(self._extract_attributes(info))
-            exception: Exception | None = None
             if info.outcome is UserFunctionOutcome.FAILED:
                 span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
-                exception = Exception(
-                    (info.error.message or info.error.type)
-                    if info.error
-                    else "Unknown error"
-                )
+                record_error_object_exception(span, info.error)
             else:
                 span.set_status(StatusCode.OK)
 
             end_timestamp = info.end_time
             if end_timestamp is not None and end_timestamp == info.start_time:
                 end_timestamp += datetime.timedelta(microseconds=1)
-            self._end_span(span_key, end_timestamp, exception=exception)
+            self._end_span(span_key, end_timestamp)
         # Restore the enclosing context by releasing the scope this user
         # function attached. Code that runs after this operation (e.g. between
         # steps in a child context) correlates to its enclosing operation
@@ -1437,7 +1124,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if hasattr(info, "operation_type") and info.operation_type is not None:
             attributes["durable.operation.type"] = info.operation_type.value
         if hasattr(info, "sub_type") and info.sub_type is not None:
-            attributes["durable.operation.subtype"] = info.sub_type.value
+            attributes["durable.operation.subtype"] = info.sub_type
         # STEP user-function spans represent attempts, not durable operations.
         if (
             not (

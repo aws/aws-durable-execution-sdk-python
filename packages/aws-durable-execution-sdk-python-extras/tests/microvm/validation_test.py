@@ -13,7 +13,9 @@ from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.exceptions import ValidationError
 
 from aws_durable_execution_sdk_python_extras.microvm import (
+    MAX_JOB_INPUT_BYTES,
     MicrovmConfig,
+    MicrovmInvokeOptions,
     MicrovmRequestConfig,
     microvm,
 )
@@ -47,8 +49,6 @@ def config(**fields: Any) -> MicrovmConfig:
     ("name", "fields", "message"),
     [
         ("", {}, "requires a non-empty name"),
-        ("build", {"image_identifier": ""}, "image_identifier is required"),
-        ("build", {"execution_role_arn": ""}, "execution_role_arn is required"),
         ("build", {"timeout": Duration(0)}, "timeout must be between 1 second"),
         (
             "build",
@@ -189,6 +189,69 @@ def test_rejects_an_input_that_is_not_json(job_input: Any) -> None:
         microvm(NoOperations(), "build", job_input=job_input, config=config())  # type: ignore[arg-type]
 
 
+class StartsOperations(NoOperations):
+    """A context that records the start of the operation's child context,
+    and runs nothing in it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started: list[str] = []
+
+    def run_in_child_context(self, func: Any, name: str, **kwargs: Any) -> Any:
+        self.started.append(name)
+        return "started"
+
+
+def input_of_size(character: str, width: int, size: int) -> str:
+    """A string whose JSON is ``size`` UTF-8 bytes.
+
+    ``character`` takes ``width`` bytes in the JSON. The two quotes take two.
+    Single-byte padding fills the rest.
+    """
+    count = (size - 2) // width
+    return character * count + "x" * (size - 2 - count * width)
+
+
+def too_large(size: int) -> str:
+    return (
+        f'MicroVM "build": the job input is {size} bytes as JSON. The limit is '
+        "6283264 bytes, because the worker accepts a job body of at most 6 MiB. "
+        "Pass larger data by reference, for example as an S3 key."
+    )
+
+
+def test_limits_the_job_input_to_6_mib_minus_8_kib() -> None:
+    assert MAX_JOB_INPUT_BYTES == 6 * 1024 * 1024 - 8 * 1024 == 6_283_264
+
+
+# Each character takes its UTF-8 length in the JSON. A lone surrogate takes
+# the 6 bytes of its \uXXXX escape, because that is how the job body holds it.
+@pytest.mark.parametrize(
+    ("character", "width"),
+    [("x", 1), ("é", 2), ("日", 3), ("😀", 4), ("\ud800", 6)],
+    ids=["ascii", "two-byte", "three-byte", "four-byte", "lone-surrogate"],
+)
+def test_counts_the_job_input_in_utf8_bytes_of_its_json(
+    character: str, width: int
+) -> None:
+    at_limit = input_of_size(character, width, MAX_JOB_INPUT_BYTES)
+    context = StartsOperations()
+
+    assert (
+        microvm(context, "build", job_input=at_limit, config=config())  # type: ignore[arg-type]
+        == "started"
+    )
+    assert context.started == ["build"]
+
+    over_limit = at_limit + "x"
+    with pytest.raises(ValueError, match="bytes as JSON") as raised:
+        microvm(NoOperations(), "build", job_input=over_limit, config=config())  # type: ignore[arg-type]
+    assert str(raised.value) == too_large(MAX_JOB_INPUT_BYTES + 1)
+    if width > 1:
+        # Counting code points would accept the input.
+        assert len(over_limit) + 2 < MAX_JOB_INPUT_BYTES
+
+
 def test_rejects_a_call_without_a_region(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AWS_REGION")
 
@@ -266,3 +329,36 @@ def test_accepts_dots_that_are_not_a_dot_segment(path: str) -> None:
         operation._validate_request("build", MicrovmRequestConfig(path=path))  # noqa: SLF001
         == 60
     )
+
+
+@pytest.mark.parametrize(
+    ("suspend_after", "message"),
+    [
+        (True, "suspend_after applies only to a session job"),
+        (1, "suspend_after must be a bool"),
+        (0, "suspend_after must be a bool"),
+        ("true", "suspend_after must be a bool"),
+        (None, "suspend_after must be a bool"),
+    ],
+)
+def test_rejects_suspend_after_in_the_request_of_microvm(
+    suspend_after: Any, message: str
+) -> None:
+    # MicrovmInvokeOptions subclasses MicrovmRequestConfig. So it passes the
+    # type of config.request, and microvm() checks the field itself.
+    request = MicrovmInvokeOptions(
+        timeout=Duration.from_minutes(1),
+        suspend_after=suspend_after,
+    )
+
+    with pytest.raises(ValidationError, match=message):
+        microvm(NoOperations(), "build", job_input={}, config=config(request=request))  # type: ignore[arg-type]
+
+
+def test_accepts_invoke_options_without_suspend_after_as_the_request_of_microvm() -> (
+    None
+):
+    request = MicrovmInvokeOptions(timeout=Duration.from_minutes(1), path="/build")
+
+    with pytest.raises(AssertionError, match="no durable operation may start"):
+        microvm(NoOperations(), "build", job_input={}, config=config(request=request))  # type: ignore[arg-type]

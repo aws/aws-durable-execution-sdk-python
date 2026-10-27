@@ -25,6 +25,7 @@ from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmTimeoutError,
 )
 from aws_durable_execution_sdk_python_extras.microvm.job import (
+    MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
 )
 from aws_durable_execution_sdk_python_extras.microvm.operation import microvm
@@ -49,6 +50,7 @@ __all__ = [
     "DEFAULT_AUTO_SUSPEND_IDLE_SECONDS",
     "DEFAULT_MICROVM_JOB_PATH",
     "DEFAULT_MICROVM_PORT",
+    "MAX_JOB_INPUT_BYTES",
     "MAX_MICROVM_DURATION_SECONDS",
     "MAX_RUN_HOOK_PAYLOAD_LENGTH",
     "MicrovmBaseConfig",

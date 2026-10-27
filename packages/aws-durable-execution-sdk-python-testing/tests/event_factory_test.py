@@ -361,6 +361,7 @@ def test_create_context_failed():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        include_execution_data=True,
     )
     event = Event.create_context_event(context)
 
@@ -574,6 +575,7 @@ def test_create_step_failed():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        include_execution_data=True,
     )
     event = Event.create_step_event(context)
 
@@ -683,6 +685,7 @@ def test_create_chained_invoke_failed():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        include_execution_data=True,
     )
     event = Event.create_chained_invoke_event(context)
 
@@ -708,6 +711,7 @@ def test_create_chained_invoke_timed_out():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        include_execution_data=True,
     )
     event = Event.create_chained_invoke_event(context)
 
@@ -736,6 +740,7 @@ def test_create_chained_invoke_stopped():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        include_execution_data=True,
     )
     event = Event.create_chained_invoke_event(context)
 
@@ -844,6 +849,7 @@ def test_create_callback_failed():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        include_execution_data=True,
     )
     event = Event.create_callback_event(context)
 
@@ -878,8 +884,10 @@ def test_callback_failure_history_projection_preserves_sdk_state(
         include_execution_data=include_data,
     )
     event = Event.create_callback_event(context)
-    expected = {"Truncated": not (include_data and not has_error)}
-    if has_error or include_data:
+    # Preserve main's IncludeExecutionData contract: omitted data must not leak
+    # an error payload, while detailed history includes even an empty payload.
+    expected = {"Truncated": not include_data}
+    if include_data:
         expected["Payload"] = error.to_dict() if error else {}
     assert event.callback_failed_details.error.to_dict() == expected
     assert operation.callback_details.error is error
@@ -907,7 +915,7 @@ def test_callback_timeout_history_projection_is_unchanged():
         include_execution_data=True,
     )
     event = Event.create_callback_event(context)
-    assert event.callback_timed_out_details.error.to_dict() == {"Truncated": True}
+    assert event.callback_timed_out_details.error.to_dict() == {"Truncated": False}
 
 
 def test_create_callback_timed_out():
@@ -928,6 +936,7 @@ def test_create_callback_timed_out():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        include_execution_data=True,
     )
     event = Event.create_callback_event(context)
 
@@ -1047,7 +1056,7 @@ def test_event_error_from_details():
 
     error_obj = ErrorObject.from_message("Test error")
     details = StepDetails(error=error_obj)
-    event_error = EventError.from_details(details)
+    event_error = EventError.from_details(details, include=True)
     assert event_error.payload.message == "Test error"
 
 
@@ -1543,6 +1552,7 @@ class TestFromOperationFinished:
                 execution_timeout_seconds=300,
                 execution_retention_period_days=7,
             ),
+            include_execution_data=True,
         )
         event = Event.create_event_terminated(context)
 
@@ -1676,6 +1686,7 @@ class TestFromOperationFinished:
                 execution_timeout_seconds=300,
                 execution_retention_period_days=7,
             ),
+            include_execution_data=True,
         )
         event = Event.create_event_terminated(context)
 
@@ -1749,6 +1760,7 @@ class TestFromOperationFinished:
                 execution_timeout_seconds=300,
                 execution_retention_period_days=7,
             ),
+            include_execution_data=True,
         )
         event = Event.create_event_terminated(context)
 
@@ -1823,6 +1835,7 @@ class TestFromOperationFinished:
                 execution_timeout_seconds=300,
                 execution_retention_period_days=7,
             ),
+            include_execution_data=True,
         )
         event = Event.create_event_terminated(context)
 
@@ -2158,3 +2171,190 @@ def test_create_chained_invoke_event_started_omits_the_tenant_id():
     assert event.chained_invoke_started_details is not None
     assert event.chained_invoke_started_details.tenant_id is None
     assert "TenantId" not in event.to_dict()["ChainedInvokeStartedDetails"]
+
+
+# region error-redaction-tests
+_REDACTION_START_INPUT = StartDurableExecutionInput(
+    account_id="123",
+    function_name="test",
+    function_qualifier="$LATEST",
+    execution_name="test",
+    execution_timeout_seconds=300,
+    execution_retention_period_days=7,
+)
+
+_OPERATION_ERROR_CASES = [
+    (OperationType.STEP, OperationStatus.FAILED, "step_details", "step_failed_details"),
+    (
+        OperationType.CONTEXT,
+        OperationStatus.FAILED,
+        "context_details",
+        "context_failed_details",
+    ),
+    (
+        OperationType.CHAINED_INVOKE,
+        OperationStatus.FAILED,
+        "chained_invoke_details",
+        "chained_invoke_failed_details",
+    ),
+    (
+        OperationType.CHAINED_INVOKE,
+        OperationStatus.TIMED_OUT,
+        "chained_invoke_details",
+        "chained_invoke_timed_out_details",
+    ),
+    (
+        OperationType.CHAINED_INVOKE,
+        OperationStatus.STOPPED,
+        "chained_invoke_details",
+        "chained_invoke_stopped_details",
+    ),
+    (
+        OperationType.CALLBACK,
+        OperationStatus.FAILED,
+        "callback_details",
+        "callback_failed_details",
+    ),
+    (
+        OperationType.CALLBACK,
+        OperationStatus.TIMED_OUT,
+        "callback_details",
+        "callback_timed_out_details",
+    ),
+]
+
+
+def _assert_error_redaction(error: EventError | None, include: bool) -> None:
+    """Assert the payload is present only when execution data is included."""
+    assert error is not None
+    assert error.truncated is (not include)
+    if include:
+        assert error.payload is not None
+        assert error.payload.message == "boom"
+    else:
+        assert error.payload is None
+        assert "Payload" not in error.to_dict()
+
+
+@pytest.mark.parametrize("include", [True, False])
+@pytest.mark.parametrize(
+    ("operation_type", "status", "details_attr", "event_details_attr"),
+    _OPERATION_ERROR_CASES,
+)
+def test_operation_error_event_redacts_payload_unless_included(
+    operation_type, status, details_attr, event_details_attr, include
+):
+    operation = create_mock_operation("op-1", status=status)
+    operation.operation_type = operation_type
+    operation.end_timestamp = datetime.now(UTC)
+    details = Mock()
+    details.result = None
+    details.error = ErrorObject.from_message("boom")
+    setattr(operation, details_attr, details)
+    context = EventCreationContext.create(
+        operation=operation,
+        event_id=1,
+        durable_execution_arn="arn:test",
+        start_input=_REDACTION_START_INPUT,
+        include_execution_data=include,
+    )
+
+    event = Event.create_event_terminated(context)
+
+    _assert_error_redaction(getattr(event, event_details_attr).error, include)
+
+
+@pytest.mark.parametrize("include", [True, False])
+@pytest.mark.parametrize(
+    ("status", "event_details_attr"),
+    [
+        (OperationStatus.FAILED, "execution_failed_details"),
+        (OperationStatus.TIMED_OUT, "execution_timed_out_details"),
+        (OperationStatus.STOPPED, "execution_stopped_details"),
+    ],
+)
+def test_execution_error_event_redacts_payload_unless_included(
+    status, event_details_attr, include
+):
+    from aws_durable_execution_sdk_python.execution import (
+        DurableExecutionInvocationOutput,
+        InvocationStatus,
+    )
+
+    operation = create_mock_operation("exec-1", status=status)
+    operation.end_timestamp = datetime.now(UTC)
+    context = EventCreationContext.create(
+        operation=operation,
+        event_id=1,
+        durable_execution_arn="arn:test",
+        start_input=_REDACTION_START_INPUT,
+        result=DurableExecutionInvocationOutput(
+            status=InvocationStatus.FAILED, error=ErrorObject.from_message("boom")
+        ),
+        include_execution_data=include,
+    )
+
+    event = Event.create_execution_event(context)
+
+    _assert_error_redaction(getattr(event, event_details_attr).error, include)
+
+
+@pytest.mark.parametrize("include", [True, False])
+def test_event_error_factories_redact_payload_unless_included(include):
+    from aws_durable_execution_sdk_python.execution import (
+        DurableExecutionInvocationOutput,
+        InvocationStatus,
+    )
+
+    error = ErrorObject.from_message("boom")
+    output = DurableExecutionInvocationOutput(
+        status=InvocationStatus.FAILED, error=error
+    )
+
+    for event_error in (
+        EventError.from_details(StepDetails(error=error), include=include),
+        EventError.from_durable_execution_invocation_output(output, include=include),
+    ):
+        _assert_error_redaction(event_error, include)
+
+
+@pytest.mark.parametrize("include", [True, False])
+def test_event_result_factory_redacts_payload_unless_included(include):
+    from aws_durable_execution_sdk_python.execution import (
+        DurableExecutionInvocationOutput,
+        InvocationStatus,
+    )
+
+    output = DurableExecutionInvocationOutput(
+        status=InvocationStatus.SUCCEEDED, result="ok"
+    )
+
+    result = EventResult.from_durable_execution_invocation_output(
+        output, include=include
+    )
+
+    assert result.payload == ("ok" if include else None)
+    assert result.truncated is (not include)
+
+
+@pytest.mark.parametrize("include", [True, False])
+def test_event_input_factory_redacts_payload_unless_included(include):
+    start_input = StartDurableExecutionInput(
+        account_id="123",
+        function_name="test",
+        function_qualifier="$LATEST",
+        execution_name="test",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        input='{"test": "data"}',
+    )
+
+    event_input = EventInput.from_start_durable_execution_input(
+        start_input, include=include
+    )
+
+    assert event_input.payload == ('{"test": "data"}' if include else None)
+    assert event_input.truncated is (not include)
+
+
+# endregion error-redaction-tests
