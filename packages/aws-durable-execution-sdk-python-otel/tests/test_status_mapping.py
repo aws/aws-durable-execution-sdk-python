@@ -32,6 +32,9 @@ from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
     OtelPluginConfig,
 )
+from aws_durable_execution_sdk_python_otel.exception_events import (
+    exception_from_error_object,
+)
 
 
 START = datetime(2026, 10, 1, tzinfo=UTC)
@@ -354,6 +357,31 @@ def test_failed_operation_without_type_falls_back(
     span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
     attributes = _exception_attributes(span)
     assert attributes["exception.message"] == "no type here"
+    assert attributes["exception.type"] == "Exception"
+
+
+@pytest.mark.parametrize("error_type", [None, ""])
+@pytest.mark.parametrize("message", [None, ""])
+def test_exception_from_error_object_uses_fallback_message(
+    error_type: str | None,
+    message: str | None,
+) -> None:
+    """A missing or empty type with an empty message uses the default."""
+    error = ErrorObject(message, error_type, None, None)
+    assert str(exception_from_error_object(error)) == "Unknown error"
+
+
+def test_failed_operation_without_type_or_message_uses_fallback(
+    instrumented_view: InstrumentedView,
+) -> None:
+    """Without type or message metadata the event uses the default message."""
+    plugin, exporter = instrumented_view
+    _start_invocation(plugin)
+    plugin.on_operation_end(_operation_end_info(ErrorObject(None, None, None, None)))
+    _end_invocation(plugin)
+    span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
+    attributes = _exception_attributes(span)
+    assert attributes["exception.message"] == "Unknown error"
     assert attributes["exception.type"] == "Exception"
 
 
