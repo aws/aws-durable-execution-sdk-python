@@ -155,6 +155,7 @@ def test_my_example(durable_runner):
 - Pass a cloud-test input as an object, such as a `dict`. The cloud runner encodes the input with `json.dumps`. So a string that already holds JSON is encoded again, and the handler receives a `str` instead of a `dict`.
 - Start a MicroVM test with `run_async`, and read its result with `wait_for_result`. The synchronous `run` uses botocore's 60-second read timeout, and botocore sends the Invoke again after a read timeout. Each resend starts a new execution, which launches its own MicroVM.
 - `test_microvm_session_suspend.py` checks that an idle session MicroVM suspends and resumes. The function's role needs `lambda:GetMicrovm` and `lambda:ResumeMicrovm`, and the MicroVM execution role needs `lambda:SuspendMicrovm` on the image.
+- `test_microvm_session_suspend_after.py` checks that the worker suspends a session MicroVM after a job with `suspend_after=True`, in a session without auto-suspend, and that the next job resumes it. It needs the same permissions as `test_microvm_session_suspend.py`.
 
 ### Cloud-Only Tests
 `@pytest.mark.durable_execution(..., cloud_only=True)` marks a test that needs a service the local runner cannot provide, such as a MicroVM. Local mode skips the test with the reason `cloud_only: runs only against the deployed function`. Cloud mode runs it.

@@ -73,6 +73,22 @@ _REQUEST_TIMEOUT_SECONDS = 10.0
 _AUTH_TOKEN_MINUTES = 5
 _PORT_HEADER = "X-aws-proxy-port"
 
+SUSPEND_AFTER_HEADER = "X-Microvm-Suspend-After"
+"""The header with which a worker acknowledges ``suspendAfter`` in its 202
+answer. Its value is :data:`SUSPEND_AFTER_ACCEPTED`. The JavaScript SDK
+uses the same header."""
+
+SUSPEND_AFTER_ACCEPTED = "accepted"
+
+_PROXY_ERROR_HEADER = "x-aws-proxy-error"
+_CONNECT_FAILED = "MICROVM_CONNECT_FAILED"
+"""The endpoint answers HTTP 502 with ``x-aws-proxy-error:
+MICROVM_CONNECT_FAILED`` while the MicroVM is suspending or suspended. A
+probe measured the answer in about 60 milliseconds."""
+
+_SUSPEND_CHECK_INTERVAL_SECONDS = 2.0
+"""The shortest time between two calls of ``SendJobOptions.suspend_check``."""
+
 _T = TypeVar("_T")
 
 
@@ -239,6 +255,32 @@ class SendJobOptions:
     seconds, so the wait for a resume never extends the window. ``None``
     from it keeps the current endpoint.
     """
+    suspend_check: Callable[[float], str | None] | None = None
+    """Resume the MicroVM if it is suspended, and return its current
+    endpoint.
+
+    A session job without :attr:`recheck` sets it. A worker can suspend the
+    MicroVM after a ``suspend_after`` job, and the session can lose the
+    record of that job on replay. A suspended or suspending MicroVM gets no
+    answer to a request, or its endpoint answers HTTP 502 with
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. So the next attempt calls
+    it after either sign, at most once per 2 seconds. A booting MicroVM's
+    endpoint holds the request until the worker listens. A boot gives no
+    such sign, unless the worker takes more than 10 seconds to start
+    listening. Then the first delivery gets no answer, and the operation
+    makes one ``GetMicrovm`` call. It receives what remains of the retry
+    window, in seconds. ``None`` from it keeps the current endpoint.
+    """
+    unavailable_note: Callable[[], str | None] | None = None
+    """A sentence to add to the message of
+    :class:`MicrovmEndpointUnavailableError`, or ``None``."""
+    on_suspend_after_ignored: Callable[[], None] | None = None
+    """Called when the answer that accepted the job lacks the header
+    ``X-Microvm-Suspend-After: accepted``.
+
+    A ``suspend_after`` job sets it. A worker that supports the field sends
+    the header. An older worker ignores the field, and the MicroVM keeps
+    running after the job."""
 
 
 def require_time_for_call(remaining_seconds: Callable[[], float | None]) -> None:
@@ -315,6 +357,18 @@ def send_job(options: SendJobOptions) -> int:
     The endpoint can accept a request before Lambda has sent the ``run``
     hook. So the body carries the MicroVM ID too.
 
+    A session job checks the MicroVM state in one of two ways. With
+    ``recheck``, it checks after any 502, 503, 504, or request without an
+    answer. With ``suspend_check``, it checks only after a 502 with
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED`` or a request without an
+    answer, at most once per 2 seconds. The function then sends the job
+    again to the endpoint that the check reports.
+
+    A ``suspend_after`` job also reads the answer that accepted it. A worker
+    that supports the field answers with ``X-Microvm-Suspend-After:
+    accepted``. Without that header, the function calls
+    ``on_suspend_after_ignored``.
+
     The same job can reach the route more than once:
 
     1. A request reaches the route, and its answer is lost.
@@ -340,8 +394,10 @@ def send_job(options: SendJobOptions) -> int:
             ``ResourceNotFoundException``. It is the error that the client
             raised, unchanged. The request step turns it into
             ``MicrovmStateError``.
-        MicrovmStateError: When ``recheck`` reports that the MicroVM can no
-            longer run a job.
+        MicrovmStateError: When ``recheck`` or ``suspend_check`` reports
+            that the MicroVM can no longer run a job.
+        MicrovmResumeDeniedError: When ``suspend_check`` finds a suspended
+            MicroVM, and ``ResumeMicrovm`` is denied.
         Exception: When ``CreateMicrovmAuthToken`` fails otherwise. The
             message of a botocore error ends with the request ID.
     """
@@ -357,9 +413,11 @@ def send_job(options: SendJobOptions) -> int:
 
     def unavailable() -> Exception:
         elapsed_ms = round((time.monotonic() - started) * 1000)
+        note = options.unavailable_note() if options.unavailable_note else None
         return MicrovmEndpointUnavailableError(
             f"The MicroVM did not accept the job at {options.path} after "
             f"{attempt} attempts in {elapsed_ms} ms. Last failure: {last_failure}."
+            + (f" {note}" if note else "")
         )
 
     def deadline() -> float:
@@ -378,6 +436,7 @@ def send_job(options: SendJobOptions) -> int:
     token = new_token()
     refreshed_token = False
     delay = _INITIAL_DELAY_SECONDS
+    last_suspend_check: float | None = None
 
     while True:
         attempt += 1
@@ -410,6 +469,11 @@ def send_job(options: SendJobOptions) -> int:
             options.logger.info(
                 "MicroVM job accepted", extra={"attempt": attempt, "status": status}
             )
+            if (
+                options.on_suspend_after_ignored is not None
+                and answer.suspend_after != SUSPEND_AFTER_ACCEPTED
+            ):
+                options.on_suspend_after_ignored()
             return status
         if status is None:
             last_failure = answer.failure
@@ -466,6 +530,25 @@ def send_job(options: SendJobOptions) -> int:
                 raise unavailable()
             endpoint = options.recheck(left) or endpoint
             url = _endpoint_url(endpoint, options.path)
+        # A session without the resume mode checks the state only after a
+        # sign of a suspended MicroVM. A booting MicroVM gives no such sign.
+        # The check repeats after each such failure, at most once per 2
+        # seconds. The worker can suspend after the job's first state check,
+        # and the last call to the service wins.
+        if options.suspend_check is not None and (
+            status is None or answer.connect_failed
+        ):
+            now = time.monotonic()
+            if (
+                last_suspend_check is None
+                or now - last_suspend_check >= _SUSPEND_CHECK_INTERVAL_SECONDS
+            ):
+                last_suspend_check = now
+                left = deadline() - now
+                if left <= 0:
+                    raise unavailable()
+                endpoint = options.suspend_check(left) or endpoint
+                url = _endpoint_url(endpoint, options.path)
 
 
 def _create_auth_token(options: SendJobOptions) -> Mapping[str, str]:
@@ -545,6 +628,12 @@ class _Answer:
     """Whether the answer has a ``Location`` header."""
     followed_redirect: bool = False
     """Whether the opener followed a redirect."""
+    connect_failed: bool = False
+    """Whether the endpoint answered 502 with ``x-aws-proxy-error:
+    MICROVM_CONNECT_FAILED``. It answers so for a suspending or suspended
+    MicroVM."""
+    suspend_after: str | None = None
+    """The value of the ``X-Microvm-Suspend-After`` header of a 2xx answer."""
 
 
 def _post_within(
@@ -593,11 +682,21 @@ def _post(
             # An opener that follows redirects reports the URL it reached.
             if response.geturl() != url:
                 return _Answer(response.status, followed_redirect=True)
-            return _Answer(response.status)
+            return _Answer(
+                response.status,
+                suspend_after=response.headers.get(SUSPEND_AFTER_HEADER),
+            )
     except urllib.error.HTTPError as error:
         has_location = bool(error.headers and error.headers.get("Location"))
+        connect_failed = (
+            error.code == 502  # noqa: PLR2004
+            and bool(error.headers)
+            and error.headers.get(_PROXY_ERROR_HEADER) == _CONNECT_FAILED
+        )
         error.close()
-        return _Answer(error.code, has_location=has_location)
+        return _Answer(
+            error.code, has_location=has_location, connect_failed=connect_failed
+        )
     except (OSError, http.client.HTTPException, ValueError) as error:
         # URLError, a refused connection, and a timeout are OSError. An
         # invalid response from the endpoint raises an HTTPException.

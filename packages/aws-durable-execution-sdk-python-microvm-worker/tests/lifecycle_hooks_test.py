@@ -20,8 +20,12 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any
 
+import boto3
 import pytest
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.awsrequest import AWSResponse, HTTPHeaders
+from botocore.config import Config
+from botocore.exceptions import ClientError, ConnectionClosedError, NoCredentialsError
+from botocore.retries.standard import ExponentialBackoff
 
 from aws_durable_execution_sdk_python_microvm_worker import (
     HOOK_PATH_PREFIX,
@@ -60,6 +64,8 @@ WARNING_FIELDS = [
     "terminating",
     "closed",
     "refusingJobs",
+    # The last field, so the first seven keep their order.
+    "trigger",
 ]
 
 
@@ -72,6 +78,7 @@ def assert_warning(
     suspend_hook_arrived: bool = False,
     terminating: bool = False,
     closed: bool = False,
+    trigger: str = "idle",
 ) -> None:
     """Assert that one warning for a failed SuspendMicrovm call has this
     outcome and these fields."""
@@ -85,6 +92,7 @@ def assert_warning(
         "terminating": terminating,
         "closed": closed,
         "refusingJobs": refusing_jobs,
+        "trigger": trigger,
     }
 
 
@@ -96,6 +104,7 @@ def assert_one_warning(
     suspend_hook_arrived: bool = False,
     terminating: bool = False,
     closed: bool = False,
+    trigger: str = "idle",
 ) -> dict[str, Any]:
     """Assert that the worker logged exactly one warning, for one failed
     SuspendMicrovm call, with this outcome and these fields. Returns the
@@ -111,6 +120,7 @@ def assert_one_warning(
         suspend_hook_arrived=suspend_hook_arrived,
         terminating=terminating,
         closed=closed,
+        trigger=trigger,
     )
     return data
 
@@ -304,6 +314,9 @@ class Jobs:
             self.order.append(context.callback_id)
             self.contexts[context.callback_id] = context
         self._release(context.callback_id).wait(WAIT)
+        if isinstance(job_input, dict) and job_input.get("fail"):
+            msg = "the job failed"
+            raise RuntimeError(msg)
         return "done"
 
     def started(self) -> list[str]:
@@ -915,6 +928,286 @@ def test_accepts_jobs_at_once_when_the_resume_hook_arrives_during_the_call(
     assert eventually(lambda: sorted(h.jobs.started()) == ["cb-1", "cb-2"])
 
 
+class LostAnswerService:
+    """Stands in for the Lambda MicroVMs service in a botocore client.
+
+    A ``before-send`` handler answers each attempt instead of HTTP. The
+    first attempt "suspends" the MicroVM. Its answer is lost: the attempt
+    waits until :meth:`thaw`, and then fails with a closed connection, as
+    after a freeze. Each later attempt also "suspends" the MicroVM, answers
+    200, and records the jobs that it would freeze.
+    """
+
+    def __init__(self, listener: Callable[[], MicrovmWorkerListener]) -> None:
+        self._listener = listener
+        self._thawed = threading.Event()
+        self._lock = threading.Lock()
+        self.attempts = 0
+        self.frozen_jobs: list[str] = []
+
+    def install(self, client: Any) -> Any:
+        client.meta.events.register(
+            "before-send.lambda-microvms.SuspendMicrovm", self._send
+        )
+        return client
+
+    def thaw(self) -> None:
+        self._thawed.set()
+
+    def _send(self, **_: Any) -> AWSResponse:
+        with self._lock:
+            self.attempts += 1
+            first = self.attempts == 1
+        if first:
+            self._thawed.wait(WAIT)
+            raise ConnectionClosedError(endpoint_url="https://example.com")
+        with self._lock:
+            self.frozen_jobs.extend(self._listener()._jobs)  # noqa: SLF001
+        headers = HTTPHeaders()
+        headers["Content-Type"] = "application/json"
+        return AWSResponse("https://example.com", 200, headers, _Body(b"{}"))
+
+
+class _Body:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def stream(self, **_: Any) -> Any:
+        yield self._data
+
+
+@pytest.fixture
+def credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+
+@pytest.mark.parametrize("client_kind", ["default", "retrying"])
+def test_sends_no_suspend_attempt_after_the_resume_hook(
+    start: Any,
+    logger: Any,
+    credentials: None,
+    monkeypatch: pytest.MonkeyPatch,
+    client_kind: str,
+) -> None:
+    # 1. The first SuspendMicrovm attempt suspends the MicroVM.
+    # 2. Its answer is lost in the freeze.
+    # 3. The resume hook ends the refusal, and the next job starts.
+    # 4. botocore would then retry the closed connection. The retry would
+    #    suspend the MicroVM with that job inside.
+    # The default client makes one attempt. A caller's client can retry,
+    # and the before-send handler stops its retry after the resume hook.
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    harness: list[Harness] = []
+    service = LostAnswerService(lambda: harness[0].listener)
+    if client_kind == "default":
+        default = worker_module.create_microvms_client
+        monkeypatch.setattr(
+            worker_module,
+            "create_microvms_client",
+            lambda region: service.install(default(region)),
+        )
+        h = start(create_microvms_client=None)
+    else:
+        retrying = service.install(
+            boto3.session.Session().client(
+                "lambda-microvms",
+                region_name="us-east-1",
+                config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
+            )
+        )
+        h = start(create_microvms_client=lambda region: retrying)
+    harness.append(h)
+
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert eventually(lambda: service.attempts == 1)
+    assert h.job("cb-0") == 503
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    service.thaw()
+    h.settle()
+
+    assert service.attempts == 1
+    assert service.frozen_jobs == []
+    # The resume hook has ended the refusal. The failed call starts no new
+    # refusal and no grace period.
+    assert_one_warning(logger, "unknown", refusing_jobs=False)
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert h.job("cb-2") == 202
+    h.finish_job("cb-1")
+    h.finish_job("cb-2")
+    assert eventually(
+        lambda: {c["callbackId"] for c in h.lambda_client.recorded()}
+        == {"cb-1", "cb-2"}
+    )
+    # The next idle time makes a new call, which the resume hook above does
+    # not stop.
+    h.timers.advance(IDLE)
+    h.settle()
+    assert service.attempts == 2
+    assert service.frozen_jobs == []
+
+
+STOPPED = "stopping the suspend call: the MicroVM resumed during it"
+
+
+def stop_lines(logger: Any) -> list[dict[str, Any]]:
+    """The fields of each info line that a resume hook logged when it
+    stopped a SuspendMicrovm call."""
+    return [d for level, m, d in logger.lines if level == "info" and m == STOPPED]
+
+
+class AnsweringService:
+    """Stands in for the Lambda MicroVMs service in a botocore client.
+
+    A ``before-send`` handler counts each attempt and answers 200 instead
+    of HTTP. The worker's own handler runs first. So an attempt that it
+    stops is not counted.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.attempts = 0
+
+    def install(self, client: Any) -> Any:
+        client.meta.events.register(
+            "before-send.lambda-microvms.SuspendMicrovm", self._send
+        )
+        return client
+
+    def _send(self, **_: Any) -> AWSResponse:
+        with self._lock:
+            self.attempts += 1
+        headers = HTTPHeaders()
+        headers["Content-Type"] = "application/json"
+        return AWSResponse("https://example.com", 200, headers, _Body(b"{}"))
+
+
+class SlowClientFactory:
+    """A ``create_microvms_client`` that blocks until :meth:`release`.
+
+    It then returns the default client, with ``service`` installed. So a
+    test can send hooks after the idle time ended and before the first
+    attempt.
+    """
+
+    def __init__(self, service: AnsweringService) -> None:
+        self.service = service
+        self.creating = threading.Event()
+        self._release = threading.Event()
+
+    def __call__(self, region: str) -> Any:
+        self.creating.set()
+        self._release.wait(WAIT)
+        return self.service.install(worker_module.create_microvms_client(region))
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def test_starts_no_attempt_after_a_resume_hook_while_the_client_is_created(
+    start: Any, logger: Any, credentials: None
+) -> None:
+    # The idle time has ended, and the worker still creates the client. A
+    # resume hook now ends the refusal. A job can then start, and an attempt
+    # would freeze it. So the call sends nothing.
+    service = AnsweringService()
+    factory = SlowClientFactory(service)
+    h = start(create_microvms_client=factory)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert factory.creating.wait(WAIT)
+    assert h.job("cb-0") == 503
+    assert h.hook("resume") == 200
+    factory.release()
+    h.settle()
+
+    assert service.attempts == 0
+    data = assert_one_warning(logger, "unknown", refusing_jobs=False)
+    assert data["error"]["name"] == "SuspendResumedError"
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+    # The resume hook asked for the idle time during the call. So the idle
+    # time starts when the call ends, and its call is not stopped.
+    h.advance(IDLE - 0.001)
+    assert service.attempts == 0
+    h.advance(0.001)
+    assert service.attempts == 1
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+
+
+@pytest.mark.parametrize("end", ["resume", "grace"])
+def test_keeps_a_suspend_hook_refusal_that_follows_a_resume_that_stopped_the_call(
+    start: Any, logger: Any, credentials: None, end: str
+) -> None:
+    # The resume hook ends the refusal and stops the call. A suspend hook
+    # then starts a refusal of its own, before the stopped call returns.
+    # Lambda is freezing the MicroVM, so the end of the call keeps that
+    # refusal.
+    service = AnsweringService()
+    factory = SlowClientFactory(service)
+    h = start(create_microvms_client=factory)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert factory.creating.wait(WAIT)
+    assert h.hook("resume") == 200
+    assert h.hook("suspend") == 200
+    factory.release()
+    h.settle()
+
+    assert service.attempts == 0
+    assert_one_warning(logger, "unknown", refusing_jobs=True, suspend_hook_arrived=True)
+    assert h.job("cb-1") == 503
+    if end == "resume":
+        assert h.hook("resume") == 200
+    else:
+        h.advance(GRACE - 0.001)
+        assert h.job("cb-1") == 503
+        h.advance(0.001)
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    # The call had returned before the second resume hook. So that hook
+    # stopped nothing, and logged no stop.
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+
+
+def test_a_second_resume_hook_during_the_call_stops_it_too_and_logs_once(
+    start: Any, logger: Any, credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first attempt is in flight when both resume hooks arrive. Its
+    # answer is lost. botocore would retry it, and the retry would freeze
+    # the next job. The second resume hook must not undo the stop.
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    harness: list[Harness] = []
+    service = LostAnswerService(lambda: harness[0].listener)
+    retrying = service.install(
+        boto3.session.Session().client(
+            "lambda-microvms",
+            region_name="us-east-1",
+            config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
+        )
+    )
+    h = start(create_microvms_client=lambda region: retrying)
+    harness.append(h)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert eventually(lambda: service.attempts == 1)
+    assert h.hook("resume") == 200
+    assert h.hook("resume") == 200
+    service.thaw()
+    h.settle()
+
+    assert service.attempts == 1
+    assert_one_warning(logger, "unknown", refusing_jobs=False)
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert stop_lines(logger) == [{"microvmId": "mvm-1"}]
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+
+
 def test_logs_a_rejected_suspend_accepts_jobs_at_once_and_does_not_retry(
     start: Any, logger: Any
 ) -> None:
@@ -1236,6 +1529,30 @@ def test_a_job_that_ends_before_a_refused_call_has_ended_uses_the_normal_idle_ti
     assert client.suspended == ["mvm-1", "mvm-1"]
 
 
+def test_logs_no_stop_for_a_resume_hook_after_the_call_returned(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The call has returned, and the worker still closes its client. A
+    # resume hook now has no attempt left to stop. So it logs no stop.
+    client = _ClosingClient()
+    monkeypatch.setattr(worker_module, "create_microvms_client", lambda r: client)
+    h = start(create_microvms_client=None)
+
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    assert client.closing.wait(WAIT)
+    assert h.hook("resume") == 200
+    client.release_close.set()
+    h.settle()
+
+    assert client.suspended == ["mvm-1"]
+    assert stop_lines(logger) == []
+    # The resume hook has ended the refusal. So the end of the call starts no
+    # grace period.
+    assert h.listener._cancel_grace_timer is None  # noqa: SLF001
+    assert h.job("cb-1") == 202
+
+
 def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
     start: Any, logger: Any
 ) -> None:
@@ -1486,7 +1803,7 @@ def test_accepts_jobs_after_an_unknown_outcome_when_the_refusal_ended_during_the
         assert logger.messages("warning") == []
     end_failed_call(h)
 
-    expected = {
+    expected: dict[str, Any] = {
         "suspend_hook_arrived": during != "resume",
         "refusing_jobs": False,
     }
@@ -2153,6 +2470,123 @@ def test_refuses_jobs_with_503_after_the_terminate_hook(start: Any) -> None:
 
     assert h.job("cb-1") == 503
     assert not h.started("cb-1")
+
+
+def test_answers_a_resent_known_job_with_202_after_the_terminate_hook(
+    start: Any, logger: Any
+) -> None:
+    # A resend starts nothing. The terminate hook fails the running job's
+    # callback, and the finished job has reported its outcome. So the durable
+    # function learns each outcome from the callback. A 503 would only make
+    # it deliver the job again to a MicroVM that is ending.
+    h = start()
+    h.run_hook()
+    assert h.job("cb-done") == 202
+    h.finish_job("cb-done")
+    assert h.job("cb-running") == 202
+    assert eventually(lambda: h.started("cb-running"))
+    assert h.hook("terminate") == 200
+
+    assert h.job("cb-running") == 202
+    assert h.job("cb-done") == 202
+    assert h.job("cb-new") == 503
+    h.jobs.release_all()
+    assert h.worker.idle(WAIT)
+
+    assert h.jobs.started() == ["cb-done", "cb-running"]
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 2
+    )
+    assert h.lambda_client.recorded() == [
+        {"kind": "success", "callbackId": "cb-done"},
+        terminated_failure("cb-running"),
+    ]
+
+
+@pytest.mark.parametrize("refusal", ["own-suspend", "suspend-hook"])
+def test_answers_a_resent_finished_job_with_202_during_a_suspend_refusal(
+    start: Any, logger: Any, refusal: str
+) -> None:
+    # The job has ended, so a resend starts nothing and cannot freeze with
+    # the MicroVM. A 503 would make the durable function resume the MicroVM
+    # only to get this answer.
+    h = start()
+    h.run_hook(IDLE)
+    assert h.job("cb-done") == 202
+    h.finish_job("cb-done")
+    if refusal == "own-suspend":
+        h.advance(IDLE)
+        assert h.microvms.suspended == ["mvm-1"]
+    else:
+        assert h.hook("suspend") == 200
+
+    assert h.job("cb-done") == 202
+    assert h.job("cb-new") == 503
+
+    assert h.jobs.started() == ["cb-done"]
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 1
+    )
+    # The duplicate did not end the refusal.
+    assert h.job("cb-new") == 503
+
+
+def test_refuses_a_resent_running_job_with_503_during_a_suspend_refusal(
+    start: Any, logger: Any
+) -> None:
+    # The running job can freeze with the MicroVM. A 202 would end the
+    # delivery, and nothing would resume the MicroVM. After the 503, the
+    # durable function checks the state, resumes the MicroVM, and delivers
+    # the job again.
+    h = start()
+    h.run_hook(IDLE)
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+
+    assert h.job("cb-1") == 503
+    assert h.job("cb-2") == 503
+    assert h.jobs.started() == ["cb-1"]
+    assert logger.messages("warning").count("duplicate job ignored") == 0
+    assert logger.messages("info").count("job refused: the MicroVM is suspending") == 2
+
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+
+    assert h.jobs.started() == ["cb-1"]
+    assert eventually(
+        lambda: h.lambda_client.recorded()
+        == [{"kind": "success", "callbackId": "cb-1"}]
+    )
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 1
+    )
+
+
+def test_answers_a_resent_running_job_with_202_after_suspend_and_terminate_hooks(
+    start: Any, logger: Any
+) -> None:
+    # The terminate hook fails the running job's callback. So the durable
+    # function learns the outcome from the callback, also when a suspend
+    # refusal is still in effect.
+    h = start()
+    h.run_hook()
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+    assert h.hook("terminate") == 200
+
+    assert h.job("cb-1") == 202
+    assert h.job("cb-2") == 503
+    h.jobs.release_all()
+    assert h.worker.idle(WAIT)
+
+    assert h.jobs.started() == ["cb-1"]
+    assert eventually(
+        lambda: logger.messages("warning").count("duplicate job ignored") == 1
+    )
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
 
 
 def test_never_suspends_after_the_terminate_hook(start: Any) -> None:
@@ -3061,3 +3495,564 @@ def test_keeps_a_hook_refusal_that_arrives_while_the_client_is_created(
     assert h.job("cb-1") == 503
     h.hook("resume")
     assert h.job("cb-1") == 202
+
+
+# ---------------------------------------------------------------------------
+# Suspend after a suspendAfter job
+# ---------------------------------------------------------------------------
+
+ACK_HEADER = "X-Microvm-Suspend-After"
+JOB_SUSPEND_INFO = "suspending the MicroVM after a job"
+NO_TARGET_WARNING = (
+    "cannot suspend the MicroVM after a job: the run hook named no MicroVM"
+)
+
+
+def post_job(h: Harness, callback_id: str, **fields: Any) -> tuple[int, str | None]:
+    """Send a job request, and return the status and the acknowledgement
+    header."""
+    connection = http.client.HTTPConnection(
+        host_of(h.worker), h.worker.port, timeout=WAIT
+    )
+    body = {
+        "version": 1,
+        "region": "us-east-1",
+        "callbackId": callback_id,
+        "input": {},
+        **fields,
+    }
+    try:
+        connection.request(
+            "POST",
+            "/job",
+            body=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        response.read()
+    finally:
+        connection.close()
+    return response.status, response.getheader(ACK_HEADER)
+
+
+def info_lines(logger: Any, message: str) -> list[dict[str, Any]]:
+    return [data for level, m, data in logger.lines if level == "info" and m == message]
+
+
+def end_job(h: Harness, callback_id: str) -> None:
+    """Release a job, wait until it has ended, and let a suspend call that
+    its end started end too."""
+    h.finish_job(callback_id)
+    h.settle()
+
+
+@pytest.mark.parametrize(
+    ("value", "acknowledged"),
+    [(True, "accepted"), (False, None), ("true", None), (1, None), (None, None)],
+    ids=["true", "false", "string", "one", "null"],
+)
+def test_acknowledges_only_a_json_true_and_suspends_only_for_it(
+    start: Any, value: Any, acknowledged: str | None
+) -> None:
+    h = start()
+    h.run_hook()
+
+    assert post_job(h, "cb-1", suspendAfter=value) == (202, acknowledged)
+    end_job(h, "cb-1")
+
+    assert h.microvms.suspended == (["mvm-1"] if acknowledged else [])
+
+
+def test_acknowledges_no_job_without_the_field(start: Any) -> None:
+    h = start()
+    h.run_hook()
+
+    assert post_job(h, "cb-1") == (202, None)
+
+
+@pytest.mark.parametrize("finished", [False, True], ids=["running", "finished"])
+def test_acknowledges_a_resent_copy_when_the_first_request_carried_the_field(
+    start: Any, finished: bool
+) -> None:
+    h = start()
+    h.run_hook()
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert post_job(h, "cb-2") == (202, None)
+    if finished:
+        end_job(h, "cb-1")
+        end_job(h, "cb-2")
+
+    # Only the first request decides the suspend. So a copy gets the same
+    # acknowledgement, whatever it carries.
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert post_job(h, "cb-1") == (202, "accepted")
+    assert post_job(h, "cb-2", suspendAfter=True) == (202, None)
+
+
+def test_sends_no_acknowledgement_with_a_refusal(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.hook("suspend")
+
+    assert post_job(h, "cb-1", suspendAfter=True) == (503, None)
+
+
+def test_refuses_a_resent_running_suspend_after_job_without_acknowledgement(
+    start: Any,
+) -> None:
+    # The suspend refusal answers the resend of a running job with 503, so
+    # the copy carries no acknowledgement. The delivery after the resume gets
+    # the duplicate 202 with the acknowledgement of the first request.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+
+    assert post_job(h, "cb-1", suspendAfter=True) == (503, None)
+    assert post_job(h, "cb-1") == (503, None)
+
+    assert h.hook("resume") == 200
+    assert post_job(h, "cb-1") == (202, "accepted")
+    end_job(h, "cb-1")
+
+    assert h.jobs.started() == ["cb-1"]
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+@pytest.mark.parametrize("refusal_end", ["resume", "grace"])
+def test_a_job_that_ends_during_a_suspend_hook_refusal_asks_for_nothing(
+    start: Any, refusal_end: str
+) -> None:
+    # Lambda suspends the MicroVM after the suspend hook. So a suspendAfter
+    # job that ends during the refusal asks for no call of the worker's own,
+    # neither then nor after the refusal ends.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend", LAMBDA_HEADERS) == 200
+
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+
+    if refusal_end == "resume":
+        assert h.hook("resume", LAMBDA_HEADERS) == 200
+    else:
+        h.advance(GRACE)
+    post_job(h, "cb-2")
+    end_job(h, "cb-2")
+
+    assert h.jobs.started() == ["cb-1", "cb-2"]
+    assert h.microvms.suspended == []
+
+
+def test_a_suspend_hook_clears_a_pending_suspend_after_a_job(start: Any) -> None:
+    # The request waits for the other job. Lambda then suspends the MicroVM
+    # after the suspend hook. So the request is done, and the other job's end
+    # after the resume fires nothing.
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    post_job(h, "cb-2")
+    end_job(h, "cb-1")
+    assert h.listener._suspend_requested == "cb-1"  # noqa: SLF001
+
+    assert h.hook("suspend", LAMBDA_HEADERS) == 200
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    assert h.hook("resume", LAMBDA_HEADERS) == 200
+    end_job(h, "cb-2")
+
+    assert h.microvms.suspended == []
+
+
+def test_acknowledges_a_resent_running_suspend_after_job_after_the_terminate_hook(
+    start: Any,
+) -> None:
+    # A known job gets the duplicate 202 while terminating, also during a
+    # suspend refusal. That 202 carries the acknowledgement of the first
+    # request.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    assert eventually(lambda: h.started("cb-1"))
+    assert h.hook("suspend") == 200
+    assert h.hook("terminate") == 200
+
+    assert post_job(h, "cb-1") == (202, "accepted")
+    h.jobs.release_all()
+    assert h.worker.idle(WAIT)
+
+    assert h.jobs.started() == ["cb-1"]
+    assert h.microvms.suspended == []
+
+
+def test_acknowledges_a_resent_finished_suspend_after_job_during_its_own_suspend(
+    start: Any,
+) -> None:
+    # The job has ended, and the worker suspends after it. A resend during
+    # that refusal gets the duplicate 202 with the acknowledgement.
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True) == (202, "accepted")
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == ["mvm-1"]
+
+    assert post_job(h, "cb-1") == (202, "accepted")
+    assert post_job(h, "cb-2", suspendAfter=True) == (503, None)
+    assert h.jobs.started() == ["cb-1"]
+
+
+def test_suspends_after_a_suspend_after_job_in_a_session_without_auto_suspend(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    h.run_hook()
+    assert post_job(h, "cb-1", suspendAfter=True)[0] == 202
+    h.advance(IDLE * 10)
+    assert h.microvms.suspended == []
+
+    end_job(h, "cb-1")
+
+    assert h.microvms.suspended == ["mvm-1"]
+    assert info_lines(logger, JOB_SUSPEND_INFO) == [
+        {"microvmId": "mvm-1", "callbackId": "cb-1"}
+    ]
+    # The refusal runs from the decision, as after an idle suspend.
+    assert h.job("cb-2") == 503
+    h.hook("resume", LAMBDA_HEADERS)
+    assert h.job("cb-2") == 202
+
+
+def test_suspends_after_a_job_whose_handler_failed(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True, input={"fail": True})
+
+    end_job(h, "cb-1")
+
+    assert h.lambda_client.recorded()[0]["kind"] == "failure"
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_suspends_after_a_job_whose_report_failed(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.lambda_client.completion_error = suspend_error("AccessDeniedException", 403)
+    post_job(h, "cb-1", suspendAfter=True)
+
+    end_job(h, "cb-1")
+
+    assert h.lambda_client.recorded() == []
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_suspends_only_when_the_report_attempts_have_ended(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    h.lambda_client.hold = True
+
+    h.jobs.release("cb-1")
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    assert h.microvms.suspended == []
+
+    h.lambda_client.finish()
+    end_job(h, "cb-1")
+    assert h.lambda_client.recorded() == [{"kind": "success", "callbackId": "cb-1"}]
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_suspends_when_the_last_running_job_ends(start: Any, logger: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    post_job(h, "cb-2")
+
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == []
+
+    end_job(h, "cb-2")
+    assert h.microvms.suspended == ["mvm-1"]
+    assert info_lines(logger, JOB_SUSPEND_INFO) == [
+        {"microvmId": "mvm-1", "callbackId": "cb-1"}
+    ]
+
+
+def test_waits_for_a_background_failure_report(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    h.lambda_client.hold = True
+    # An invalid request names a callback, so the worker fails it in the
+    # background.
+    assert h.job("cb-bad", heartbeatTimeoutSeconds=0) == 400
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    h.lambda_client.hold = False
+
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == []
+
+    h.lambda_client.finish()
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+
+def test_waits_for_a_run_hook_that_is_being_handled(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    later = slow_run_hook(h)
+
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == []
+
+    assert later.finish() == 200
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+
+def test_suspends_the_run_hook_microvm_not_the_one_of_the_job_request(
+    start: Any,
+) -> None:
+    h = start()
+    # The job request arrives before the run hook, and names another MicroVM.
+    post_job(h, "cb-1", suspendAfter=True, microvmId="mvm-other")
+    h.run_hook()
+
+    end_job(h, "cb-1")
+
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+@pytest.mark.parametrize("run_hook", ["none", "without-payload"])
+def test_warns_and_does_not_suspend_when_no_run_hook_named_a_microvm(
+    start: Any, logger: Any, run_hook: str
+) -> None:
+    h = start()
+    if run_hook == "without-payload":
+        assert h.post(f"{HOOK_PATH_PREFIX}run", {"microvmId": "mvm-1"}) == 200
+    post_job(h, "cb-1", suspendAfter=True, microvmId="mvm-other")
+
+    end_job(h, "cb-1")
+
+    assert h.microvms.suspended == []
+    assert [line for line in logger.lines if line[1] == NO_TARGET_WARNING] == [
+        ("warning", NO_TARGET_WARNING, {"callbackId": "cb-1"})
+    ]
+    # The request was consumed. A later job end does not warn again.
+    post_job(h, "cb-2")
+    end_job(h, "cb-2")
+    assert logger.messages("warning").count(NO_TARGET_WARNING) == 1
+    assert h.job("cb-3") == 202
+
+
+def test_a_resume_hook_does_not_repeat_the_suspend(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.hook("resume", LAMBDA_HEADERS)
+    h.advance(GRACE * 10)
+
+    assert h.microvms.suspended == ["mvm-1"]
+    # A job that ends after the resume asks for nothing either.
+    post_job(h, "cb-2")
+    end_job(h, "cb-2")
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_does_not_retry_a_refusal_for_now_without_auto_suspend(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("ExpiredTokenException", 400)
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+
+    end_job(h, "cb-1")
+    h.advance(GRACE * 10)
+
+    assert h.microvms.suspended == ["mvm-1"]
+    assert_one_warning(logger, "refusedForNow", refusing_jobs=False, trigger="job")
+    assert h.job("cb-2") == 202
+
+
+def test_retries_a_refusal_for_now_with_auto_suspend(start: Any) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("ExpiredTokenException", 400)
+    h.run_hook(IDLE)
+    post_job(h, "cb-1", suspendAfter=True)
+
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(GRACE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_stops_the_idle_timer_that_the_job_end_armed(start: Any, logger: Any) -> None:
+    # The job end arms the idle time, and fires the suspend in the same
+    # block. A rejected call does not retry until a job ends. So the stale
+    # timer must not fire one idle time later.
+    h = start()
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+    h.run_hook(IDLE)
+    post_job(h, "cb-1", suspendAfter=True)
+
+    end_job(h, "cb-1")
+    h.advance(IDLE * 10)
+
+    assert h.microvms.suspended == ["mvm-1"]
+    assert_one_warning(logger, "rejected", refusing_jobs=False, trigger="job")
+
+
+def test_logs_an_unknown_outcome_of_the_job_suspend_with_its_trigger(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("InternalServerException", 500)
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+
+    end_job(h, "cb-1")
+
+    assert_one_warning(logger, "unknown", refusing_jobs=True, trigger="job")
+    assert h.job("cb-2") == 503
+
+
+def test_does_not_suspend_after_the_terminate_hook(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    post_job(h, "cb-2")
+    end_job(h, "cb-1")
+
+    assert h.hook("terminate", LAMBDA_HEADERS) == 200
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    h.jobs.release_all()
+    assert h.worker.idle(WAIT)
+
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+
+
+def test_does_not_suspend_after_close(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    post_job(h, "cb-2")
+    end_job(h, "cb-1")
+
+    h.listener.close()
+    end_job(h, "cb-2")
+
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+
+
+def test_a_job_that_ends_after_close_asks_for_no_suspend(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+
+    h.listener.close()
+    end_job(h, "cb-1")
+
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+
+
+def test_fires_a_pending_suspend_when_the_running_call_ends(start: Any) -> None:
+    # 1. The idle call runs, and a resume hook ends its refusal.
+    # 2. A suspendAfter job runs and ends while the call still runs.
+    # 3. The request waits for the call, and fires when it ends.
+    h = start()
+    h.microvms.hold = True
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.hook("resume", LAMBDA_HEADERS)
+    assert post_job(h, "cb-1", suspendAfter=True)[0] == 202
+    h.finish_job("cb-1")
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.microvms.finish()
+
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])
+    h.settle()
+
+
+def test_an_idle_call_does_the_pending_suspend_too(start: Any) -> None:
+    # A background report holds the request. The idle time ends first, and
+    # its call suspends the MicroVM. So the request is done, and it does not
+    # fire again after the resume.
+    h = start()
+    h.run_hook(IDLE)
+    post_job(h, "cb-1", suspendAfter=True)
+    h.lambda_client.hold = True
+    assert h.job("cb-bad", heartbeatTimeoutSeconds=0) == 400
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    h.lambda_client.hold = False
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == []
+
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.lambda_client.finish()
+    assert h.worker.idle(WAIT)
+    h.hook("resume", LAMBDA_HEADERS)
+    post_job(h, "cb-2")
+    end_job(h, "cb-2")
+
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_idle_waits_for_the_suspend_after_a_job(start: Any) -> None:
+    h = start()
+    h.microvms.hold = True
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+
+    h.finish_job("cb-1")
+
+    assert not h.worker.idle(0.1)
+    h.microvms.finish()
+    assert h.worker.idle(WAIT)
+
+
+def test_accepts_jobs_when_the_thread_of_the_job_suspend_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+    failing_thread_start(monkeypatch, "microvm-suspend")
+
+    h.finish_job("cb-1")
+
+    assert "could not start the suspend of the MicroVM after a job" in (
+        logger.messages("error")
+    )
+    assert h.microvms.suspended == []
+    monkeypatch.undo()
+    assert h.job("cb-2") == 202
+
+
+def test_a_suspend_after_job_whose_thread_cannot_start_asks_for_nothing(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    h.run_hook()
+    failing_thread_start(monkeypatch, "microvm-job")
+
+    assert post_job(h, "cb-1", suspendAfter=True) == (500, None)
+
+    monkeypatch.undo()
+    assert h.listener._suspend_after_jobs == set()  # noqa: SLF001
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    assert h.microvms.suspended == []

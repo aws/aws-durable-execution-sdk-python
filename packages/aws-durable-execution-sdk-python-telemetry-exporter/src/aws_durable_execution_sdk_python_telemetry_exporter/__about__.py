@@ -1,4 +1,4 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-__version__ = "0.0.2"
+__version__ = "1.0.0"

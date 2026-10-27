@@ -616,7 +616,7 @@ class EventInput:
         start_durable_execution_input: StartDurableExecutionInput,
         include: bool = False,  # noqa: FBT001, FBT002
     ) -> EventInput:
-        input: str | None = start_durable_execution_input.input
+        input: str | None = start_durable_execution_input.input if include else None
         truncated: bool = not include
         return cls(input, truncated)
 
@@ -658,8 +658,11 @@ class EventResult:
         durable_execution_invocation_output: DurableExecutionInvocationOutput,
         include: bool = False,  # noqa: FBT001, FBT002
     ) -> EventResult:
+        payload: str | None = (
+            durable_execution_invocation_output.result if include else None
+        )
         truncated: bool = not include
-        return cls(durable_execution_invocation_output.result, truncated)
+        return cls(payload, truncated)
 
 
 @dataclass(frozen=True)
@@ -693,8 +696,9 @@ class EventError:
         include: bool = False,  # noqa: FBT001, FBT002
     ) -> EventError:
         error_object: ErrorObject | None = details.error if details else None
+        payload: ErrorObject | None = error_object if include else None
         truncated: bool = not include
-        return cls(error_object, truncated)
+        return cls(payload, truncated)
 
     @classmethod
     def from_durable_execution_invocation_output(
@@ -702,8 +706,11 @@ class EventError:
         durable_execution_invocation_output: DurableExecutionInvocationOutput,
         include: bool = False,  # noqa: FBT001, FBT002
     ) -> EventError:
+        payload: ErrorObject | None = (
+            durable_execution_invocation_output.error if include else None
+        )
         truncated: bool = not include
-        return cls(durable_execution_invocation_output.error, truncated)
+        return cls(payload, truncated)
 
 
 @dataclass(frozen=True)
@@ -1800,7 +1807,11 @@ class Event:
     def create_context_event_failed(cls, context: EventCreationContext) -> Event:
         context_details: ContextDetails | None = context.operation.context_details
         event_error: EventError | None = (
-            EventError.from_details(context_details) if context_details else None
+            EventError.from_details(
+                context_details, include=context.include_execution_data
+            )
+            if context_details
+            else None
         )
         return cls(
             event_type=EventType.CONTEXT_FAILED.value,
@@ -2232,7 +2243,11 @@ class Event:
     def create_callback_event_failed(cls, context: EventCreationContext) -> Event:
         callback_details: CallbackDetails | None = context.operation.callback_details
         event_error: EventError | None = (
-            EventError.from_details(callback_details) if callback_details else None
+            EventError.from_details(
+                callback_details, include=context.include_execution_data
+            )
+            if callback_details
+            else None
         )
         return cls(
             event_type=EventType.CALLBACK_FAILED.value,
@@ -2249,7 +2264,11 @@ class Event:
     def create_callback_event_timed_out(cls, context: EventCreationContext) -> Event:
         callback_details: CallbackDetails | None = context.operation.callback_details
         event_error: EventError | None = (
-            EventError.from_details(callback_details) if callback_details else None
+            EventError.from_details(
+                callback_details, include=context.include_execution_data
+            )
+            if callback_details
+            else None
         )
         return cls(
             event_type=EventType.CALLBACK_TIMED_OUT.value,

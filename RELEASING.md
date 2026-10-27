@@ -46,7 +46,7 @@ The tag should be the version of the package being bumped, prepended with a desc
 - **SDK only:** `sdk-v<version>` (e.g., `sdk-v1.6.0`)
 - **OTel only:** `otel-v<version>` (e.g., `otel-v0.3.0`)
 - **Testing only:** `testing-v<version>` (e.g., `testing-v1.2.1`)
-- **Telemetry Exporter only:** `telemetry-exporter-v<version>` (e.g., `telemetry-exporter-v0.0.1`)
+- **Telemetry Exporter only:** `telemetry-exporter-v<version>` (e.g., `telemetry-exporter-v1.0.0`)
 - **Multiple packages in a single release:** comma-separate the sub-tags (e.g., `sdk-v1.6.0,otel-v0.3.0`)
 
 Examples:
@@ -55,7 +55,7 @@ Examples:
 sdk-v1.6.0
 otel-v0.3.0
 testing-v1.2.1
-telemetry-exporter-v0.0.1
+telemetry-exporter-v1.0.0
 sdk-v1.6.0,otel-v0.3.0
 ```
 
@@ -121,35 +121,6 @@ instead of being treated as a missing image. ECR visibility is polled for up to
 `latest` without a recognized version tag, or pointing to a prerelease ahead of
 the stable release being published, requires manual inspection.
 
-### Lambda layers
-
-Releases containing an `otel-v` tag also trigger the
-[`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
-workflow. It builds the SDK and OTel plugin into Lambda layers for each
-supported Python runtime and architecture, then publishes public versions of the
-`aws-durable-execution-sdk-python-otel-plugin` layer.
-The archive resolves and includes the selected Core wheel's runtime dependencies,
-including boto3/botocore, so it does not depend on the Lambda runtime already
-having the required service model. The plugin wheel is installed without its
-optional provider dependencies; ADOT/community layers continue to own those.
-For OTel-only releases, the workflow downloads the exact SDK version pinned by
-`layer.sdk-version` in `.github/lambda-layer-publish.toml`; that version must
-already be published to PyPI. Combined SDK and OTel releases require the pin to
-match the new SDK version and build both distributions from the tagged source.
-
-The publishing job uses the `lambda-layer-publish` GitHub environment and its
-`LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
-environment variable to a comma-separated list of AWS Regions. When unset, the
-workflow publishes to every commercial AWS Region supported by Lambda.
-The workflow can also be run manually from the Actions tab on `main`; its
-optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
-Each runtime and architecture layer archive is built once and retained as a
-workflow artifact so retries publish the exact same resolved dependencies. Its
-SHA-256 is included in the layer description and verified before reuse.
-The publishing role must allow `lambda:PublishLayerVersion` and
-`lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` and
-`lambda:GetLayerVersion` for identity-checked, idempotent release retries.
-
 ## Release Notes Format
 
 For the coordinated Core 3.0 / OTel 2.0 release, include the
@@ -199,8 +170,6 @@ Before publishing a release:
 - [ ] For a first release of a new distribution name (for example
       `aws-durable-execution-sdk-python-telemetry-exporter`), PyPI trusted
       publishing is configured for that name
-- [ ] OTel layer SDK pin identifies a compatible published SDK, or matches the
-      SDK version included in a combined release
 - [ ] Changes merged to `main`
 - [ ] CI checks pass on `main`
 - [ ] Release notes written with separate sections per package

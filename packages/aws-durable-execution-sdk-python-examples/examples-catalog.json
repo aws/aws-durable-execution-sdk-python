@@ -834,6 +834,19 @@
         "ExecutionTimeout": 900
       },
       "path": "./src/microvm/microvm_session_suspend.py"
+    },
+    {
+      "name": "MicroVM Session Suspend After",
+      "description": "Runs two jobs in one Lambda MicroVM that its worker suspends after the first job",
+      "handler": "microvm_session_suspend_after.handler",
+      "integration": true,
+      "usesMicrovm": true,
+      "timeout": 120,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 900
+      },
+      "path": "./src/microvm/microvm_session_suspend_after.py"
     }
   ]
 }
