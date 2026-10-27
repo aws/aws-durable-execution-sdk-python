@@ -2491,6 +2491,113 @@ def test_get_execution_history_invalid_marker(executor, mock_store):
     assert result.next_marker is None
 
 
+def _history_executor(mock_scheduler, mock_invoker, mock_checkpoint_processor):
+    store = InMemoryExecutionStore()
+    executor = Executor(store, mock_scheduler, mock_invoker, mock_checkpoint_processor)
+    execution = Execution.new(
+        StartDurableExecutionInput(
+            account_id="123456789012",
+            function_name="test-function",
+            function_qualifier="$LATEST",
+            execution_name="test-execution",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+            invocation_id="test-inv-id",
+        )
+    )
+    execution.start()
+    store.save(execution)
+    return executor, execution.durable_execution_arn
+
+
+@pytest.mark.parametrize("include", [True, False])
+def test_get_execution_history_wait_cancelled_has_no_error(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor, include
+):
+    from aws_durable_execution_sdk_python.lambda_service import WaitOptions
+
+    executor, arn = _history_executor(
+        mock_scheduler, mock_invoker, mock_checkpoint_processor
+    )
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
+    token = CheckpointToken(execution_arn=arn, token_sequence=0).to_str()
+    token = executor.checkpoint_execution(
+        arn,
+        token,
+        [
+            OperationUpdate(
+                operation_id="wait-1",
+                operation_type=OperationType.WAIT,
+                action=OperationAction.START,
+                wait_options=WaitOptions(wait_seconds=60),
+            )
+        ],
+    ).checkpoint_token
+    executor.checkpoint_execution(
+        arn,
+        token,
+        [
+            OperationUpdate(
+                operation_id="wait-1",
+                operation_type=OperationType.WAIT,
+                action=OperationAction.CANCEL,
+                error=ErrorObject.from_message("boom"),
+            )
+        ],
+    )
+
+    events = executor.get_execution_history(arn, include_execution_data=include).events
+
+    cancelled = [e for e in events if e.event_type == "WaitCancelled"]
+    assert len(cancelled) == 1
+    assert cancelled[0].wait_cancelled_details is not None
+    assert cancelled[0].wait_cancelled_details.error is None
+
+
+@pytest.mark.parametrize("include", [True, False])
+def test_get_execution_history_redacts_execution_result_unless_included(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor, include
+):
+    executor, arn = _history_executor(
+        mock_scheduler, mock_invoker, mock_checkpoint_processor
+    )
+    executor.complete_execution(arn, "ok")
+
+    events = executor.get_execution_history(arn, include_execution_data=include).events
+
+    succeeded = [e for e in events if e.event_type == "ExecutionSucceeded"]
+    assert len(succeeded) == 1
+    details = succeeded[0].execution_succeeded_details
+    assert details is not None
+    assert details.result is not None
+    assert details.result.payload == ("ok" if include else None)
+    assert details.result.truncated is (not include)
+
+
+@pytest.mark.parametrize("include", [True, False])
+def test_get_execution_history_redacts_execution_error_unless_included(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor, include
+):
+    executor, arn = _history_executor(
+        mock_scheduler, mock_invoker, mock_checkpoint_processor
+    )
+    executor.fail_execution(arn, ErrorObject.from_message("boom"))
+
+    events = executor.get_execution_history(arn, include_execution_data=include).events
+
+    failed = [e for e in events if e.event_type == "ExecutionFailed"]
+    assert len(failed) == 1
+    details = failed[0].execution_failed_details
+    assert details is not None
+    assert details.error is not None
+    assert details.error.truncated is (not include)
+    if include:
+        assert details.error.payload is not None
+        assert details.error.payload.message == "boom"
+    else:
+        assert details.error.payload is None
+
+
 def test_checkpoint_execution(mock_scheduler, mock_invoker, mock_checkpoint_processor):
     """Checkpoint with an empty update list returns a non-null
     new_execution_state with an empty operations list and a freshly
