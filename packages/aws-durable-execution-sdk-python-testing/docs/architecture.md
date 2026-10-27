@@ -167,9 +167,9 @@ the handler would wait on a lane it needs in order to make progress.
 2. Invoke. The blocking call to the function runs off the lane, bounded
    by the invocation timeout. While it blocks, the handler's checkpoint
    and get state tasks run on the now free lane.
-3. Finish. A task on the lane records the response and releases the
-   gate. It moves `PENDING` to `PRE_INVOKE`, or a terminal result to
-   `COMPLETED`.
+3. Finish. A task on the lane validates the response, acknowledges its input
+   snapshot, and releases the gate. It moves `PENDING` to `PRE_INVOKE`, or a
+   terminal result to `COMPLETED`.
 
 ```mermaid
 sequenceDiagram
@@ -234,10 +234,17 @@ list in a checkpoint response. The delta for the next response is the
 operations whose `operation_last_touched_seq` is greater than
 `handler_seen_seq`.
 
-The watermark advances only when a checkpoint response is built. It never
-advances when invocation input is built. That is what makes retries
-correct. A failed invocation never moves the watermark. So the retry
-delivers the same state again.
+The watermark advances when a checkpoint response is built or a valid
+invocation response acknowledges its input snapshot, including a `PENDING`
+response that sent no checkpoint. Constructing invocation input does not
+acknowledge delivery: a failed delivery leaves its updates available for retry.
+
+Acknowledgment removes `UpdatedOperationIds` only when their last-touched
+sequence is covered by that snapshot. Newer versions, including another
+version of the same operation, remain pending. An invocation's acknowledgment
+never retreats a watermark already advanced by a checkpoint. Legacy update
+IDs without a stored version are treated as sequence zero and can be consumed
+by an equal-sequence acknowledgment.
 
 ```
       seq_counter    handler_seen_seq    delta next checkpoint

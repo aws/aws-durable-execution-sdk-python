@@ -479,15 +479,11 @@ class Execution:
         )
 
     def mark_state_delivered(self) -> None:
-        """Reset the list of changed operations once an invocation's input
-        carries them.
+        """Explicitly clear all pending operation IDs after their delivery.
 
-        The service reports, on each invocation, the operations that
-        changed after the last state the handler observed. The runner
-        delivers state in the invocation input. So the list is reset when
-        that input is built, not when the invocation completes: an
-        operation that completes while the handler is still running is
-        reported on the next invocation.
+        The executor uses versioned ``advance_handler_seen`` acknowledgments
+        so failed invocations retain their input updates and changes newer
+        than the acknowledged snapshot remain pending.
         """
         self.updated_operation_ids = []
 
@@ -860,10 +856,9 @@ class OperationPaginatorState:
     * :meth:`unseen_operations` — strict ``> handler_seen_seq``
       delta filter, used by ``checkpoint_execution`` to decide which
       ops go back to the handler.
-    * :meth:`advance_handler_seen` — monotonic forward update of the
-      delivery watermark on the wrapped :class:`Execution`, called
-      after a checkpoint response is constructed and its ops are
-      known.
+    * :meth:`advance_handler_seen` — acknowledge delivered operation versions
+      without retreating the watermark, after constructing a checkpoint
+      response or validating an invocation's response.
 
 
     Pinning ``token_sequence`` and ``operations`` at construction
@@ -920,11 +915,18 @@ class OperationPaginatorState:
         ]
 
     def advance_handler_seen(self, seq: int) -> None:
-        """Advance the wrapped execution's ``handler_seen_seq`` to
-        ``seq`` if that represents forward progress. Monotonic:
-        smaller or equal values are ignored."""
+        """Acknowledge delivered updates without retreating the watermark.
+
+        Equal acknowledgments also consume legacy, unversioned update IDs.
+        Only versions covered by this delivery may be removed.
+        """
         if seq > self.execution.handler_seen_seq:
             self.execution.handler_seen_seq = seq
+        self.execution.updated_operation_ids = [
+            operation_id
+            for operation_id in self.execution.updated_operation_ids
+            if self.execution.operation_last_touched_seq.get(operation_id, 0) > seq
+        ]
 
     # --- internals -------------------------------------------------
 
