@@ -260,6 +260,35 @@ def test_templates_map_every_otel_requirement(
 
 
 @pytest.mark.parametrize(
+    ("logical_id", "suite"),
+    [("Otel1Success", "otel-invocation"), ("OtelExecution1Success", "otel-execution")],
+)
+def test_deferred_requirements_are_explicit(logical_id: str, suite: str) -> None:
+    template = load_template(TEMPLATE_PATH)
+    gaps = {
+        entry["id"]: entry["reason"]
+        for entry in template["Resources"][logical_id]["TestingMetadata"][
+            "NotImplemented"
+        ]
+    }
+    assert set(gaps) == {f"{suite}-{case}" for case in range(21, 28)}
+    for case in (21, 22, 23, 24, 27):
+        assert "pull/796" in gaps[f"{suite}-{case}"]
+    assert "issues/853" in gaps[f"{suite}-25"]
+    assert "issues/862" in gaps[f"{suite}-25"]
+    assert "issues/854" in gaps[f"{suite}-26"]
+    assert "issues/860" in gaps[f"{suite}-26"]
+    assert "issues/861" in gaps[f"{suite}-26"]
+    covered = {
+        requirement
+        for _, requirement in requirement_mappings(template)
+        if requirement.startswith(f"{suite}-")
+    }
+    assert covered.isdisjoint(gaps)
+    assert covered | gaps.keys() == {f"{suite}-{case}" for case in range(1, 28)}
+
+
+@pytest.mark.parametrize(
     ("template_path", "expected_mappings", "expected_targets"),
     [
         (TEMPLATE_PATH, EXPECTED_MAPPINGS, EXPECTED_TARGETS),
