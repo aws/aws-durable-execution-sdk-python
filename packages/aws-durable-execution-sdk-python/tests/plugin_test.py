@@ -586,7 +586,7 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(USER_FUNCTION_END_INFO.end_time, END_TS)
         self.assertEqual(USER_FUNCTION_END_INFO.error.message, "boom")
 
-    def test_operation_info_factory_preserves_subclass_and_replay_flag(self) -> None:
+    def test_terminal_snapshot_preserves_operation_fields(self) -> None:
         operation = Operation(
             operation_id="step-1",
             operation_type=ServiceOperationType.STEP,
@@ -599,24 +599,22 @@ class TestDataClasses(unittest.TestCase):
             step_details=StepDetails(attempt=2, result='"saved"', error=ERROR),
         )
 
-        for info_type in (OperationInfo, OperationStartInfo, OperationEndInfo):
-            with self.subTest(info_type=info_type):
-                info = info_type.from_operation(operation, is_replayed=True)
+        info = PluginExecutor(plugins=[])._end_info(operation)
 
-                self.assertIs(type(info), info_type)
-                self.assertIs(info.operation_type, OperationType.STEP)
-                self.assertEqual(info.operation_id, "step-1")
-                self.assertEqual(info.sub_type, "CustomStep")
-                self.assertEqual(info.name, "saved-step")
-                self.assertEqual(info.parent_id, "parent-1")
-                self.assertEqual(info.status, OperationStatus.SUCCEEDED)
-                self.assertEqual(info.result, '"saved"')
-                self.assertEqual(info.attempt, 2)
-                self.assertEqual(info.error, ERROR)
-                self.assertIsNot(info.error, ERROR)
-                self.assertEqual(info.start_time, START_TS)
-                self.assertEqual(info.end_time, END_TS)
-                self.assertTrue(info.is_replayed)
+        self.assertIs(type(info), OperationEndInfo)
+        self.assertIs(info.operation_type, OperationType.STEP)
+        self.assertEqual(info.operation_id, "step-1")
+        self.assertEqual(info.sub_type, "CustomStep")
+        self.assertEqual(info.name, "saved-step")
+        self.assertEqual(info.parent_id, "parent-1")
+        self.assertEqual(info.status, OperationStatus.SUCCEEDED)
+        self.assertEqual(info.result, '"saved"')
+        self.assertEqual(info.attempt, 2)
+        self.assertEqual(info.error, ERROR)
+        self.assertIsNot(info.error, ERROR)
+        self.assertEqual(info.start_time, START_TS)
+        self.assertEqual(info.end_time, END_TS)
+        self.assertFalse(info.is_replayed)
 
     def test_terminal_snapshot_preserves_absent_and_empty_errors(self) -> None:
         for error in (
@@ -2351,6 +2349,7 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
 
     def test_builds_terminal_operation_info(self):
         captured: list[OperationEndInfo] = []
+        error = ErrorObject("boom", "Error", None, ["original frame"])
 
         class _CapturingPlugin(_TrackingPlugin):
             def on_operation_end(self, info: OperationEndInfo) -> None:
@@ -2372,7 +2371,7 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
             executor.on_child_context_end(
                 identifier,
                 OperationStatus.FAILED,
-                error=ERROR,
+                error=error,
                 is_replayed=True,
             )
 
@@ -2386,7 +2385,11 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
         self.assertEqual(info.parent_id, "parent-1")
         self.assertEqual(info.name, "book-trip")
         self.assertEqual(info.status, OperationStatus.FAILED)
-        self.assertEqual(info.error, ERROR)
+        self.assertEqual(info.error, error)
+        assert info.error is not None
+        assert info.error.stack_trace is not None
+        info.error.stack_trace.clear()
+        self.assertEqual(error.stack_trace, ["original frame"])
         self.assertTrue(info.is_replayed)
         self.assertIsNone(info.start_time)
         assert info.end_time is not None
