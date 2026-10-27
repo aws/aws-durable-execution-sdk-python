@@ -106,6 +106,38 @@ Resources:
     TestingMetadata:
       TestDescription:
         - otel-invocation-1
+      NotImplemented:
+        - id: otel-invocation-21
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-invocation-22
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-invocation-23
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-invocation-24
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-invocation-25
+          reason: >-
+            Deferred until terminal failure status and empty callback error history
+            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/853
+            and https://github.com/aws/aws-durable-execution-sdk-python/issues/862.
+        - id: otel-invocation-26
+          reason: >-
+            Deferred until callback completion delivery and replay acknowledgment
+            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/854,
+            https://github.com/aws/aws-durable-execution-sdk-python/issues/860,
+            and https://github.com/aws/aws-durable-execution-sdk-python/issues/861.
+        - id: otel-invocation-27
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
     Properties:
       CodeUri: src/
       Handler: otel_1_success.handler
@@ -417,6 +449,38 @@ Resources:
     TestingMetadata:
       TestDescription:
         - otel-execution-1
+      NotImplemented:
+        - id: otel-execution-21
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-execution-22
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-execution-23
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-execution-24
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+        - id: otel-execution-25
+          reason: >-
+            Deferred until terminal failure status and empty callback error history
+            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/853
+            and https://github.com/aws/aws-durable-execution-sdk-python/issues/862.
+        - id: otel-execution-26
+          reason: >-
+            Deferred until callback completion delivery and replay acknowledgment
+            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/854,
+            https://github.com/aws/aws-durable-execution-sdk-python/issues/860,
+            and https://github.com/aws/aws-durable-execution-sdk-python/issues/861.
+        - id: otel-execution-27
+          reason: >-
+            Conformance handler coverage is pending in
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
     Properties:
       CodeUri: src/
       Handler: otel_1_success.handler
