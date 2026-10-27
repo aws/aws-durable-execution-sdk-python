@@ -4,8 +4,8 @@ from pathlib import Path
 import yaml
 
 
-SHARED_WORKFLOW_REF = "3e7fd1a05e8f45d37e4ec223a6c5a0e379dfa9e8"
-CONFORMANCE_TEST_REF = "3e7fd1a05e8f45d37e4ec223a6c5a0e379dfa9e8"
+SHARED_WORKFLOW_REF = "9a5ead5e9ab8051bedfd300726472cbd443923cb"
+CONFORMANCE_TEST_REF = "9a5ead5e9ab8051bedfd300726472cbd443923cb"
 
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
