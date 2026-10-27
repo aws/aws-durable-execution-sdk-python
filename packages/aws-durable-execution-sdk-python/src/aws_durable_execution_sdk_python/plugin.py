@@ -10,7 +10,7 @@ import threading
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, Protocol, cast
+from typing import Any, Callable, MutableMapping, Protocol, Self, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -111,13 +111,14 @@ class OperationInfo:
     """The operation error, when available."""
     attempt: int | None = field(default=None, kw_only=True)
 
-    @staticmethod
+    @classmethod
     def from_operation(
+        cls,
         operation: Operation,
         *,
         is_replayed: bool = False,
-    ) -> OperationInfo:
-        return OperationInfo(
+    ) -> Self:
+        return cls(
             operation_id=operation.operation_id,
             operation_type=_to_operation_type(operation.operation_type),
             sub_type=operation.sub_type,
@@ -1856,22 +1857,7 @@ class PluginExecutor:
             self._submit_change(change_info)
 
     def _end_info(self, operation: Operation) -> OperationEndInfo:
-        return OperationEndInfo(
-            operation_id=operation.operation_id,
-            operation_type=_to_operation_type(operation.operation_type),
-            sub_type=operation.sub_type,
-            name=operation.name,
-            parent_id=operation.parent_id,
-            start_time=operation.start_timestamp,
-            end_time=operation.end_timestamp,
-            result=_extract_result(operation),
-            status=operation.status,
-            error=self._extract_error(operation),
-            attempt=(
-                operation.step_details.attempt if operation.step_details else None
-            ),
-            is_replayed=False,
-        )
+        return OperationEndInfo.from_operation(operation)
 
     def _change_info(
         self,

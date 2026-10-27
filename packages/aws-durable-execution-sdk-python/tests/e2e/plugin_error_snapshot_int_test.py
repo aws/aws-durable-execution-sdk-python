@@ -50,10 +50,10 @@ def test_terminal_error_mutation_preserves_failure_on_handler_replay() -> None:
         executed.append("charged")
         return "unexpected execution"
 
-    @durable_execution(plugins=[Factory()])
     def handler(_event: Any, context: DurableContext) -> str:
         return context.step(charge, name="charge")
 
+    wrapped = durable_execution(handler, plugins=[Factory()])
     stored_error = {
         "ErrorType": "ValueError",
         "ErrorMessage": "original failure",
@@ -95,10 +95,10 @@ def test_terminal_error_mutation_preserves_failure_on_handler_replay() -> None:
     with patch("aws_durable_execution_sdk_python.execution.LambdaClient") as client:
         checkpoint, _calls = create_mock_checkpoint_with_operations()
         client.initialize_client.return_value.checkpoint = checkpoint
-        first = handler(event, lambda_context)
+        first = wrapped(event, lambda_context)
         event["UpdatedOperationIds"] = []
         lambda_context.aws_request_id = "request-2"
-        replay = handler(event, lambda_context)
+        replay = wrapped(event, lambda_context)
 
     for result in (first, replay):
         assert result["Status"] == "FAILED"
