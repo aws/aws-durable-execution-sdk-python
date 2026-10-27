@@ -40,16 +40,19 @@ def error_object_exception_attributes(error: ErrorObject) -> dict[str, Any]:
     return attributes
 
 
-def record_error_object_exception(span: Any, error: ErrorObject | None) -> None:
+def record_error_object_exception(
+    span: Any, error: ErrorObject | None, *, timestamp: int | None = None
+) -> None:
     """Record a span exception that preserves the SDK's original error type.
 
-    ``error`` may be ``None`` for a failed outcome that carried no metadata; a
-    generic exception is recorded in that case.
+    A failed outcome without an error object has no diagnostic event. Terminal
+    callers supply the normalized span-end timestamp so delayed delivery does
+    not place an event outside the span.
     """
     if error is None:
-        span.record_exception(Exception(_DEFAULT_MESSAGE))
         return
     span.record_exception(
         exception_from_error_object(error),
         attributes=error_object_exception_attributes(error),
+        timestamp=timestamp,
     )

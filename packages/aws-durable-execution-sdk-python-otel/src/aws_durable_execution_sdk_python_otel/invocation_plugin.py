@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import Any, TYPE_CHECKING, cast
 
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
@@ -563,8 +564,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         return span
 
     def _end_span(
-        self, operation_id: str | None, end_timestamp: datetime.datetime | None = None
-    ):
+        self,
+        operation_id: str | None,
+        end_timestamp: datetime.datetime | None = None,
+        *,
+        error: ErrorObject | None = None,
+    ) -> None:
         """End and unregister the active span for an operation ID.
 
         Args:
@@ -572,6 +577,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 span.
             end_timestamp: Optional durable end timestamp to use as the span end
                 time. When omitted, OpenTelemetry uses the current time.
+            error: Diagnostic details recorded at the normalized span end.
         """
         logger.debug("Ending OTel span: operation_id=%s", operation_id)
         with self._operation_spans_lock:
@@ -579,6 +585,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if span:
             # the span is not going to be populated if it has the same end_time and start_time
             end_time = self._next_ordered_timestamp(end_timestamp)
+            record_error_object_exception(span, error, timestamp=end_time)
             span.end(end_time=end_time)
             logger.debug("Ended OTel span: %s", span)
 
@@ -965,11 +972,16 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
-            record_error_object_exception(span, info.error)
+        elif info.status in {
+            OperationStatus.FAILED,
+            OperationStatus.TIMED_OUT,
+            OperationStatus.STOPPED,
+        }:
+            span.set_status(StatusCode.ERROR)
         elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
-        self._end_span(info.operation_id, info.end_time)
+        self._end_span(info.operation_id, info.end_time, error=info.error)
 
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         """Called when a context or step operation starts user code.
@@ -1088,14 +1100,19 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
-                record_error_object_exception(span, info.error)
             else:
                 span.set_status(StatusCode.OK)
 
             end_timestamp = info.end_time
             if end_timestamp is not None and end_timestamp == info.start_time:
                 end_timestamp += datetime.timedelta(microseconds=1)
-            self._end_span(span_key, end_timestamp)
+            self._end_span(
+                span_key,
+                end_timestamp,
+                error=info.error
+                if info.outcome is UserFunctionOutcome.FAILED
+                else None,
+            )
         # Restore the enclosing context by releasing the scope this user
         # function attached. Code that runs after this operation (e.g. between
         # steps in a child context) correlates to its enclosing operation

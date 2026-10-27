@@ -153,7 +153,9 @@ def test_terminal_exception_uses_normalized_span_end(
     _start_invocation(plugin)
     plugin.on_operation_end(
         replace(
-            _operation_end_info(ErrorObject("stored failure", "ValueError", None, None)),
+            _operation_end_info(
+                ErrorObject("stored failure", "ValueError", None, None)
+            ),
             operation_type=OperationType.CONTEXT,
             sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
             start_time=start_time,
@@ -201,7 +203,9 @@ def test_failed_attempt_exception_uses_normalized_span_end(
         )
     )
     _end_invocation(plugin)
-    span = next(s for s in exporter.get_finished_spans() if s.name == "attempt attempt 1")
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name == "attempt attempt 1"
+    )
     assert span.status.status_code is StatusCode.ERROR
     if with_error:
         (event,) = span.events
