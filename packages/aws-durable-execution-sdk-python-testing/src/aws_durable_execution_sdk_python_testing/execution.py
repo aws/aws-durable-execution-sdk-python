@@ -692,6 +692,7 @@ class Execution:
                 end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_callback_failure(
@@ -718,6 +719,7 @@ class Execution:
                 end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_callback_timeout(
@@ -744,6 +746,7 @@ class Execution:
                 end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_chained_invoke(
