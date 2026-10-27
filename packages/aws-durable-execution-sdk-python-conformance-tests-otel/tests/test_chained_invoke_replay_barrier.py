@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
+#
+# SPDX-License-Identifier: Apache-2.0
 """The real case11 handler starts one child, then replays its saved result."""
 
 import importlib.util
@@ -7,8 +10,13 @@ from pathlib import Path
 import sys
 from threading import Event
 import time
+from typing import Any
 
 import pytest
+from aws_durable_execution_sdk_python.types import LambdaContext
+from aws_durable_execution_sdk_python_testing.model import (
+    GetDurableExecutionHistoryResponse,
+)
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -28,8 +36,10 @@ SRC = Path(__file__).resolve().parents[1] / "src"
     "view", [ExecutionOtelPluginFactory, InvocationOtelPluginFactory]
 )
 def test_case11_uses_one_real_child_and_replays_after_barrier(
-    view, monkeypatch, caplog
-):
+    view: type[ExecutionOtelPluginFactory] | type[InvocationOtelPluginFactory],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     monkeypatch.delenv("_X_AMZN_TRACE_ID", raising=False)
     monkeypatch.setenv("OTEL_INVOKE_TARGET_FUNCTION_NAME", "case11-child")
@@ -37,6 +47,7 @@ def test_case11_uses_one_real_child_and_replays_after_barrier(
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     common_spec = importlib.util.spec_from_file_location("common", SRC / "common.py")
+    assert common_spec is not None and common_spec.loader is not None
     common = importlib.util.module_from_spec(common_spec)
     monkeypatch.setitem(sys.modules, "common", common)
     common_spec.loader.exec_module(common)
@@ -56,13 +67,16 @@ def test_case11_uses_one_real_child_and_replays_after_barrier(
     spec = importlib.util.spec_from_file_location(
         "otel_11_chained_invoke", SRC / "otel_11_chained_invoke.py"
     )
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     target_entered, admit_target = Event(), Event()
-    target_calls = []
+    target_calls: list[str] = []
     payload = {"scenario": "chained-invoke", "value": {"preserved": [1, "same-result"]}}
 
-    def target_entrypoint(event, context):
+    def target_entrypoint(
+        event: dict[str, Any], context: LambdaContext
+    ) -> dict[str, Any]:
         # A harness admission gate makes the first caller suspension observable.
         # The unchanged production echo target still executes exactly once.
         target_calls.append(context.aws_request_id)
@@ -70,7 +84,9 @@ def test_case11_uses_one_real_child_and_replays_after_barrier(
         assert admit_target.wait(10)
         return module.target_handler(event, context)
 
-    def wait_for_invocations(runner, arn, count):
+    def wait_for_invocations(
+        runner: DurableFunctionTestRunner, arn: str, count: int
+    ) -> GetDurableExecutionHistoryResponse:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             history = runner.get_execution_history(arn, include_execution_data=True)

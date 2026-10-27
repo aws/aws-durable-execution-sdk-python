@@ -286,9 +286,7 @@ def test_templates_map_every_otel_requirement(
     ("logical_id", "suite"),
     [("Otel1Success", "otel-invocation"), ("OtelExecution1Success", "otel-execution")],
 )
-def test_deferred_callback_requirements_are_explicit(
-    logical_id: str, suite: str
-) -> None:
+def test_deferred_requirements_are_explicit(logical_id: str, suite: str) -> None:
     template = load_template(TEMPLATE_PATH)
     gaps = {
         entry["id"]: entry["reason"]
