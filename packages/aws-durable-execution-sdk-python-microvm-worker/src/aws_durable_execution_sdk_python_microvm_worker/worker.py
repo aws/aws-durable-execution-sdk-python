@@ -424,14 +424,16 @@ class MicrovmWorkerListener:
        pending request. A job that ends while the listener refuses jobs for
        a suspend sets none, because the MicroVM is suspending already. The
        request fires when no job, failure report, ``run`` hook request, or
-       SuspendMicrovm call runs, and the listener is not terminating, not
-       closed, and not refusing jobs. Each of those ends checks it again.
+       SuspendMicrovm call runs. Each of those ends checks it again.
     3. Firing clears the request, stops the idle time, and makes the same
        call as items 3 to 9, with the MicroVM ID of the first accepted
-       ``run`` hook with a payload. Without that hook, the listener logs a
-       warning and does not suspend. A ``resume`` hook never repeats the
-       request. A ``suspend`` hook, the ``terminate`` hook, and ``close()``
-       drop it.
+       ``run`` hook with a payload. A request that comes before the first
+       accepted ``run`` hook waits for it. The request fires when that hook
+       names a MicroVM. When it names none, the listener logs a warning,
+       drops the request, and does not suspend. A ``resume`` hook never
+       repeats the request. A ``suspend`` hook drops it. The ``terminate``
+       hook and ``close()`` drop it, and a job end after either records
+       none.
     4. A call refused for now is retried only when the session suspends
        when idle.
 
@@ -530,9 +532,15 @@ class MicrovmWorkerListener:
         self._suspend_target: _SuspendTarget | None = None
         # The callback ID of the suspendAfter job whose end asked for a
         # suspend that has not started yet. The request fires when no work
-        # runs. A call that starts clears it, so a resume hook never repeats
-        # it. A suspend hook, the terminate hook, and close() clear it too.
+        # runs, and waits for the first accepted run hook, which sets the
+        # target. A call that starts clears it, so a resume hook never
+        # repeats it. A suspend hook, the terminate hook, and close() clear
+        # it too.
         self._suspend_requested: str | None = None
+        # Set when the worker has logged that a request waits for the run
+        # hook. An image without the run hook would make every such job log
+        # it. So the worker logs it once.
+        self._warned_run_hook_wait = False
         # Each timer action carries the generation it was started with, and
         # acts only when it is still current. Cancelling a timer increments
         # the generation.
@@ -1249,7 +1257,11 @@ class MicrovmWorkerListener:
             # now. The suspend runs after this block, so that no lock is
             # held while it logs or starts its thread. During a suspend
             # refusal, the MicroVM is suspending already. So a job that ends
-            # then asks for nothing.
+            # then asks for nothing. A request that comes before the first
+            # accepted run hook waits for it. An image without the run hook
+            # never ends that wait. So the worker warns the first time a
+            # request starts to wait.
+            warn_run_hook_wait = False
             with self._locked():
                 callback_id = job.callback_id
                 suspend_after = callback_id in self._suspend_after_jobs
@@ -1264,8 +1276,18 @@ class MicrovmWorkerListener:
                     self._terminating or self._closed or self._suspending
                 ):
                     self._suspend_requested = callback_id
+                    if not (self._run_hook_accepted or self._warned_run_hook_wait):
+                        self._warned_run_hook_wait = True
+                        warn_run_hook_wait = True
                 self._changed.notify_all()
                 decision = self._take_job_suspend()
+            if warn_run_hook_wait:
+                self._logger.warning(
+                    "a job asked to suspend the MicroVM before the run hook "
+                    "arrived. The worker waits for the run hook to name the "
+                    "MicroVM.",
+                    extra={"callbackId": callback_id},
+                )
             self._act_on_job_suspend(decision)
 
     def _run_job_and_report(
@@ -1685,11 +1707,21 @@ class MicrovmWorkerListener:
         fires now.
 
         The request fires when no job, failure report, run hook, or
-        SuspendMicrovm call runs, and the listener is not terminating, not
-        closed, and not refusing jobs for a suspend. Each event that can
-        change one of these calls this method: a job end, a report end, a
-        run hook end, and a call end. Firing clears the request, and stops
-        an idle timer that auto-suspend armed.
+        SuspendMicrovm call runs. Each event that can change one of these
+        calls this method: a job end, a report end, a run hook end, and a
+        call end. Firing clears the request, and stops an idle timer that
+        auto-suspend armed.
+
+        The terminate hook and ``close()`` drop the request, and a job end
+        after either records none. A suspend refusal drops the request too,
+        and a job end during a refusal records none. So these states need
+        no check here.
+
+        HTTP jobs can arrive before the run hook. A request that is due
+        before the first accepted run hook stays pending, because that hook
+        sets the target. The end of that hook calls this method again. The
+        request then fires when the hook named a MicroVM, and is dropped
+        with a warning when it named none.
 
         The caller holds the lock through :meth:`_locked`. It passes the
         result to :meth:`_act_on_job_suspend` after it releases the lock. So
@@ -1702,14 +1734,13 @@ class MicrovmWorkerListener:
             or self._jobs
             or self._reports
             or self._run_hooks
-            or self._terminating
-            or self._closed
-            or self._suspending
             or self._suspend_calls
         ):
             return None
-        self._suspend_requested = None
         target = self._suspend_target
+        if target is None and not self._run_hook_accepted:
+            return None
+        self._suspend_requested = None
         if target is None:
             return _JobSuspend(callback_id=callback_id, call=None)
         self._stop_idle_time()

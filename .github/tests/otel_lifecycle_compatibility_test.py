@@ -42,7 +42,7 @@ class NoNetworkClient:
 @pytest.mark.parametrize("order", ["alone", "baggage-first", "baggage-last"])
 @pytest.mark.parametrize("ambient_present", [False, True])
 def test_installed_factory_pair_preserves_worker_context(view, order, ambient_present):
-    assert Version(version("aws-durable-execution-sdk-python")) == Version("3.0.0")
+    assert Version(version("aws-durable-execution-sdk-python")) == Version("3.0.1")
     assert version("aws-durable-execution-sdk-python-otel") == "2.0.0"
     assert "site-packages" in Path(core_execution.__file__).resolve().parts
     import aws_durable_execution_sdk_python_otel as installed_otel
