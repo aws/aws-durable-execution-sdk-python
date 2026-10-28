@@ -56,6 +56,7 @@ from aws_durable_execution_sdk_python.plugin import (
 from aws_durable_execution_sdk_python.state import (
     _BLOCKED_CALLER_WAIT_SECONDS,
     _STOP_SIGNAL_POLL_SECONDS,
+    _BatchAccumulator,
     _Signal,
     CheckpointBatcherConfig,
     CheckpointedResult,
@@ -1365,6 +1366,96 @@ def test_collect_checkpoint_batch_uses_overflow_queue():
     assert len(batch) >= 2
     assert batch[0].operation_update.operation_id == "overflow_1"
     assert batch[1].operation_update.operation_id == "overflow_2"
+
+
+def _oversized_queued_operation(
+    operation_id: str, max_batch_size_bytes: int
+) -> QueuedOperation:
+    """A sync operation whose serialized size alone exceeds the batch limit."""
+    return QueuedOperation(
+        OperationUpdate(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            action=OperationAction.SUCCEED,
+            payload="y" * (2 * max_batch_size_bytes),
+        ),
+        CompletionEvent(),
+    )
+
+
+def test_collect_checkpoint_batch_sends_oversized_operation_from_overflow() -> None:
+    """An operation above max_batch_size_bytes that reached the overflow queue is
+    still sent, alone, in the next batch (issue #871).
+
+    This is the default AT_LEAST_ONCE_PER_RETRY step shape: a small START is
+    already in the batch when the large SUCCEED arrives, so SUCCEED does not fit
+    and moves to the overflow queue. The next batch must send it rather than
+    return it to the queue forever.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(max_batch_size_bytes=500)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+        batcher_config=config,
+    )
+
+    small_op = QueuedOperation(
+        OperationUpdate(
+            operation_id="big_step",
+            operation_type=OperationType.STEP,
+            action=OperationAction.START,
+        ),
+        None,
+    )
+    large_op = _oversized_queued_operation("big_step", config.max_batch_size_bytes)
+    assert state._calculate_operation_size(large_op) > config.max_batch_size_bytes
+    state._checkpoint_queue.put(small_op)
+    state._checkpoint_queue.put(large_op)
+
+    first_batch = state._collect_checkpoint_batch()
+    assert first_batch == [small_op]
+    assert state._overflow_queue.qsize() == 1
+
+    # The handler thread is blocked on large_op, so no further operation will
+    # arrive. Stopping the batcher makes a regression return [] instead of
+    # blocking the test forever in _wait_for_first_operation.
+    state._checkpointing_stopped.set()
+    second_batch = state._collect_checkpoint_batch()
+    assert second_batch == [large_op]
+    assert state._overflow_queue.empty()
+
+
+def test_drain_overflow_takes_oversized_operation_when_batch_is_empty() -> None:
+    """_drain_overflow adds an operation above the size limit to an empty batch,
+    and refuses it once the batch holds another operation.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(max_batch_size_bytes=500)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+        batcher_config=config,
+    )
+    first_large = _oversized_queued_operation("large_1", config.max_batch_size_bytes)
+    second_large = _oversized_queued_operation("large_2", config.max_batch_size_bytes)
+    state._overflow_queue.put(first_large)
+    state._overflow_queue.put(second_large)
+
+    batch = _BatchAccumulator(config)
+    state._drain_overflow(batch)
+
+    # The first operation is taken despite its size. The second does not fit
+    # beside it and stays queued for the next batch.
+    assert batch.operations == [first_large]
+    assert state._overflow_queue.qsize() == 1
+    assert state._overflow_queue.get_nowait() is second_large
 
 
 def test_collect_checkpoint_batch_handles_empty_checkpoint():
