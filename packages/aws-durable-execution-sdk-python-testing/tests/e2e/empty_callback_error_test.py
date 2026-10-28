@@ -39,7 +39,7 @@ from aws_durable_execution_sdk_python_testing.stores.memory import (
 
 @pytest.mark.parametrize("filesystem", [False, True])
 @pytest.mark.parametrize("error_kind", ["omitted", "empty", "rich"])
-def test_live_callback_failure_normalizes_before_persistence(
+def test_live_callback_failure_preserves_error_through_persistence(
     filesystem: bool,
     error_kind: str,
     tmp_path: Path,
@@ -60,7 +60,7 @@ def test_live_callback_failure_normalizes_before_persistence(
         if error_kind == "rich"
         else ErrorObject.from_dict({})
     )
-    expected_error = supplied_error if error_kind == "rich" else None
+    expected_error = supplied_error
     completed_operations: list[Operation] = []
     original_complete = Execution.complete_callback_failure
 
@@ -71,7 +71,7 @@ def test_live_callback_failure_normalizes_before_persistence(
         now: datetime | None = None,
     ) -> Operation:
         # Capture the real API transition before the executor persists it.
-        # A filesystem round-trip must not hide missing boundary normalization.
+        # The same error object must survive both memory and filesystem storage.
         operation = original_complete(execution, callback_id, error, now=now)
         completed_operations.append(operation)
         return operation
@@ -125,13 +125,9 @@ def test_live_callback_failure_normalizes_before_persistence(
     assert len(caught_errors) == 1
     caught = caught_errors[0]
     assert isinstance(caught, CallbackExternalError)
-    assert caught.message == (
-        expected_error.message if expected_error else "Callback failed"
-    )
-    assert caught.data == (expected_error.data if expected_error else None)
-    assert caught.stack_trace == (
-        expected_error.stack_trace if expected_error else None
-    )
+    assert caught.message == (expected_error.message or "Callback failed")
+    assert caught.data == expected_error.data
+    assert caught.stack_trace == expected_error.stack_trace
 
     assert len(completed_operations) == 1
     live = completed_operations[0]
@@ -154,7 +150,7 @@ def test_live_callback_failure_normalizes_before_persistence(
         )
         expected: dict[str, Any] = {"Truncated": not include_data}
         if include_data:
-            expected["Payload"] = expected_error.to_dict() if expected_error else {}
+            expected["Payload"] = expected_error.to_dict()
         assert failed["CallbackFailedDetails"]["Error"] == expected
         decoded = GetDurableExecutionHistoryResponse.from_dict(wire)
         decoded_failed = next(
