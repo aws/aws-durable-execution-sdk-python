@@ -89,7 +89,7 @@ jobs:
     - name: Setup Python
       # The runner image is Amazon Linux; actions/setup-python only ships Ubuntu
       # builds, so uv provides the Python 3.14 interpreter and activates a venv.
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       with:
         python-version: "3.14"
         activate-environment: true
@@ -113,7 +113,7 @@ jobs:
         echo "Using AWS test account $ACTUAL_ACCOUNT_ID"
 
     - name: Setup SAM CLI
-      uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+      uses: aws-actions/setup-sam@341eee193f458fa5aae5d52c94b0c5cf3a1c5a52 # v3
 
     - name: Build conformance handlers
       run: python3 scripts/build_examples.py
