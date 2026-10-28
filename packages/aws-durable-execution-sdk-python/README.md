@@ -63,6 +63,12 @@ earlier invocation), or put it on the factory, which outlives every invocation â
 keyed by execution ARN, and pruned by the owner, because the SDK will not tell the
 factory when an execution ends for good.
 
+Invocation operation-map snapshots and terminal `OperationEndInfo` own a copy of
+the error's mutable stack-trace list, including virtual child completions without
+a checkpoint. A plugin may modify that list without changing the checkpointed
+error, the child error raised to the caller, or a later snapshot. Plugins receiving
+the same hook object still share that snapshot; it is not copied for each plugin.
+
 A factory is an object with a method rather than a plain callable so the
 registration type can grow a second, optional member later -- a process-level
 flush on execution-environment shutdown, for example -- without a second breaking
