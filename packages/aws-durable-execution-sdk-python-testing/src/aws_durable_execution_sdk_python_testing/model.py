@@ -2250,6 +2250,14 @@ class Event:
             if callback_details
             else None
         )
+        if (
+            context.include_execution_data
+            and callback_details is not None
+            and callback_details.error is None
+        ):
+            # Detailed failure history retains empty payload presence. Do not
+            # mutate the absent diagnostics in the SDK-facing operation state.
+            event_error = EventError(payload=ErrorObject.from_dict({}), truncated=False)
         return cls(
             event_type=EventType.CALLBACK_FAILED.value,
             event_timestamp=context.end_timestamp,
@@ -2607,6 +2615,11 @@ HISTORY_EVENT_TYPES: dict[str, HistoryEventTypeConfig] = {
 }
 
 
+def _operation_error(error: ErrorObject | None) -> ErrorObject | None:
+    """Normalize history's empty payload to absent SDK-state diagnostics."""
+    return error if error is not None and error.to_dict() else None
+
+
 def events_to_operations(events: list[Event]) -> list[Operation]:
     """Convert a list of history events into operations.
 
@@ -2751,7 +2764,7 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
                 callback_details=CallbackDetails(
                     callback_id=callback_id,
                     result=result,
-                    error=error,
+                    error=_operation_error(error),
                 ),
             )
 
@@ -2792,7 +2805,7 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
                 operation,
                 step_details=StepDetails(
                     result=result_val,
-                    error=error_val,
+                    error=_operation_error(error_val),
                     attempt=attempt,
                     next_attempt_timestamp=next_attempt_ts,
                 ),
@@ -2825,7 +2838,9 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
                     operation,
                     context_details=ContextDetails(
                         result=None,
-                        error=event.context_failed_details.error.payload,
+                        error=_operation_error(
+                            event.context_failed_details.error.payload
+                        ),
                     ),
                 )
 
@@ -2850,7 +2865,9 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
                     operation,
                     chained_invoke_details=ChainedInvokeDetails(
                         result=None,
-                        error=event.chained_invoke_failed_details.error.payload,
+                        error=_operation_error(
+                            event.chained_invoke_failed_details.error.payload
+                        ),
                     ),
                 )
 

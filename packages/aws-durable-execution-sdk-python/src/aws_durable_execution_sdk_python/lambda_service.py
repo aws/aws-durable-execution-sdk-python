@@ -209,7 +209,7 @@ class ContextDetails:
         return cls(
             replay_children=data.get("ReplayChildren", False),
             result=data.get("Result"),
-            error=ErrorObject.from_dict(error_raw) if error_raw is not None else None,
+            error=ErrorObject.from_dict(error_raw) if error_raw else None,
         )
 
 
@@ -346,7 +346,7 @@ class StepDetails:
             attempt=data.get("Attempt", 0),
             next_attempt_timestamp=data.get("NextAttemptTimestamp"),
             result=data.get("Result"),
-            error=ErrorObject.from_dict(error_raw) if error_raw is not None else None,
+            error=ErrorObject.from_dict(error_raw) if error_raw else None,
         )
 
 
@@ -371,7 +371,7 @@ class CallbackDetails:
         return cls(
             callback_id=data["CallbackId"],
             result=data.get("Result"),
-            error=ErrorObject.from_dict(error_raw) if error_raw is not None else None,
+            error=ErrorObject.from_dict(error_raw) if error_raw else None,
         )
 
 
@@ -385,7 +385,7 @@ class ChainedInvokeDetails:
         error_raw = data.get("Error")
         return cls(
             result=data.get("Result"),
-            error=ErrorObject.from_dict(error_raw) if error_raw is not None else None,
+            error=ErrorObject.from_dict(error_raw) if error_raw else None,
         )
 
 

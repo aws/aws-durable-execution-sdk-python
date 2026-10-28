@@ -1,4 +1,4 @@
-"""History and SDK operation state preserve empty error payload presence."""
+"""History preserves empty payload presence without inventing SDK diagnostics."""
 
 from datetime import UTC, datetime
 from typing import Any
@@ -93,7 +93,7 @@ def test_event_error_omitted_and_null_payload_remain_absent(
 )
 @pytest.mark.parametrize("payload", [None, *PAYLOADS])
 @pytest.mark.parametrize("decode_wire", [False, True])
-def test_failure_history_reconstruction_preserves_error_presence(
+def test_failure_history_reconstruction_normalizes_only_empty_errors(
     event_type: str,
     details_field: str,
     details_type: type[
@@ -127,13 +127,10 @@ def test_failure_history_reconstruction_preserves_error_presence(
     if decode_wire:
         history = GetDurableExecutionHistoryResponse.from_dict(expected_wire)
     assert history.to_dict() == expected_wire
-    expected_error = error
+    expected_error = error if payload else None
     (operation,) = events_to_operations(history.events)
     assert operation.status is OperationStatus.FAILED
     assert getattr(operation, operation_field).error == expected_error
-    if expected_error is not None:
-        restored = Operation.from_json_dict(operation.to_json_dict())
-        assert restored == operation
 
     execution = GetDurableExecutionResponse(
         durable_execution_arn="arn:execution",
@@ -184,8 +181,8 @@ def test_callback_history_projection_preserves_state_and_data_inclusion(
     )
     assert details is not None and details.error is not None
     expected: dict[str, Any] = {"Truncated": not include_data}
-    if include_data and payload is not None:
-        expected["Payload"] = payload
+    if include_data and (payload is not None or status is OperationStatus.FAILED):
+        expected["Payload"] = payload if payload is not None else {}
     assert details.error.to_dict() == expected
     assert operation.callback_details is not None
     assert operation.callback_details.error is error

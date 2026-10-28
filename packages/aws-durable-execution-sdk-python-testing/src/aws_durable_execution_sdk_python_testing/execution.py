@@ -709,7 +709,9 @@ class Execution:
             updated_callback_details = None
             if operation.callback_details:
                 updated_callback_details = replace(
-                    operation.callback_details, error=error
+                    operation.callback_details,
+                    # Match SDK state after serialization: Error={} has no diagnostics.
+                    error=error if error.to_dict() else None,
                 )
 
             self.operations[index] = replace(
