@@ -15,6 +15,7 @@ from aws_durable_execution_sdk_python.exceptions import ValidationError
 from aws_durable_execution_sdk_python_extras.microvm import (
     MAX_JOB_INPUT_BYTES,
     MicrovmConfig,
+    MicrovmInvokeOptions,
     MicrovmRequestConfig,
     microvm,
 )
@@ -328,3 +329,36 @@ def test_accepts_dots_that_are_not_a_dot_segment(path: str) -> None:
         operation._validate_request("build", MicrovmRequestConfig(path=path))  # noqa: SLF001
         == 60
     )
+
+
+@pytest.mark.parametrize(
+    ("suspend_after", "message"),
+    [
+        (True, "suspend_after applies only to a session job"),
+        (1, "suspend_after must be a bool"),
+        (0, "suspend_after must be a bool"),
+        ("true", "suspend_after must be a bool"),
+        (None, "suspend_after must be a bool"),
+    ],
+)
+def test_rejects_suspend_after_in_the_request_of_microvm(
+    suspend_after: Any, message: str
+) -> None:
+    # MicrovmInvokeOptions subclasses MicrovmRequestConfig. So it passes the
+    # type of config.request, and microvm() checks the field itself.
+    request = MicrovmInvokeOptions(
+        timeout=Duration.from_minutes(1),
+        suspend_after=suspend_after,
+    )
+
+    with pytest.raises(ValidationError, match=message):
+        microvm(NoOperations(), "build", job_input={}, config=config(request=request))  # type: ignore[arg-type]
+
+
+def test_accepts_invoke_options_without_suspend_after_as_the_request_of_microvm() -> (
+    None
+):
+    request = MicrovmInvokeOptions(timeout=Duration.from_minutes(1), path="/build")
+
+    with pytest.raises(AssertionError, match="no durable operation may start"):
+        microvm(NoOperations(), "build", job_input={}, config=config(request=request))  # type: ignore[arg-type]

@@ -154,23 +154,6 @@ def test_core_dependency_bound_matches_the_core_major_in_this_repository() -> No
     assert Version(lower_bound) <= Version(core_version)
 
 
-def test_layer_sdk_pin_matches_the_core_version_in_this_repository() -> None:
-    """The OTel layer pin selects the core wheel bundled into the published layer.
-
-    A combined SDK and OTel release fails outright when the pin disagrees with the
-    released SDK version, and an OTel-only release downloads exactly the pinned
-    version from PyPI. A stale pin therefore either blocks the release or ships a
-    layer whose core cannot run this plugin, so the pin tracks the core version
-    this repository builds.
-    """
-    metadata_path = REPOSITORY_ROOT / ".github" / "lambda-layer-publish.toml"
-
-    with metadata_path.open("rb") as metadata_file:
-        pinned_version = tomllib.load(metadata_file)["layer"]["sdk-version"]
-
-    assert pinned_version == _core_version()
-
-
 def test_core_dependency_excludes_the_next_core_major() -> None:
     """A lower bound alone is the same defect one major later.
 

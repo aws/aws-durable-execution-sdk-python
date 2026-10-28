@@ -100,7 +100,7 @@ Every MicroVM failure is a `MicrovmError`. Catch the base class for all of them,
 |---|---|
 | `MicrovmLaunchError` | `RunMicrovm` failed after all retries, or the launch request was not valid, for example with an empty `image_identifier` or `execution_role_arn`. A MicroVM can still run the job. The list below the table says when. |
 | `MicrovmDeliveryError` | HTTP delivery failed after all retries, or the route answered a 4xx status such as 404, or a redirect. |
-| `MicrovmNotRunningError` | A `MicrovmDeliveryError`: the MicroVM is terminating, terminated, or removed. It is not retried. A session that checks the MicroVM state before each job reports it. Any job over HTTP also reports it when `CreateMicrovmAuthToken` reports the MicroVM removed. See [Suspending an idle MicroVM](#suspending-an-idle-microvm). |
+| `MicrovmNotRunningError` | A `MicrovmDeliveryError`: the MicroVM is terminating, terminated, or removed. It is not retried. A session that checks the MicroVM state before each job reports it, and so does a session job that checks the state after a sign of a suspended MicroVM. Any job over HTTP also reports it when `CreateMicrovmAuthToken` reports the MicroVM removed. See [Suspending an idle MicroVM](#suspending-an-idle-microvm) and [Suspending after a job](#suspending-after-a-job). |
 | `MicrovmJobFailedError` | The job handler in the MicroVM failed, or the MicroVM sent a result that is not valid JSON. The message includes the error type that the MicroVM reported. |
 | `MicrovmTimeoutError` | No result arrived within `timeout`, or no heartbeat within `heartbeat_timeout`. A MicroVM that crashed ends this way. |
 
@@ -260,7 +260,7 @@ A MicroVM lives at most its `timeout` plus 5 minutes, and never longer than 8 ho
 
 - For a session that launched with `auto_suspend_on_idle=True`, or with an `idle_policy`, the request step calls `GetMicrovm` before each job. A MicroVM that is terminating, terminated, or removed then fails the job at once with `MicrovmNotRunningError`, a subclass of `MicrovmDeliveryError`. A retry finds the same state, so the job is not retried. The message ends with the request ID of the call that reported the state, for example `GetMicrovm request ID: <id>.`.
 - Every session, and every `microvm` job over HTTP, calls `CreateMicrovmAuthToken` before the first request, and again after a 401 or 403. The API model lists `ResourceNotFoundException` for that call. That answer fails the job at once with `MicrovmNotRunningError`, whose message ends with `CreateMicrovmAuthToken request ID: <id>.`. The live service's answer for a removed MicroVM is not verified.
-- A session that launched with neither setting makes no `GetMicrovm` call. When `CreateMicrovmAuthToken` returns a token, the request goes to the endpoint. A terminated MicroVM's endpoint answers 502, and the request step retries a 502 as a MicroVM that is still starting. So the job fails with a plain `MicrovmDeliveryError`, after the retries of both tiers.
+- A session that launched with neither setting makes no `GetMicrovm` call before delivery, unless an earlier job of the handle set `suspend_after`. When `CreateMicrovmAuthToken` returns a token, the request goes to the endpoint. A terminated MicroVM's endpoint answers 502. Whether that 502 carries `x-aws-proxy-error: MICROVM_CONNECT_FAILED` is not verified. With that header, the check of [Suspending after a job](#suspending-after-a-job) reports the state, and the job fails with `MicrovmNotRunningError`. Without it, the request step retries a 502 as a MicroVM that is still starting. So the job fails with a plain `MicrovmDeliveryError`, after the retries of both tiers.
 
 Suspending is off by default, because it needs more permissions and changes what the MicroVM does between jobs:
 
@@ -270,9 +270,73 @@ Suspending is off by default, because it needs more permissions and changes what
 
 The worker must support `auto_suspend_on_idle`. The JavaScript worker [`@aws/durable-execution-sdk-js-microvm-worker`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-microvm-worker) and the Python worker [`aws-durable-execution-sdk-python-microvm-worker`](../aws-durable-execution-sdk-python-microvm-worker) both do. `idle_policy` works with both workers. Enable the `suspend` and `resume` hooks in the image. The worker then refuses jobs while the MicroVM freezes, and accepts them again as soon as it resumes. Without the `resume` hook, the first job after a resume can wait a little over 30 seconds, until the worker's refusal ends and the request step delivers again.
 
+### Suspending after a job
+
+`MicrovmInvokeOptions(suspend_after=True)` asks the worker to suspend the MicroVM after this job. It is an option of one job, not of the session. `microvm` raises `ValidationError` for it, because `microvm` terminates its MicroVM after its one job. A value that is not a `bool` raises `ValidationError` too, before the job's durable operations start.
+
+```python
+build = vm.invoke(
+    ctx,
+    "build",
+    job_input=event,
+    options=MicrovmInvokeOptions(
+        timeout=Duration.from_minutes(15),
+        heartbeat_timeout=Duration.from_seconds(30),
+        suspend_after=True,
+    ),
+)
+approval = ctx.create_callback(name="approval").result()  # a long wait
+vm.invoke(
+    ctx,
+    "deploy",
+    job_input=build,
+    options=MicrovmInvokeOptions(
+        timeout=Duration.from_minutes(10),
+        heartbeat_timeout=Duration.from_seconds(120),
+    ),
+)
+```
+
+What happens:
+
+1. The job request carries `"suspendAfter": true`. The job document stays at version 1, and the field is omitted for every other job. The run hook payload never carries it.
+2. The worker acknowledges the field with the header `X-Microvm-Suspend-After: accepted` in its 202 answer.
+3. The worker suspends the MicroVM when the job has ended and its outcome is reported, and no other job runs. A job that ends while another job runs leaves the request pending. The worker then suspends the MicroVM when the last running job ends.
+4. The worker suspends the MicroVM that its `run` hook named. It never uses the MicroVM ID of a job request.
+5. Each later job of the session handle checks the MicroVM state before delivery, and resumes a suspended MicroVM, as with `auto_suspend_on_idle`. The `suspend_after` job itself checks the state too, because the record is set before the job starts.
+
+The setting works with or without `auto_suspend_on_idle`. With both, the worker suspends right after the job, and the idle time applies after each resume.
+
+The record that a job set `suspend_after` is kept in memory only. A replay of a completed job calls `vm.invoke` again, so it sets the record again. A replay of a completed `map` item, `parallel` branch, or child context does not run its function again. So the next job can skip the state check of a suspended MicroVM. For that case, every session job checks the state after a sign of a suspended MicroVM:
+
+1. The sign is an HTTP 502 with `x-aws-proxy-error: MICROVM_CONNECT_FAILED`, or a request without an answer. A booting MicroVM's endpoint holds the request until the worker listens. A boot gives no such sign, unless the worker takes more than 10 seconds to start listening. Then the first delivery gets no answer, and the operation makes one GetMicrovm call.
+2. The request step calls `GetMicrovm` once. It resumes a `SUSPENDING` or `SUSPENDED` MicroVM, waits for `RUNNING`, and sends the job again. A resume that the service rejects with a conflict while the MicroVM is still suspending is sent again once the MicroVM is suspended.
+3. The check runs again after each failed request, at most once per 2 seconds.
+4. A denied or failed `GetMicrovm` logs one warning per job: `GetMicrovm failed, so the operation could not check whether the MicroVM is suspended. The request step keeps sending the job.` The request step then keeps sending the job. After a denied call, the final `MicrovmEndpointUnavailableError` message adds `GetMicrovm was denied, so the operation could not check whether the MicroVM is suspended.`
+5. A denied `ResumeMicrovm` for a suspending or suspended MicroVM fails the job at once with `MicrovmDeliveryError`. Its message names `lambda:ResumeMicrovm`.
+6. A terminating or terminated MicroVM fails the job with `MicrovmNotRunningError`.
+
+A session with `auto_suspend_on_idle` or an `idle_policy`, and a handle after a `suspend_after` job, keep the state check before delivery. They also keep the check after any 502, 503, or 504, or a request without an answer, and its errors: a denied `GetMicrovm` fails the job.
+
+Use `suspend_after` only on the job before a long wait, such as a durable wait or a callback:
+
+- Not on back-to-back jobs. Each suspend writes a snapshot, and each resume adds about 1 second before the next job.
+- Not on `map` items. A request waits until no job runs. So a `map` with `suspend_after` on its items suspends and resumes between items that do not overlap.
+- Not on the last job. The session terminates the MicroVM after its handler returns, so the snapshot is wasted.
+
+It needs:
+
+1. The `resume` hook in the image. Without it, the worker refuses the next job with HTTP 503 for up to 30 seconds after the suspend.
+2. A `heartbeat_timeout` on the next job of at least its `retry_window` plus 30 seconds. The heartbeat timeout starts before delivery, so it includes the resume and the refusal.
+3. `lambda:GetMicrovm` and `lambda:ResumeMicrovm` in the function's role.
+4. `lambda:SuspendMicrovm` on the image in the MicroVM's role. That permission lets code in any MicroVM of the image suspend any other. So use one image per trust boundary.
+5. A worker that supports the field. An older worker ignores it, and the MicroVM keeps running. Each execution environment then logs one warning per session: `the worker in MicroVM <id> does not support suspendAfter. The MicroVM keeps running after the job.`
+
+A suspend that the service refuses for now, such as a throttle or expired credentials, is not retried without `auto_suspend_on_idle`. The MicroVM then keeps running until a later suspend. With `auto_suspend_on_idle`, the worker tries again after the idle time, as it does for an idle suspend.
+
 ### Session permissions
 
-A session needs the permissions of `microvm` with HTTP delivery: `lambda:RunMicrovm`, `lambda:TerminateMicrovm`, `lambda:CreateMicrovmAuthToken`, `lambda:PassNetworkConnector`, and `iam:PassRole`. Suspending adds the permissions listed above.
+A session needs the permissions of `microvm` with HTTP delivery: `lambda:RunMicrovm`, `lambda:TerminateMicrovm`, `lambda:CreateMicrovmAuthToken`, `lambda:PassNetworkConnector`, and `iam:PassRole`. Suspending adds the permissions listed above. Grant `lambda:GetMicrovm` to every session's function role. Without it, the check after a sign of a suspended MicroVM logs a warning, and the job keeps its retries.
 
 ### Subtypes
 
@@ -342,7 +406,8 @@ The MicroVM operations handle the network, the service, and the worker lifecycle
    - The idle time is at most the session `timeout`.
 
    A value that breaks any one condition raises `ValidationError` when `microvm_session` is called, before any durable operation starts. See [Suspending an idle MicroVM](#suspending-an-idle-microvm).
-4. Change `auto_suspend_on_idle` or `idle_policy` only through a new version, as in [Deploys and versions](#deploys-and-versions). The launch records the resume mode, and a deploy changes it only for sessions that launch after it. Every job of a session that launched with suspending needs `lambda:GetMicrovm` and `lambda:ResumeMicrovm`, also after a deploy turns suspending off. So remove them from the function's role only as [Suspending an idle MicroVM](#suspending-an-idle-microvm) describes.
+4. Set `suspend_after` only on the job before a long wait, and give the next job a `heartbeat_timeout` of at least its `retry_window` plus 30 seconds. On back-to-back jobs and `map` items, each suspend and resume adds latency and a snapshot. A shorter heartbeat timeout can fail the next job with `MicrovmTimeoutError` while the MicroVM resumes. Keep `lambda:GetMicrovm` and `lambda:ResumeMicrovm` in the function's role after a deploy that removes `suspend_after`, until every session that ran such a job has ended. See [Suspending after a job](#suspending-after-a-job).
+5. Change `auto_suspend_on_idle` or `idle_policy` only through a new version, as in [Deploys and versions](#deploys-and-versions). The launch records the resume mode, and a deploy changes it only for sessions that launch after it. Every job of a session that launched with suspending needs `lambda:GetMicrovm` and `lambda:ResumeMicrovm`, also after a deploy turns suspending off. So remove them from the function's role only as [Suspending an idle MicroVM](#suspending-an-idle-microvm) describes.
 
 ### Retry strategies
 

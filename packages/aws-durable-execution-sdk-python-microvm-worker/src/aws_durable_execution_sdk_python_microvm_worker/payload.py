@@ -235,6 +235,14 @@ class MicrovmJobRequest:
     """The MicroVM identifier. A job request can reach the worker before the
     ``run`` hook, which also carries the identifier. Until the ``run`` hook
     arrives, the worker takes it from the first job request that has one."""
+    suspend_after: bool = False
+    """Whether the worker suspends its MicroVM after the job.
+
+    Wire name: ``suspendAfter``. Only a JSON ``true`` turns it on. The
+    worker ignores any other value, as the JavaScript worker does. So a
+    document from either SDK has the same meaning in both workers. The
+    worker suspends the MicroVM named by the ``run`` hook, never the
+    ``microvmId`` of the request."""
 
     @classmethod
     def from_dict(cls, body: object) -> MicrovmJobRequest:
@@ -267,6 +275,7 @@ class MicrovmJobRequest:
             region=region,
             job=job,
             microvm_id=microvm_id,
+            suspend_after=body.get("suspendAfter") is True,
         )
 
 

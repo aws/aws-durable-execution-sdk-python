@@ -352,4 +352,46 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     Set it on every job. A MicroVM that ends while suspended, or whose image
     disables the ``terminate`` hook, reports nothing. The heartbeat timeout
     is then the only way that the job fails soon after the MicroVM ends.
+
+    A job after a :attr:`suspend_after` job waits for the resume of the
+    MicroVM. The worker can refuse it with HTTP 503 for up to 30 seconds
+    before that. So set the heartbeat timeout of such a job to at least the
+    ``retry_window`` plus 30 seconds.
+    """
+
+    suspend_after: bool = False
+    """Whether the worker suspends the MicroVM after this job. Defaults to
+    ``False``.
+
+    The worker suspends the MicroVM when the job has ended and its outcome is
+    reported, and no other job runs. A job that ends while another job runs
+    leaves the request pending. The worker then suspends the MicroVM when
+    the last running job ends. The next job of the session resumes the
+    MicroVM before it is delivered. The ``suspend_after`` job itself checks
+    the state too, because the record is set before the job starts. The
+    setting works with or without
+    :attr:`MicrovmSessionConfig.auto_suspend_on_idle`.
+
+    Set it on the job before a long wait, such as a durable wait or a
+    callback. Do not set it on back-to-back jobs, on ``map`` items, or on
+    the last job of the session. Each suspend and resume costs a snapshot
+    and about 1 second of latency for the next job. The session terminates
+    the MicroVM after its last job anyway.
+
+    It needs more than a session without suspending:
+
+    1. The image enables the ``resume`` hook. Without it, the next job waits
+       up to 30 seconds of HTTP 503 answers.
+    2. The function's role has ``lambda:GetMicrovm`` and
+       ``lambda:ResumeMicrovm``.
+    3. The MicroVM's role has ``lambda:SuspendMicrovm`` on the image.
+    4. The worker supports the setting. An older worker ignores it, and the
+       MicroVM keeps running. Each execution environment then logs one
+       warning per session.
+
+    A suspend that the service refuses for now is not retried, unless
+    :attr:`MicrovmSessionConfig.auto_suspend_on_idle` is ``True``. Only
+    :meth:`MicrovmSession.invoke` accepts it. :func:`microvm` raises
+    ``ValidationError`` for it. A value that is not a ``bool`` raises
+    ``ValidationError`` too.
     """

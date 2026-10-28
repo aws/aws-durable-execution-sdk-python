@@ -22,19 +22,156 @@ Each package maintains its own version in its respective `__about__.py` file:
 - Testing: `packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing/__about__.py`
 - Telemetry Exporter: `packages/aws-durable-execution-sdk-python-telemetry-exporter/src/aws_durable_execution_sdk_python_telemetry_exporter/__about__.py`
 
-Bump the version in the appropriate `__about__.py` file(s) and merge to `main` before creating a release.
+Set the release version in the appropriate `__about__.py` file(s) and merge to
+`main` before creating a release. Use a new version for an existing distribution,
+or the initial version for a new distribution.
+
+## Release Permissions and Protection
+
+The GitHub `pypi` environment permits deployments only from **tags** matching:
+
+- `sdk-v*`
+- `otel-v*`
+- `testing-v*`
+- `telemetry-exporter-v*`
+
+Branches, including `main` and temporary publishing branches, are not allowed.
+GitHub checks the workflow run's ref; checking out an allowed tag or a merged
+commit inside a branch-triggered workflow does not make that run eligible.
+
+The [protected tags ruleset](https://github.com/aws/aws-durable-execution-sdk-python/rules/25440902)
+restricts creation, updates, deletion, and force pushes for the same tag
+patterns. Have an actor permitted by that ruleset create the release tag at the
+intended merged commit after CI passes. Treat published tags as immutable: use
+a new version and tag for corrections instead of moving, deleting, or
+recreating a published tag, even if your role permits those operations.
+
+When adding a package with a new tag prefix, configure its pattern in **both**
+the [`pypi` environment's deployment rules](https://github.com/aws/aws-durable-execution-sdk-python/settings/environments)
+and the protected tags ruleset before its first release. Updating only the
+workflow matrix or this document is not enough. Keep these protections in
+place for first-time publications as well as later releases.
+
+## Publishing a Package for the First Time
+
+Each distribution name needs its own PyPI project and trusted publisher. This
+also applies when renaming a package: the old project's publisher does not
+carry over to the new name. Trusted publishing uses GitHub Actions OIDC, so this
+process does not require a PyPI API token on your machine or in GitHub secrets.
+
+### 1. Prepare the package
+
+Confirm the distribution name in the package's `pyproject.toml` (`[project].name`)
+and its initial version in `__about__.py`. The distribution name is the name used
+by `pip install`; it can differ from the Python import name.
+
+Add the package to **both** matrices in
+[`pypi-publish.yml`](.github/workflows/pypi-publish.yml): its name and path in
+`release-build`, and its name in `pypi-publish`. Add its path and tag prefix to
+the [Packages](#packages) table above, and configure any new tag prefix as
+described in [Release Permissions and Protection](#release-permissions-and-protection).
+Merge the package and confirm CI passes before publishing. Follow
+[CONTRIBUTING.md](CONTRIBUTING.md) for tests and run
+`hatch build` from the package directory. From the repository root, run
+[`check_dist_legal_files.py`](.github/scripts/check_dist_legal_files.py) with
+`packages/<package-name>` as its argument to verify the wheel and source archive
+include `LICENSE` and `NOTICE`.
+
+### 2. Configure the PyPI publisher
+
+Sign in to the PyPI account that should own the new project. Open
+[Publishing settings](https://pypi.org/manage/account/publishing/), find **Add a
+new pending publisher**, select **GitHub**, and fill in:
+
+| Field | Value |
+|-------|-------|
+| PyPI Project Name | The exact `[project].name` from the new package's `pyproject.toml` |
+| Owner | `aws` |
+| Repository name | `aws-durable-execution-sdk-python` |
+| Workflow name | `pypi-publish.yml` |
+| Environment name | `pypi` |
+
+**Owner** is the GitHub organization, not the PyPI username. **Workflow name**
+is the filename, without `.github/workflows/`; it is not the display name
+`Upload PyPI Package`. Enter `pypi` for the environment even though the form
+marks it optional, because the publishing job uses that GitHub environment.
+
+Click **Add**. The publisher remains pending until the first successful upload,
+which creates the project and converts it to a regular trusted publisher. The
+PyPI account that registered it becomes a project owner. A pending publisher
+**does not reserve the name**. See PyPI's
+[first-project publishing guide](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/).
+
+If you need to claim a name without uploading a release and have access to a
+PyPI organization, use the organization's **Manage → Projects → Create and add
+a new project** action instead ([instructions](https://docs.pypi.org/organization-accounts/actions/project-actions/#create-a-project)).
+Then add the trusted publisher through that project's **Publishing** settings.
+A public PyPI 404 alone does not prove a name is free; a project can exist
+without any releases ([name availability](https://pypi.org/help/#project-name)).
+
+### 3. Publish the first version
+
+Follow [Cutting a Release](#cutting-a-release) below using an allowed release tag.
+The initial version only needs to be unused under the new distribution name;
+there is no need to bump it just to create the project.
+
+Check the entire release scope first. The current workflow publishes **all
+packages in both matrices**, regardless of the release's tag prefix. After
+PyPI publishing succeeds, it calls
+[`ecr-release.yml`](.github/workflows/ecr-release.yml), which publishes the
+testing emulator image only when the tag includes `testing-v<version>`. Do not
+create a GitHub release solely to claim one name if those other publications
+are not intended.
+
+The current PyPI workflow has no package selector or manual-dispatch trigger,
+and the environment rules prevent publishing from a temporary branch. If only
+the new package should be uploaded, first review and merge workflow changes
+that limit publication to the intended package and avoid the unrelated emulator
+image release, while retaining the tag protections. Include those changes in
+the release's tagged commit. For name reservation without an upload, use the
+PyPI organization project-creation option above.
+
+### 4. Verify the project
+
+Check that the workflow ran on the intended release tag, that the tag and the
+checkout step resolve to the selected merged source commit, and that both the
+build and publish jobs succeeded. On PyPI, verify the project name, version,
+wheel, and source archive. Compare their SHA-256 hashes with the workflow's
+distribution artifact. Confirm the publisher now appears in the project's
+**Publishing** settings and arrange the team's project ownership as needed.
+
+If publishing reports `invalid-pending-publisher` or `invalid-publisher`, check
+the repository owner, repository name, workflow filename, and environment
+against the form values above. Also check that the built distribution's name
+matches **PyPI Project Name**. Correct the configuration before retrying; adding
+the pending publisher by itself does not finish publication.
+
+If GitHub rejects access to the `pypi` environment, check the run's tag ref
+against the allowed patterns. Retrying a branch run or changing its checkout
+does not satisfy a tag-only deployment rule. If tag creation is rejected, have
+an actor permitted by the protected tags ruleset create the intended release
+tag. Do not relax the environment or tag protections to retry a publication.
 
 ## Cutting a Release
 
-### 1. Bump the version
+### 1. Set the version
 
-Update the `__version__` string in the relevant `__about__.py` file(s). Commit and merge to `main`.
+For an existing distribution, update `__version__` in the relevant
+`__about__.py` file(s) to a new version. For a new distribution's first release,
+use the initial version prepared above. Commit and merge to `main`.
 
 ### 2. Create a GitHub Release
 
+If the release creates a new tag, the actor creating it must be permitted by
+the [protected tags ruleset](#release-permissions-and-protection). The tag must
+point to the merged commit whose CI passed, including any publishing workflow
+changes needed for this release.
+
 1. Go to the [Releases page](https://github.com/aws/aws-durable-execution-sdk-python/releases) on GitHub.
 2. Click **Draft a new release**.
-3. Create a new tag following the tagging convention below.
+3. Select the intended merged commit as the target and create a new tag
+   following the tagging convention below. If the tag already exists, verify
+   its target commit before selecting it; do not move it to another commit.
 4. Set the release title (typically the same as the tag).
 5. Write release notes following the format described in [Release Notes Format](#release-notes-format).
 6. Click **Publish release**.
@@ -46,7 +183,7 @@ The tag should be the version of the package being bumped, prepended with a desc
 - **SDK only:** `sdk-v<version>` (e.g., `sdk-v1.6.0`)
 - **OTel only:** `otel-v<version>` (e.g., `otel-v0.3.0`)
 - **Testing only:** `testing-v<version>` (e.g., `testing-v1.2.1`)
-- **Telemetry Exporter only:** `telemetry-exporter-v<version>` (e.g., `telemetry-exporter-v0.0.1`)
+- **Telemetry Exporter only:** `telemetry-exporter-v<version>` (e.g., `telemetry-exporter-v1.0.0`)
 - **Multiple packages in a single release:** comma-separate the sub-tags (e.g., `sdk-v1.6.0,otel-v0.3.0`)
 
 Examples:
@@ -55,11 +192,16 @@ Examples:
 sdk-v1.6.0
 otel-v0.3.0
 testing-v1.2.1
-telemetry-exporter-v0.0.1
+telemetry-exporter-v1.0.0
 sdk-v1.6.0,otel-v0.3.0
 ```
 
-If additional packages are added to the monorepo in the future, follow the same pattern: choose a short descriptive prefix for the package and use `<prefix>-<version>`.
+If additional packages are added to the monorepo in the future, choose a short
+descriptive prefix and use `<prefix>-v<version>`. Configure that prefix in both
+sets of [protection rules](#release-permissions-and-protection) before releasing.
+Combined tags such as `sdk-v1.6.0,otel-v0.3.0` match the `sdk-v*` pattern because
+the full tag name starts with that prefix; the comma-separated parts are not
+separate Git tags.
 
 ## How Publishing Works
 
@@ -69,9 +211,17 @@ Creating a GitHub Release triggers the [`pypi-publish.yml`](.github/workflows/py
 2. **Uploads** the built distributions as artifacts.
 3. **Publishes** each package to [PyPI](https://pypi.org/) using trusted publishing (OIDC-based, no API tokens required).
 
-The workflow runs on the `release: [published]` event, so it fires whenever a release is published on GitHub — no manual intervention is needed beyond creating the release.
+The workflow runs on the `release: [published]` event. Its publishing jobs use
+the protected `pypi` environment, so the release tag must satisfy that
+environment's deployment rules before they can upload to PyPI. The workflow
+and package source come from the tagged revision; later changes on `main` do
+not change an existing release's source.
 
-> **Note:** The workflow builds and publishes all packages in the matrix. Ensure the version in each package's `__about__.py` is correct before publishing. If only one package has a version bump, PyPI will reject the re-upload of the unchanged package (which is expected and harmless since `fail-fast: false` is set).
+> **Note:** The tag prefix does not select packages. The workflow builds and
+> publishes every package in its matrices, including any unrelated version
+> that has not been published yet. Check every package's version before
+> creating a release. PyPI rejects an already published filename; with
+> `fail-fast: false`, that job can fail while other packages still publish.
 
 The [`ecr-release.yml`](.github/workflows/ecr-release.yml) workflow publishes the
 testing emulator image only when the release tag names `testing-v<version>`,
@@ -121,35 +271,6 @@ instead of being treated as a missing image. ECR visibility is polled for up to
 `latest` without a recognized version tag, or pointing to a prerelease ahead of
 the stable release being published, requires manual inspection.
 
-### Lambda layers
-
-Releases containing an `otel-v` tag also trigger the
-[`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
-workflow. It builds the SDK and OTel plugin into Lambda layers for each
-supported Python runtime and architecture, then publishes public versions of the
-`aws-durable-execution-sdk-python-otel-plugin` layer.
-The archive resolves and includes the selected Core wheel's runtime dependencies,
-including boto3/botocore, so it does not depend on the Lambda runtime already
-having the required service model. The plugin wheel is installed without its
-optional provider dependencies; ADOT/community layers continue to own those.
-For OTel-only releases, the workflow downloads the exact SDK version pinned by
-`layer.sdk-version` in `.github/lambda-layer-publish.toml`; that version must
-already be published to PyPI. Combined SDK and OTel releases require the pin to
-match the new SDK version and build both distributions from the tagged source.
-
-The publishing job uses the `lambda-layer-publish` GitHub environment and its
-`LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
-environment variable to a comma-separated list of AWS Regions. When unset, the
-workflow publishes to every commercial AWS Region supported by Lambda.
-The workflow can also be run manually from the Actions tab on `main`; its
-optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
-Each runtime and architecture layer archive is built once and retained as a
-workflow artifact so retries publish the exact same resolved dependencies. Its
-SHA-256 is included in the layer description and verified before reuse.
-The publishing role must allow `lambda:PublishLayerVersion` and
-`lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` and
-`lambda:GetLayerVersion` for identity-checked, idempotent release retries.
-
 ## Release Notes Format
 
 For the coordinated Core 3.0 / OTel 2.0 release, include the
@@ -195,14 +316,22 @@ If only one package is being released, include only that package's section. Each
 
 Before publishing a release:
 
-- [ ] Version bumped in the relevant `__about__.py` file(s)
+- [ ] Release version set in the relevant `__about__.py` file(s)
 - [ ] For a first release of a new distribution name (for example
-      `aws-durable-execution-sdk-python-telemetry-exporter`), PyPI trusted
-      publishing is configured for that name
-- [ ] OTel layer SDK pin identifies a compatible published SDK, or matches the
-      SDK version included in a combined release
+      `aws-durable-execution-sdk-python-telemetry-exporter`), follow
+      [Publishing a Package for the First Time](#publishing-a-package-for-the-first-time)
+      and configure its PyPI publisher before uploading
+- [ ] Every unpublished version in the PyPI matrices is intended for this
+      release, along with the testing emulator image publication when the tag
+      includes `testing-v<version>`
 - [ ] Changes merged to `main`
 - [ ] CI checks pass on `main`
+- [ ] Release tag points to the selected merged, CI-passing commit, including
+      the publishing workflow used for the release
+- [ ] Release tag matches an allowed `pypi` deployment pattern and is covered
+      by the protected tags ruleset; any new prefix is configured in both
+- [ ] The actor creating the release tag is permitted by the protected tags
+      ruleset
 - [ ] Release notes written with separate sections per package
 - [ ] Tag follows the naming convention (`sdk-vX.Y.Z`, `otel-vX.Y.Z`, `testing-vX.Y.Z`,
       `telemetry-exporter-vX.Y.Z`, or comma-separated)
