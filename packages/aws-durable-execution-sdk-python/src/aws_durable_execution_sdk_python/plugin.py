@@ -1805,7 +1805,7 @@ class PluginExecutor:
                 start_time=None,
                 end_time=now,
                 status=status,
-                error=error,
+                error=_copy_error(error),
                 is_replayed=is_replayed,
             ),
         )
@@ -1866,7 +1866,7 @@ class PluginExecutor:
             end_time=operation.end_timestamp,
             result=_extract_result(operation),
             status=operation.status,
-            error=self._extract_error(operation),
+            error=_copy_error(self._extract_error(operation)),
             attempt=(
                 operation.step_details.attempt if operation.step_details else None
             ),
