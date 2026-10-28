@@ -13,6 +13,8 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStatus,
     InvocationStartInfo,
     OperationEndInfo,
+    OperationChangeInfo,
+    OperationInfo,
     OperationStartInfo,
     OperationStatus,
     OperationType,
@@ -34,6 +36,11 @@ from opentelemetry.trace import (
     TraceState,
 )
 
+from aws_durable_execution_sdk_python_otel._invocation_state import (
+    CompletionState,
+    completed_input_parent_ids,
+    parent_first,
+)
 from aws_durable_execution_sdk_python_otel.context_extractors import (
     ContextExtractor,
     ExtractedContext,
@@ -197,6 +204,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # paired with the thread that attached them. Every attach the plugin
         # owns is released through _detach_context so the plugin never leaves a
         # scope on the context stack.
+        # Completion delivery is invocation-owned, separate from active context
+        # segments. Registration and dequeue use the same span-registry lock.
+        self._completions = CompletionState()
+        self._completed_input_parent_ids: set[str] = set()
+        self._completed_parent_spans: dict[str, Span] = {}
         self._context_tokens: dict[str, tuple[int, object]] = {}
         self._operation_spans_lock = threading.RLock()
         self._tracing_enabled = False
@@ -229,9 +241,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         return True
 
     def _set_span(self, operation_id: str | None, span: Span) -> None:
-        """Register the active span for an operation ID."""
+        """Register a segment and dequeue its children in the same critical section."""
         with self._operation_spans_lock:
             self._operation_spans[operation_id] = span
+            pending = (
+                self._completions.take_children(operation_id)
+                if operation_id is not None
+                else []
+            )
+        self._drain_registered_children(pending)
 
     def _delete_span(self, operation_id: str | None) -> None:
         """Remove the active span for an operation ID if one is stored."""
@@ -510,54 +528,53 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             parent_span,
         )
         registry_key = span_key if span_key is not None else operation_id
-        with self._operation_spans_lock:
-            links: list[Link]
-            if not deterministic_span_id or existed:
-                links = []
-                span_id = None
-            else:
-                links = []
-                span_id = (
-                    operation_id_to_span_id(self._execution_arn, operation_id)
-                    if operation_id
-                    else None
-                )
-            should_link_logical_operation = (
-                existed if link_logical_operation is None else link_logical_operation
+        links: list[Link]
+        if not deterministic_span_id or existed:
+            links = []
+            span_id = None
+        else:
+            links = []
+            span_id = (
+                operation_id_to_span_id(self._execution_arn, operation_id)
+                if operation_id
+                else None
             )
-            if should_link_logical_operation and operation_id is not None:
-                operation_context = self._operation_link_context(operation_id)
-                if operation_context is not None and operation_context.is_valid:
-                    links = [*links, Link(context=operation_context)]
-            # Operation and attempt spans link to the execution-scoped Workflow
-            # span (the invocation span itself, operation_id=None, does not).
-            if self._workflow_span is not None and operation_id is not None:
-                workflow_ctx = self._workflow_span.get_span_context()
-                if workflow_ctx and workflow_ctx.is_valid:
-                    links = [*links, Link(context=workflow_ctx)]
-            if parent_span is None:
-                parent_context = self._invocation_parent_context()
-            else:
-                parent_context = self._with_sampling(
-                    trace.set_span_in_context(parent_span, Context())
-                )
-            span_start_time = (
-                self._next_ordered_timestamp(start_time)
-                if operation_id is not None
-                else _to_otel_timestamp(start_time)
+        should_link_logical_operation = (
+            existed if link_logical_operation is None else link_logical_operation
+        )
+        if should_link_logical_operation and operation_id is not None:
+            operation_context = self._operation_link_context(operation_id)
+            if operation_context is not None and operation_context.is_valid:
+                links = [*links, Link(context=operation_context)]
+        # Operation and attempt spans link to the execution-scoped Workflow
+        # span (the invocation span itself, operation_id=None, does not).
+        if self._workflow_span is not None and operation_id is not None:
+            workflow_ctx = self._workflow_span.get_span_context()
+            if workflow_ctx and workflow_ctx.is_valid:
+                links = [*links, Link(context=workflow_ctx)]
+        if parent_span is None:
+            parent_context = self._invocation_parent_context()
+        else:
+            parent_context = self._with_sampling(
+                trace.set_span_in_context(parent_span, Context())
             )
-            with self._id_generator.use_ids(trace_id=None, span_id=span_id):
-                span = self._tracer.start_span(
-                    name=name,
-                    kind=SpanKind.INTERNAL,
-                    attributes=attributes,
-                    start_time=span_start_time,
-                    context=parent_context,
-                    links=links,
-                )
-            self._operation_spans[registry_key] = span
-            if operation_id is None:
-                self._span_time_floor_ns = span_start_time
+        span_start_time = (
+            self._next_ordered_timestamp(start_time)
+            if operation_id is not None
+            else _to_otel_timestamp(start_time)
+        )
+        with self._id_generator.use_ids(trace_id=None, span_id=span_id):
+            span = self._tracer.start_span(
+                name=name,
+                kind=SpanKind.INTERNAL,
+                attributes=attributes,
+                start_time=span_start_time,
+                context=parent_context,
+                links=links,
+            )
+        self._set_span(registry_key, span)
+        if operation_id is None:
+            self._span_time_floor_ns = span_start_time
 
         logger.debug("Started OTel span: %s", span)
         return span
@@ -700,6 +717,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             name="Invocation",
             attributes=self._extract_attributes(info),
         )
+        # A completed input context may re-enter through ReplayChildren. Keep
+        # its logical reference separate until an actual segment can register.
+        self._completed_input_parent_ids = completed_input_parent_ids(info)
+        self._remember_completions(info.updated_operations)
 
         # Last, so that everything this hook makes current is accounted for.
         # Start and End now run in the same worker Context. Attach the
@@ -814,6 +835,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
     def _end_invocation_spans(self, info: InvocationEndInfo) -> None:
         """End this invocation's open spans and export the Workflow span."""
+        self._drain_pending_completions()
         # Spans are registered parent-first, so close pending spans in reverse
         # order to keep every child contained within its parent.
         with self._operation_spans_lock:
@@ -903,6 +925,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._detach_remaining_contexts()
         unbind_invocation(self)
         self._tracing_enabled = False
+        with self._operation_spans_lock:
+            self._completions.clear()
+            self._completed_input_parent_ids.clear()
+            self._completed_parent_spans.clear()
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """Called when an operation begins. Creates a span for the operation."""
@@ -935,22 +961,123 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         )
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
-        """Called when an operation reaches a terminal durable status.
+        """Observe one natural completion, sharing delivery with snapshots."""
+        self._render_operation_end(info)
 
-        Non-user-function operations are started by ``on_operation_start``. If
-        an operation end is observed without a matching in-memory span, this
-        invocation is completing an operation that began earlier, so a short
-        continuation span with a fresh span ID is created and ended.
-        """
+    def on_operation_change(self, info: OperationChangeInfo) -> None:
+        """Retain checkpoint completions until their natural End or finalization."""
+        if self._tracing_enabled:
+            self._remember_completions(info.updated_operations)
+
+    def _remember_completions(self, updates: dict[str, OperationInfo]) -> None:
+        with self._operation_spans_lock:
+            self._completions.remember(updates)
+
+    def _completion_parent_span(self, parent_id: str | None) -> Span | None:
+        """Prefer the active replay segment, then its retained completed context."""
+        with self._operation_spans_lock:
+            return self._operation_spans.get(parent_id) or (
+                self._completed_parent_spans.get(parent_id)
+                if parent_id is not None
+                else None
+            )
+
+    def _drain_pending_completions(self) -> None:
+        """Export pending parents before children while Invocation is still open."""
+        with self._operation_spans_lock:
+            pending = dict(self._completions.pending)
+        for operation in parent_first(pending):
+            parent = self._completion_parent_span(operation.parent_id)
+            if parent is None:
+                parent = self._fallback_parent(operation)
+            self._render_operation_end(operation, fallback_parent=parent)
+
+    def _render_operation_end(
+        self, info: OperationInfo, *, fallback_parent: Span | None = None
+    ) -> None:
+        """Claim a completion outside customer callbacks; record success last."""
         logger.debug("Durable operation ended: %s", info)
         if not self._tracing_enabled:
             return
-        span = self._get_span(info.operation_id)
+
+        with self._operation_spans_lock:
+            span = self._operation_spans.get(info.operation_id)
+            # A replayed/virtual context opens a new invocation segment without
+            # a new durable checkpoint. Only its natural End may close it;
+            # a duplicate durable checkpoint must leave the new segment open.
+            ends_active_context = (
+                info.operation_type is OperationType.CONTEXT
+                and info.start_time is None
+                and (
+                    info.is_replayed
+                    or info.operation_id not in self._context_operation_replays
+                )
+                and span is not None
+                and span.is_recording()
+            )
+            parent_available = (
+                span is not None
+                or info.parent_id is None
+                or fallback_parent is not None
+                or self._completion_parent_span(info.parent_id) is not None
+            )
+            if not self._completions.claim(
+                info,
+                parent_available=parent_available,
+                repeat=ends_active_context,
+            ):
+                return
+        try:
+            self._finish_operation_end(info, span, fallback_parent)
+            with self._operation_spans_lock:
+                self._completions.complete(info)
+        finally:
+            with self._operation_spans_lock:
+                self._completions.release(info.operation_id)
+
+    def _drain_registered_children(self, pending: list[OperationInfo]) -> None:
+        """A child exporter must not interrupt its parent's context attachment."""
+        for operation in pending:
+            try:
+                self._render_operation_end(operation)
+            except Exception:
+                logger.exception(
+                    "Completion export failed while registering parent %s",
+                    operation.parent_id,
+                )
+
+    def _fallback_parent(self, operation: OperationInfo) -> Span:
+        parent_id = operation.parent_id
+        # Referencing completed input metadata is safe only after every pending
+        # ancestor was materialized and actual replay parents had a chance to start.
+        if parent_id in self._completed_input_parent_ids:
+            parent_context = self._operation_link_context(parent_id)
+            if parent_context is not None:
+                return DurableParentSpan(parent_context)
+        invocation_span = self._get_span(None)
+        if invocation_span is None:
+            raise ValueError("No invocation span available for completion fallback")
+        logger.warning(
+            "Using invocation fallback parent for operation %s: parent %s "
+            "has no available span",
+            operation.operation_id,
+            parent_id,
+        )
+        return invocation_span
+
+    def _finish_operation_end(
+        self, info: OperationInfo, span: Span | None, fallback_parent: Span | None
+    ) -> None:
+        """End the claimed segment using the existing terminal rendering path."""
         if span is None:
             # The operation started in a prior invocation. Create a new
             # correlated segment and link it to the deterministic logical
             # operation context shared across invocations.
-            parent_span = self._resolve_parent_span(info.parent_id)
+            parent_span = fallback_parent or self._completion_parent_span(
+                info.parent_id
+            )
+            if parent_span is None:
+                parent_span = self._resolve_parent_span(info.parent_id)
             attributes = self._extract_attributes(info)
             span = self._start_span(
                 operation_id=info.operation_id,
@@ -970,6 +1097,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span.set_status(StatusCode.OK)
 
         self._end_span(info.operation_id, info.end_time)
+        if info.operation_type is OperationType.CONTEXT:
+            with self._operation_spans_lock:
+                self._completed_parent_spans[info.operation_id] = DurableParentSpan(
+                    span.get_span_context(), start_time=info.start_time
+                )
 
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         """Called when a context or step operation starts user code.

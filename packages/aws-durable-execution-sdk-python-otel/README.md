@@ -349,6 +349,31 @@ Invocation span uses that ambient span as its parent. Ambient spans on a
 different trace are ignored for durable parenting so Invocation remains on the
 execution trace.
 
+### Completion snapshots and replay
+
+The plugins consume visible terminal updates from invocation input and checkpoint
+change notifications as well as natural operation End hooks. A completed parent
+can return its cached result without revisiting an updated callback; the plugin
+exports that unvisited completion before the Invocation span closes. Records in
+the full replay snapshot alone are not new completion notifications.
+
+Pending children use a parent segment when it registers during replay, and retain
+that actual parent context if it closes before a later update arrives. Completed
+input-context metadata is used only after replay has had a chance to register its
+current segment. At invocation End, pending parents are exported before their
+children. If a parent's metadata and actual segment are unavailable, Invocation
+view falls back to Invocation; Execution view uses the derived logical parent
+context. The fallback is logged and cannot reconstruct a missing parent span.
+Operation parent links are expected to form the durable service's tree.
+
+Successful completion observations are deduplicated within one invocation.
+Invocation-view ReplayChildren and virtual contexts may still open distinct
+segments; each segment closes with its own natural outcome. Completion metadata
+and retained parent references are released at invocation End, so concurrent
+invocations and warm reuse do not share the delivery state. This is not an
+exactly-once export guarantee across failed or redelivered invocations, nor an
+acknowledgment from the telemetry backend.
+
 ### Synthetic fallback anchor
 
 Each sampled fallback invocation creates and ends `DurableExecutionRoot` at
