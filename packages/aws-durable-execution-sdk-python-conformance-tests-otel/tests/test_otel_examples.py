@@ -50,7 +50,6 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("Otel18ChainedInvokeFailure", "otel-invocation-18"),
     ("Otel19ExecutionFailure", "otel-invocation-19"),
     ("Otel20VirtualContext", "otel-invocation-20"),
-    ("Otel21CompletedStepReplay", "otel-invocation-21"),
     ("Otel22UserFunctionContext", "otel-invocation-22"),
     ("Otel23CallbackFunctionContext", "otel-invocation-23"),
     ("Otel24InvocationRetryStatus", "otel-invocation-24"),
@@ -75,7 +74,6 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("OtelExecution18ChainedInvokeFailure", "otel-execution-18"),
     ("OtelExecution19ExecutionFailure", "otel-execution-19"),
     ("OtelExecution20VirtualContext", "otel-execution-20"),
-    ("OtelExecution21CompletedStepReplay", "otel-execution-21"),
     ("OtelExecution22UserFunctionContext", "otel-execution-22"),
     ("OtelExecution23CallbackFunctionContext", "otel-execution-23"),
     ("OtelExecution24InvocationRetryStatus", "otel-execution-24"),
@@ -294,7 +292,10 @@ def test_deferred_requirements_are_explicit(logical_id: str, suite: str) -> None
             "NotImplemented"
         ]
     }
-    assert set(gaps) == {f"{suite}-25", f"{suite}-26"}
+    assert set(gaps) == {f"{suite}-21", f"{suite}-25", f"{suite}-26"}
+    assert "WaitSucceeded" in gaps[f"{suite}-21"]
+    assert "InvocationCompleted" in gaps[f"{suite}-21"]
+    assert "discussion_r4394770596" in gaps[f"{suite}-21"]
     assert "issues/853" in gaps[f"{suite}-25"]
     assert "issues/862" in gaps[f"{suite}-25"]
     assert "issues/854" in gaps[f"{suite}-26"]

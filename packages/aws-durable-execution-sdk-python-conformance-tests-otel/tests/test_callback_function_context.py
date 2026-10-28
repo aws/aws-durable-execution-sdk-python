@@ -13,6 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 from opentelemetry import context, trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -42,9 +43,19 @@ EXPECTED_PARENTS = {
 @pytest.mark.parametrize(
     "plugin_type", [ExecutionOtelPluginFactory, InvocationOtelPluginFactory]
 )
+@pytest.mark.parametrize(
+    ("helper_outcome", "expected_error"),
+    [
+        ("intentional-failure", None),
+        ("unexpected-failure", "unexpected-helper-failure"),
+        ("unexpected-success", "Expected the intentional helper failure"),
+    ],
+)
 def test_callback_probes_keep_their_actual_sdk_parent(
     monkeypatch: pytest.MonkeyPatch,
     plugin_type: type[ExecutionOtelPluginFactory] | type[InvocationOtelPluginFactory],
+    helper_outcome: str,
+    expected_error: str | None,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     exporter = InMemorySpanExporter()
@@ -74,6 +85,15 @@ def test_callback_probes_keep_their_actual_sdk_parent(
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if helper_outcome != "intentional-failure":
+
+        def changed_helper_body(_context: DurableContext, _attempt: int) -> str:
+            module.probe("with-retry-body")
+            if helper_outcome == "unexpected-failure":
+                raise RuntimeError("unexpected-helper-failure")
+            return "unexpected-success"
+
+        monkeypatch.setattr(module, "helper_body", changed_helper_body)
     try:
         with DurableFunctionTestRunner(handler=module.handler) as runner:
             arn = runner.run_async(
@@ -86,6 +106,15 @@ def test_callback_probes_keep_their_actual_sdk_parent(
             time.sleep(1)
             runner.send_callback_success(callback_id, result=b"callback-complete")
             result = runner.wait_for_result(arn, timeout=15)
+        if expected_error is not None:
+            assert result.status.value == "FAILED"
+            assert result.error is not None
+            assert result.error.message == expected_error
+            assert "conformance.virtual-child" not in {
+                span.name for span in exporter.get_finished_spans()
+            }
+            assert context.get_current() == before_context
+            return
         assert result.status.value == "SUCCEEDED"
         assert result.result is not None
         assert json.loads(result.result) == "callback-context-complete"

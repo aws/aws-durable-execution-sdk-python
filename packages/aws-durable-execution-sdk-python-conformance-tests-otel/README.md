@@ -63,7 +63,7 @@ deploys only the view named by its `OtelSuite` parameter.
 | `otel-invocation-18` | `otel_18_chained_invoke_failure.handler` | Verifies failed chained-invoke telemetry. |
 | `otel-invocation-19` | `otel_19_execution_failure.handler` | Verifies telemetry for a direct handler failure. |
 | `otel-invocation-20` | `otel_20_virtual_context.handler` | Verifies a virtual child-context span without context checkpoints. |
-| `otel-invocation-21` | `otel_21_completed_step_replay.handler` | Replays a completed step after a successful wait/resume; each step body runs once. |
+| `otel-invocation-21` | `otel_21_completed_step_replay.handler` | Local coverage verifies completed steps are skipped after wait/resume; cloud coverage is deferred. |
 | `otel-invocation-22` | `otel_22_user_function_context.handler` | Creates ordinary user spans under the active handler, attempt, child, branch, and iteration contexts. |
 | `otel-invocation-23` | `otel_23_callback_function_context.handler` | Verifies retry/check attempts, callback submitter, wrapped retry helper, and virtual-child callback parents. |
 | `otel-invocation-24` | `otel_24_invocation_retry_status.handler` | Raises a retryable invocation error after a completed step, then resumes with its saved result. |
@@ -88,7 +88,7 @@ deploys only the view named by its `OtelSuite` parameter.
 | `otel-execution-18` | `otel_18_chained_invoke_failure.handler` | Verifies source and target failed workflow roots. |
 | `otel-execution-19` | `otel_19_execution_failure.handler` | Verifies a failed invocation without a completed workflow. |
 | `otel-execution-20` | `otel_20_virtual_context.handler` | Verifies a virtual child-context span under the workflow root. |
-| `otel-execution-21` | `otel_21_completed_step_replay.handler` | Verifies completed-operation spans are exported once across normal successful replay. |
+| `otel-execution-21` | `otel_21_completed_step_replay.handler` | Local coverage verifies completed-operation spans are exported once across replay; cloud coverage is deferred. |
 | `otel-execution-22` | `otel_22_user_function_context.handler` | Observes active execution-view callback contexts without supplying or repairing parents. |
 | `otel-execution-23` | `otel_23_callback_function_context.handler` | Verifies the same SDK-owned callback lifecycle parents in the execution view. |
 | `otel-execution-24` | `otel_24_invocation_retry_status.handler` | Verifies invocation retry status independently of step retry and recovery re-exports. |
@@ -98,10 +98,23 @@ deploys only the view named by its `OtelSuite` parameter.
 | `otel-long-running-3` | `otel_long_running_3_callback.handler` | Verifies callback telemetry when completion arrives after a long delay. |
 | `otel-long-running-4` | `otel_long_running_4_chained_invoke.handler` | Verifies chained-invoke telemetry while the target stays suspended. |
 
-The runner discovers each mapping from `TestingMetadata.TestDescription` on the
-functions in the templates.
+The runner discovers each active cloud mapping from
+`TestingMetadata.TestDescription` on the functions in the templates.
 
-## Deferred callback coverage
+## Deferred cloud coverage
+
+Case 21 is declared `NOT_IMPLEMENTED` in both views until the shared history
+requirement accepts `WaitSucceeded` either before or after
+`InvocationCompleted`. Both catalogs currently require invocation completion
+first, but the wait timer runs independently of invocation cleanup. The
+[execution-view cloud run](https://github.com/aws/aws-durable-execution-sdk-python/actions/runs/40588786563/job/122487525577)
+observed the reverse order while the execution succeeded with `before-after`.
+See the [review finding](https://github.com/aws/aws-durable-execution-sdk-python/pull/796#discussion_r4394770596).
+The handler and local tests remain: they verify one execution of each step
+body, `PENDING`/`SUCCEEDED` invocations, and one export per completed operation
+in the execution view. Re-enable the SAM functions and build targets after the
+shared requirement accepts both history orderings without relaxing those replay
+assertions.
 
 Cases 25 and 26 are declared `NOT_IMPLEMENTED` in both views. Their handlers,
 SAM functions, build targets and local integration tests are deferred until
@@ -258,7 +271,7 @@ orchestrator in the conformance repository and points it at this package with
 the commit under test. The shared workflow tracks the conformance repository's
 `main` branch, and the test catalog defaults to `main`. Manual runs can override
 the catalog with the `conformance_test_ref` input. Pull requests run the
-invocation and execution suites, with cases 25 and 26 reported as
+invocation and execution suites, with cases 21, 25, and 26 reported as
 `NOT_IMPLEMENTED`. The orchestrator no longer runs the legacy long-running
 suite; its templates and local contract tests remain in this package.
 
