@@ -154,6 +154,12 @@ class _BatchAccumulator:
         return self.effective_count >= self._config.max_batch_operations
 
     def fits(self, size: int) -> bool:
+        # An empty batch accepts an operation of any size. An operation above
+        # the limit can only ever be sent alone, so refusing it here would
+        # return it to its queue on every pass, and its sync caller would block
+        # forever. The service, not the batcher, enforces the per-operation limit.
+        if self.is_empty():
+            return True
         return self.total_size + size <= self._config.max_batch_size_bytes
 
     def add(self, op: QueuedOperation, size: int = 0) -> None:
@@ -1487,8 +1493,7 @@ class ExecutionState:
             if isinstance(item, _Signal):
                 self._consume_refresh_wake()
                 continue
-            # The first operation is never refused for size. It could not be
-            # sent otherwise.
+            # The first operation is never refused for size; see fits().
             batch.add(item, self._calculate_operation_size(item))
             return True
         return False

@@ -30,7 +30,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 def test_installed_legacy_registration_fails_before_invocation(
     monkeypatch: pytest.MonkeyPatch, view, name: str, registration: str
 ) -> None:
-    assert version("aws-durable-execution-sdk-python") == "3.0.0"
+    assert version("aws-durable-execution-sdk-python") == "3.0.1"
     assert version("aws-durable-execution-sdk-python-otel") == "1.0.0"
     assert "site-packages" in Path(core_execution.__file__).resolve().parts
     assert "site-packages" in Path(installed_otel.__file__).resolve().parts
