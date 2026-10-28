@@ -6,14 +6,6 @@ below the service's 1 MB per-operation limit. With the default
 batcher still holds it when the sync SUCCEED arrives, and SUCCEED takes the
 overflow path. Before the fix the SUCCEED operation was never sent and the
 handler thread blocked forever, so ``run()`` raised ``TimeoutError``.
-
-The emulated Lambda timeout stays at its 900 s default on purpose. A shorter
-one would re-invoke the handler, and the re-run SUCCEED would open a fresh
-batch and be sent, which would hide the bug.
-
-On a regression the test fails after ``execution_timeout`` (30 s). In local
-runs the pytest process then did not exit on its own. The likely cause is the
-handler thread, which stays blocked on the SUCCEED checkpoint.
 """
 
 from __future__ import annotations
