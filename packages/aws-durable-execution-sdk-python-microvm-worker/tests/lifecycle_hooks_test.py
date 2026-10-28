@@ -3506,6 +3506,10 @@ JOB_SUSPEND_INFO = "suspending the MicroVM after a job"
 NO_TARGET_WARNING = (
     "cannot suspend the MicroVM after a job: the run hook named no MicroVM"
 )
+RUN_HOOK_WAIT_WARNING = (
+    "a job asked to suspend the MicroVM before the run hook arrived. "
+    "The worker waits for the run hook to name the MicroVM."
+)
 
 
 def post_job(h: Harness, callback_id: str, **fields: Any) -> tuple[int, str | None]:
@@ -3825,13 +3829,11 @@ def test_suspends_the_run_hook_microvm_not_the_one_of_the_job_request(
     assert h.microvms.suspended == ["mvm-1"]
 
 
-@pytest.mark.parametrize("run_hook", ["none", "without-payload"])
 def test_warns_and_does_not_suspend_when_no_run_hook_named_a_microvm(
-    start: Any, logger: Any, run_hook: str
+    start: Any, logger: Any
 ) -> None:
     h = start()
-    if run_hook == "without-payload":
-        assert h.post(f"{HOOK_PATH_PREFIX}run", {"microvmId": "mvm-1"}) == 200
+    assert h.post(f"{HOOK_PATH_PREFIX}run", {"microvmId": "mvm-1"}) == 200
     post_job(h, "cb-1", suspendAfter=True, microvmId="mvm-other")
 
     end_job(h, "cb-1")
@@ -3845,6 +3847,101 @@ def test_warns_and_does_not_suspend_when_no_run_hook_named_a_microvm(
     end_job(h, "cb-2")
     assert logger.messages("warning").count(NO_TARGET_WARNING) == 1
     assert h.job("cb-3") == 202
+
+
+def test_a_request_before_the_run_hook_fires_when_the_run_hook_names_a_microvm(
+    start: Any, logger: Any
+) -> None:
+    # HTTP jobs can arrive before the run hook. The job ends before the run
+    # hook, so no target exists yet. The request waits for the run hook,
+    # and fires with the run hook's MicroVM ID.
+    h = start()
+    assert post_job(h, "cb-1", suspendAfter=True, microvmId="mvm-other") == (
+        202,
+        "accepted",
+    )
+    end_job(h, "cb-1")
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested == "cb-1"  # noqa: SLF001
+    assert NO_TARGET_WARNING not in logger.messages("warning")
+
+    assert h.run_hook() == 200
+
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.settle()
+    assert info_lines(logger, JOB_SUSPEND_INFO) == [
+        {"microvmId": "mvm-1", "callbackId": "cb-1"}
+    ]
+    assert NO_TARGET_WARNING not in logger.messages("warning")
+
+
+def test_a_request_before_the_run_hook_is_dropped_when_the_run_hook_names_none(
+    start: Any, logger: Any
+) -> None:
+    # The run hook without a payload names no MicroVM to suspend. So the
+    # request that waited for it is dropped with the warning.
+    h = start()
+    post_job(h, "cb-1", suspendAfter=True, microvmId="mvm-other")
+    end_job(h, "cb-1")
+    assert NO_TARGET_WARNING not in logger.messages("warning")
+
+    assert h.post(f"{HOOK_PATH_PREFIX}run", {"microvmId": "mvm-1"}) == 200
+
+    assert eventually(lambda: NO_TARGET_WARNING in logger.messages("warning"))
+    assert [line for line in logger.lines if line[1] == NO_TARGET_WARNING] == [
+        ("warning", NO_TARGET_WARNING, {"callbackId": "cb-1"})
+    ]
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    post_job(h, "cb-2")
+    end_job(h, "cb-2")
+    assert h.microvms.suspended == []
+    assert logger.messages("warning").count(NO_TARGET_WARNING) == 1
+
+
+def test_warns_once_when_requests_wait_for_the_run_hook(
+    start: Any, logger: Any
+) -> None:
+    # An image without the run hook never ends the wait. The warning is the
+    # only sign of that. Two jobs that wait log it once.
+    h = start()
+    post_job(h, "cb-1", suspendAfter=True)
+    end_job(h, "cb-1")
+    post_job(h, "cb-2", suspendAfter=True)
+    end_job(h, "cb-2")
+
+    assert [line for line in logger.lines if line[1] == RUN_HOOK_WAIT_WARNING] == [
+        ("warning", RUN_HOOK_WAIT_WARNING, {"callbackId": "cb-1"})
+    ]
+    assert h.microvms.suspended == []
+
+
+def test_does_not_warn_of_the_wait_when_the_run_hook_came_first(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    # The job request arrives before the run hook, and ends after it.
+    post_job(h, "cb-1", suspendAfter=True)
+    h.run_hook()
+
+    end_job(h, "cb-1")
+
+    assert h.microvms.suspended == ["mvm-1"]
+    assert RUN_HOOK_WAIT_WARNING not in logger.messages("warning")
+
+
+def test_close_drops_a_request_that_waits_for_the_run_hook(start: Any) -> None:
+    h = start()
+    post_job(h, "cb-1", suspendAfter=True)
+    end_job(h, "cb-1")
+    assert h.listener._suspend_requested == "cb-1"  # noqa: SLF001
+
+    h.listener.close()
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    assert h.run_hook() == 200
+    h.settle()
+
+    assert h.microvms.suspended == []
+    assert h.listener._suspend_requested is None  # noqa: SLF001
 
 
 def test_a_resume_hook_does_not_repeat_the_suspend(start: Any) -> None:
@@ -3939,6 +4036,24 @@ def test_does_not_suspend_after_the_terminate_hook(start: Any) -> None:
 
     assert h.microvms.suspended == []
     assert h.listener._suspend_requested is None  # noqa: SLF001
+
+
+def test_records_no_request_for_a_job_that_ends_after_the_terminate_hook(
+    start: Any,
+) -> None:
+    # The terminate hook clears no request here, because none is pending
+    # yet. Only the job end's check of the terminate hook stops the
+    # suspend.
+    h = start()
+    h.run_hook()
+    post_job(h, "cb-1", suspendAfter=True)
+
+    assert h.hook("terminate", LAMBDA_HEADERS) == 200
+    end_job(h, "cb-1")
+    assert h.worker.idle(WAIT)
+
+    assert h.listener._suspend_requested is None  # noqa: SLF001
+    assert h.microvms.suspended == []
 
 
 def test_does_not_suspend_after_close(start: Any) -> None:

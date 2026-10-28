@@ -9,10 +9,14 @@ import unittest
 from collections.abc import Iterator
 from copy import deepcopy
 from dataclasses import asdict, fields
+from itertools import product
 from unittest.mock import MagicMock, patch
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
+    CallbackDetails,
+    ChainedInvokeDetails,
+    ContextDetails,
     DurableExecutionInvocationOutput,
     ErrorObject,
     InvocationStatus as ServiceInvocationStatus,
@@ -581,6 +585,57 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(USER_FUNCTION_END_INFO.outcome, UserFunctionOutcome.FAILED)
         self.assertEqual(USER_FUNCTION_END_INFO.end_time, END_TS)
         self.assertEqual(USER_FUNCTION_END_INFO.error.message, "boom")
+
+    def test_terminal_snapshot_preserves_operation_fields(self) -> None:
+        operation = Operation(
+            operation_id="step-1",
+            operation_type=ServiceOperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            sub_type="CustomStep",
+            name="saved-step",
+            parent_id="parent-1",
+            start_timestamp=START_TS,
+            end_timestamp=END_TS,
+            step_details=StepDetails(attempt=2, result='"saved"', error=ERROR),
+        )
+
+        info = PluginExecutor(plugins=[])._end_info(operation)
+
+        self.assertIs(type(info), OperationEndInfo)
+        self.assertIs(info.operation_type, OperationType.STEP)
+        self.assertEqual(info.operation_id, "step-1")
+        self.assertEqual(info.sub_type, "CustomStep")
+        self.assertEqual(info.name, "saved-step")
+        self.assertEqual(info.parent_id, "parent-1")
+        self.assertEqual(info.status, OperationStatus.SUCCEEDED)
+        self.assertEqual(info.result, '"saved"')
+        self.assertEqual(info.attempt, 2)
+        self.assertEqual(info.error, ERROR)
+        self.assertIsNot(info.error, ERROR)
+        self.assertEqual(info.start_time, START_TS)
+        self.assertEqual(info.end_time, END_TS)
+        self.assertFalse(info.is_replayed)
+
+    def test_terminal_snapshot_preserves_absent_and_empty_errors(self) -> None:
+        for error in (
+            None,
+            ERROR,
+            ErrorObject(message="boom", type="Error", data=None, stack_trace=[]),
+        ):
+            with self.subTest(error=error):
+                operation = Operation(
+                    operation_id="step-1",
+                    operation_type=ServiceOperationType.STEP,
+                    status=OperationStatus.FAILED,
+                    step_details=StepDetails(error=error),
+                )
+                info = PluginExecutor(plugins=[])._end_info(operation)
+                self.assertEqual(info.error, error)
+                if error is not None:
+                    self.assertIsNot(info.error, error)
+                    assert info.error is not None
+                    if error.stack_trace is not None:
+                        self.assertIsNot(info.error.stack_trace, error.stack_trace)
 
 
 # endregion Dataclass Tests
@@ -1928,6 +1983,107 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
 
         self.assertIsNone(self.executor._operations_provider)  # noqa: SLF001
 
+    def test_plugin_error_mutations_do_not_change_checkpoint_or_later_hooks(
+        self,
+    ) -> None:
+        """Snapshots and terminal hooks must own their mutable error stack traces."""
+        for operation_type, checkpoint_delivery in product(
+            (
+                ServiceOperationType.STEP,
+                ServiceOperationType.CALLBACK,
+                ServiceOperationType.CHAINED_INVOKE,
+                ServiceOperationType.CONTEXT,
+            ),
+            (False, True),
+        ):
+            with self.subTest(
+                operation_type=operation_type, checkpoint_delivery=checkpoint_delivery
+            ):
+                error = ErrorObject(
+                    message="saved error",
+                    type="ExternalError",
+                    data="details",
+                    stack_trace=["original frame"],
+                )
+                operation = Operation(
+                    operation_id="op-1",
+                    operation_type=operation_type,
+                    status=OperationStatus.FAILED,
+                    step_details=(
+                        StepDetails(attempt=2, error=error)
+                        if operation_type is ServiceOperationType.STEP
+                        else None
+                    ),
+                    callback_details=(
+                        CallbackDetails(callback_id="callback-1", error=error)
+                        if operation_type is ServiceOperationType.CALLBACK
+                        else None
+                    ),
+                    chained_invoke_details=(
+                        ChainedInvokeDetails(error=error)
+                        if operation_type is ServiceOperationType.CHAINED_INVOKE
+                        else None
+                    ),
+                    context_details=(
+                        ContextDetails(error=error)
+                        if operation_type is ServiceOperationType.CONTEXT
+                        else None
+                    ),
+                )
+                seen: list[list[str]] = []
+
+                class MutatingPlugin(DurableInstrumentationPlugin):
+                    def on_invocation_start(self, info: InvocationStartInfo) -> None:
+                        snapshot_error = info.updated_operations["op-1"].error
+                        assert snapshot_error is not None
+                        assert snapshot_error.stack_trace is not None
+                        snapshot_error.stack_trace.clear()
+
+                    def on_operation_end(self, info: OperationEndInfo) -> None:
+                        assert info.error is not None
+                        assert info.error.stack_trace is not None
+                        seen.append(list(info.error.stack_trace))
+                        info.error.stack_trace.clear()
+
+                    def on_invocation_end(self, info: InvocationEndInfo) -> None:
+                        snapshot_error = info.operations["op-1"].error
+                        assert snapshot_error is not None
+                        assert snapshot_error.stack_trace is not None
+                        seen.append(list(snapshot_error.stack_trace))
+
+                executor = PluginExecutor([plugin_factory(MutatingPlugin())])
+                with executor.run():
+                    executor.on_invocation_start(
+                        execution_arn="arn:exec",
+                        lambda_context=LAMBDA_CTX,
+                        execution_start_time=START_TS,
+                        is_first_invocation=False,
+                        operations_provider=lambda: {"op-1": operation},
+                        updated_operation_ids=["op-1"],
+                    )
+                    self.assertEqual(error.stack_trace, ["original frame"])
+                    self.assertEqual(seen, [])
+                    # Both delivery paths must snapshot errors before hooks run.
+                    if checkpoint_delivery:
+                        executor.record_end_hooks([operation])
+                        executor.drain_end_hooks()
+                    else:
+                        executor.on_operation_update(operation)
+                    # A later observation must not repeat the terminal hook.
+                    executor.on_operation_update(
+                        [operation],
+                        operations={"op-1": operation},
+                        previous_operations={"op-1": operation},
+                    )
+                    executor.on_invocation_end(
+                        DurableExecutionInvocationOutput(
+                            status=ServiceInvocationStatus.SUCCEEDED,
+                        )
+                    )
+
+                self.assertEqual(seen, [["original frame"]] * 2)
+                self.assertEqual(error.stack_trace, ["original frame"])
+
 
 class TestInvocationInfoCopySafety(unittest.TestCase):
     """Invocation infos carrying the lazy operation map must stay copyable.
@@ -2193,6 +2349,7 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
 
     def test_builds_terminal_operation_info(self):
         captured: list[OperationEndInfo] = []
+        error = ErrorObject("boom", "Error", None, ["original frame"])
 
         class _CapturingPlugin(_TrackingPlugin):
             def on_operation_end(self, info: OperationEndInfo) -> None:
@@ -2214,7 +2371,7 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
             executor.on_child_context_end(
                 identifier,
                 OperationStatus.FAILED,
-                error=ERROR,
+                error=error,
                 is_replayed=True,
             )
 
@@ -2228,7 +2385,11 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
         self.assertEqual(info.parent_id, "parent-1")
         self.assertEqual(info.name, "book-trip")
         self.assertEqual(info.status, OperationStatus.FAILED)
-        self.assertEqual(info.error, ERROR)
+        self.assertEqual(info.error, error)
+        assert info.error is not None
+        assert info.error.stack_trace is not None
+        info.error.stack_trace.clear()
+        self.assertEqual(error.stack_trace, ["original frame"])
         self.assertTrue(info.is_replayed)
         self.assertIsNone(info.start_time)
         assert info.end_time is not None
