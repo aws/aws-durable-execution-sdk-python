@@ -1383,7 +1383,7 @@ def _oversized_queued_operation(
     )
 
 
-def test_collect_checkpoint_batch_sends_oversized_operation_from_overflow():
+def test_collect_checkpoint_batch_sends_oversized_operation_from_overflow() -> None:
     """An operation above max_batch_size_bytes that reached the overflow queue is
     still sent, alone, in the next batch (issue #871).
 
@@ -1429,7 +1429,7 @@ def test_collect_checkpoint_batch_sends_oversized_operation_from_overflow():
     assert state._overflow_queue.empty()
 
 
-def test_drain_overflow_takes_oversized_operation_when_batch_is_empty():
+def test_drain_overflow_takes_oversized_operation_when_batch_is_empty() -> None:
     """_drain_overflow adds an operation above the size limit to an empty batch,
     and refuses it once the batch holds another operation.
     """
