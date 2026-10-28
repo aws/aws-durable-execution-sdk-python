@@ -53,6 +53,8 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("Otel22UserFunctionContext", "otel-invocation-22"),
     ("Otel23CallbackFunctionContext", "otel-invocation-23"),
     ("Otel24InvocationRetryStatus", "otel-invocation-24"),
+    ("Otel25CallbackFailureWithoutError", "otel-invocation-25"),
+    ("Otel26ExternalCallbackReplay", "otel-invocation-26"),
     ("Otel27ChainedInvokeSuspend", "otel-invocation-27"),
     ("OtelExecution1Success", "otel-execution-1"),
     ("OtelExecution2WaitResume", "otel-execution-2"),
@@ -77,6 +79,8 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("OtelExecution22UserFunctionContext", "otel-execution-22"),
     ("OtelExecution23CallbackFunctionContext", "otel-execution-23"),
     ("OtelExecution24InvocationRetryStatus", "otel-execution-24"),
+    ("OtelExecution25CallbackFailureWithoutError", "otel-execution-25"),
+    ("OtelExecution26ExternalCallbackReplay", "otel-execution-26"),
     ("OtelExecution27ChainedInvokeSuspend", "otel-execution-27"),
 ]
 EXPECTED_LONG_RUNNING_MAPPINGS: list[tuple[str, str]] = [
@@ -173,6 +177,8 @@ EXPECTED_MODULES: frozenset[str] = frozenset(
         "otel_22_user_function_context",
         "otel_23_callback_function_context",
         "otel_24_invocation_retry_status",
+        "otel_25_caught_callback_failure_replay",
+        "otel_26_external_callback_completion_replay",
         "otel_long_running_1_wait",
         "otel_long_running_2_retry",
         "otel_long_running_3_callback",
@@ -292,15 +298,10 @@ def test_deferred_requirements_are_explicit(logical_id: str, suite: str) -> None
             "NotImplemented"
         ]
     }
-    assert set(gaps) == {f"{suite}-21", f"{suite}-25", f"{suite}-26"}
+    assert set(gaps) == {f"{suite}-21"}
     assert "WaitSucceeded" in gaps[f"{suite}-21"]
     assert "InvocationCompleted" in gaps[f"{suite}-21"]
     assert "discussion_r4394770596" in gaps[f"{suite}-21"]
-    assert "issues/853" in gaps[f"{suite}-25"]
-    assert "issues/862" in gaps[f"{suite}-25"]
-    assert "issues/854" in gaps[f"{suite}-26"]
-    assert "issues/860" in gaps[f"{suite}-26"]
-    assert "issues/861" in gaps[f"{suite}-26"]
     covered = {
         requirement
         for _, requirement in requirement_mappings(template)
@@ -453,6 +454,12 @@ def test_active_callback_and_retry_handlers_keep_their_mapping(
         assert resources[prefix + "24InvocationRetryStatus"]["Properties"][
             "Handler"
         ] == ("otel_24_invocation_retry_status.handler")
+        assert resources[prefix + "25CallbackFailureWithoutError"]["Properties"][
+            "Handler"
+        ] == ("otel_25_caught_callback_failure_replay.handler")
+        assert resources[prefix + "26ExternalCallbackReplay"]["Properties"][
+            "Handler"
+        ] == ("otel_26_external_callback_completion_replay.handler")
 
 
 def test_template_deploys_only_the_selected_view(template: dict[str, Any]) -> None:

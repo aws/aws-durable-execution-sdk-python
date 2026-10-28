@@ -67,6 +67,8 @@ deploys only the view named by its `OtelSuite` parameter.
 | `otel-invocation-22` | `otel_22_user_function_context.handler` | Creates ordinary user spans under the active handler, attempt, child, branch, and iteration contexts. |
 | `otel-invocation-23` | `otel_23_callback_function_context.handler` | Verifies retry/check attempts, callback submitter, wrapped retry helper, and virtual-child callback parents. |
 | `otel-invocation-24` | `otel_24_invocation_retry_status.handler` | Raises a retryable invocation error after a completed step, then resumes with its saved result. |
+| `otel-invocation-25` | `otel_25_caught_callback_failure_replay.handler` | Catches a callback failure without diagnostic details, then replays it through two callback barriers. |
+| `otel-invocation-26` | `otel_26_external_callback_completion_replay.handler` | Exports an external callback completion before the observed step and preserves its export count across two later barriers. |
 | `otel-invocation-27` | `otel_27_chained_invoke_suspend.handler` | Verifies caller and child invocation spans when the child suspends for a durable wait and resumes. |
 | `otel-execution-1` | `otel_1_success.handler` | Verifies the execution-view workflow, step, and attempt hierarchy. |
 | `otel-execution-2` | `otel_2_wait_resume.handler` | Verifies the execution view across a resumed invocation. |
@@ -92,6 +94,8 @@ deploys only the view named by its `OtelSuite` parameter.
 | `otel-execution-22` | `otel_22_user_function_context.handler` | Observes active execution-view callback contexts without supplying or repairing parents. |
 | `otel-execution-23` | `otel_23_callback_function_context.handler` | Verifies the same SDK-owned callback lifecycle parents in the execution view. |
 | `otel-execution-24` | `otel_24_invocation_retry_status.handler` | Verifies invocation retry status independently of step retry and recovery re-exports. |
+| `otel-execution-25` | `otel_25_caught_callback_failure_replay.handler` | Verifies one failed callback export with ERROR and no exception details while the caught execution succeeds. |
+| `otel-execution-26` | `otel_26_external_callback_completion_replay.handler` | Verifies first-completion export timing and no duplicate export across later callback resumes. |
 | `otel-execution-27` | `otel_27_chained_invoke_suspend.handler` | Verifies caller/child workflow parentage and continuation links across child suspension. |
 | `otel-long-running-1` | `otel_long_running_1_wait.handler` | Verifies wait and resume telemetry across a long durable suspension. |
 | `otel-long-running-2` | `otel_long_running_2_retry.handler` | Verifies retry telemetry across a long durable backoff. |
@@ -116,10 +120,12 @@ in the execution view. Re-enable the SAM functions and build targets after the
 shared requirement accepts both history orderings without relaxing those replay
 assertions.
 
-Cases 25 and 26 are declared `NOT_IMPLEMENTED` in both views. Their handlers,
-SAM functions, build targets and local integration tests are deferred until
-the required SDK and testing-library behavior lands. The runner reports these
-as explicit gaps; the assertions for the active cases remain unchanged.
+## Callback regressions awaiting fixes
+
+Cases 25 and 26 are active in both views, including their SAM functions, build
+targets, and local integration tests. These tests intentionally keep CI failing
+until the required SDK and testing-library fixes merge. They are ordinary
+failing tests, without skips, expected-failure markers, or failure suppression.
 
 - Case 25 needs terminal failure status without diagnostic details
   ([#853](https://github.com/aws/aws-durable-execution-sdk-python/issues/853))
@@ -135,15 +141,23 @@ as explicit gaps; the assertions for the active cases remain unchanged.
   ([#852](https://github.com/aws/aws-durable-execution-sdk-python/issues/852)).
   The existing case 17 handler and supplied-error coverage remain active.
 
-The deferred source and assertions are preserved in
-[commit `6484e577`](https://github.com/aws/aws-durable-execution-sdk-python/commit/6484e577b478aeb6345e346515b40bd516cacb1f)
-for follow-up. Before restoring them, correct the history assertions to respect
-`IncludeExecutionData`: detailed errors are untruncated, while metadata-only
-history omits payloads and cannot reconstruct diagnostic details. The claimed
-empty history `Payload` shape remains **unverified** against AWS Lambda and
-requires service evidence. Case 26 must still assert that the terminal callback
-has reached the exporter before the observed step, then check the raw export
-count across both later resumes.
+Case 25 asserts the local-runner contract proposed in #862: detailed failure
+history includes an empty `Payload` with `Truncated: false`, while metadata-only
+history omits the payload and sets `Truncated: true`. The exact empty history
+`Payload` shape remains **unverified** against deployed AWS Lambda and requires
+service evidence before claiming service parity. The test inspects raw exported
+spans and ordinary pytest diagnostics; it has no configurable proof-file output.
+
+Case 26 asserts inside the observed step that the terminal callback has already
+reached the exporter, then checks that its raw export count remains one at both
+later barriers and after completion. Recorded span timestamps alone are not
+evidence of export order.
+
+The additional case 17 test remains available for follow-up in
+[commit `6484e577`](https://github.com/aws/aws-durable-execution-sdk-python/commit/6484e577b478aeb6345e346515b40bd516cacb1f).
+Before restoring it, correct its data-inclusion expectations: detailed errors
+are untruncated; metadata-only history omits payloads and cannot reconstruct
+diagnostic details.
 
 Case 24 remains active and covers invocation `RETRY` becoming `RETRYING`/`UNSET`.
 
@@ -271,8 +285,9 @@ orchestrator in the conformance repository and points it at this package with
 the commit under test. The shared workflow tracks the conformance repository's
 `main` branch, and the test catalog defaults to `main`. Manual runs can override
 the catalog with the `conformance_test_ref` input. Pull requests run the
-invocation and execution suites, with cases 21, 25, and 26 reported as
-`NOT_IMPLEMENTED`. The orchestrator no longer runs the legacy long-running
+invocation and execution suites, with only case 21 reported as
+`NOT_IMPLEMENTED`. Cases 25 and 26 remain enabled while their prerequisite fixes
+are pending. The orchestrator no longer runs the legacy long-running
 suite; its templates and local contract tests remain in this package.
 
 Case 27 (`chained-invoke-suspend`) invokes a child that performs a one-second
