@@ -141,16 +141,26 @@ def test_operation_status_and_exception(
         assert not span.events
 
 
-@pytest.mark.parametrize("start_time", [None, START, END])
+@pytest.mark.parametrize(
+    ("start_time", "expected_durable_end"),
+    [
+        (None, END + timedelta(microseconds=1)),
+        (START, END),
+        (END, END + timedelta(microseconds=1)),
+        (END + timedelta(seconds=1), END + timedelta(seconds=1, microseconds=1)),
+    ],
+)
 @pytest.mark.parametrize("end_time", [END, None])
 def test_terminal_exception_uses_normalized_span_end(
     instrumented_view: InstrumentedView,
     start_time: datetime | None,
+    expected_durable_end: datetime,
     end_time: datetime | None,
 ) -> None:
-    """Delayed and checkpointless completions retain bounded diagnostic times."""
+    """Execution view preserves durable ends, including delayed completions."""
     plugin, exporter = instrumented_view
     _start_invocation(plugin)
+    before_callback = datetime.now(UTC)
     plugin.on_operation_end(
         replace(
             _operation_end_info(
@@ -162,19 +172,40 @@ def test_terminal_exception_uses_normalized_span_end(
             end_time=end_time,
         )
     )
+    after_callback = datetime.now(UTC)
     _end_invocation(plugin)
     span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
     (event,) = span.events
     assert span.start_time is not None and span.end_time is not None
     assert span.start_time <= event.timestamp == span.end_time
+    if isinstance(plugin, ExecutionOtelPlugin):
+        if end_time is None:
+            assert (
+                int(before_callback.timestamp() * 1_000_000_000)
+                <= span.end_time
+                <= int(after_callback.timestamp() * 1_000_000_000)
+            )
+        else:
+            assert span.end_time == int(
+                expected_durable_end.timestamp() * 1_000_000_000
+            )
 
 
 @pytest.mark.parametrize("with_error", [False, True])
-@pytest.mark.parametrize("end_time", [START, END, None])
+@pytest.mark.parametrize(
+    ("end_time", "expected_durable_end"),
+    [
+        (START - timedelta(seconds=1), START + timedelta(microseconds=1)),
+        (START, START + timedelta(microseconds=1)),
+        (END, END),
+        (None, None),
+    ],
+)
 def test_failed_attempt_exception_uses_normalized_span_end(
     instrumented_view: InstrumentedView,
     with_error: bool,
     end_time: datetime | None,
+    expected_durable_end: datetime | None,
 ) -> None:
     """An attempt failure reports its outcome without fabricating diagnostics."""
     plugin, exporter = instrumented_view
@@ -192,6 +223,7 @@ def test_failed_attempt_exception_uses_normalized_span_end(
         attempt=1,
     )
     plugin.on_user_function_start(UserFunctionStartInfo(**operation))
+    before_callback = datetime.now(UTC)
     plugin.on_user_function_end(
         UserFunctionEndInfo(
             **operation,
@@ -202,14 +234,26 @@ def test_failed_attempt_exception_uses_normalized_span_end(
             else None,
         )
     )
+    after_callback = datetime.now(UTC)
     _end_invocation(plugin)
     span = next(
         s for s in exporter.get_finished_spans() if s.name == "attempt attempt 1"
     )
     assert span.status.status_code is StatusCode.ERROR
+    assert span.start_time is not None and span.end_time is not None
+    if isinstance(plugin, ExecutionOtelPlugin):
+        if expected_durable_end is None:
+            assert (
+                int(before_callback.timestamp() * 1_000_000_000)
+                <= span.end_time
+                <= int(after_callback.timestamp() * 1_000_000_000)
+            )
+        else:
+            assert span.end_time == int(
+                expected_durable_end.timestamp() * 1_000_000_000
+            )
     if with_error:
         (event,) = span.events
-        assert span.start_time is not None and span.end_time is not None
         assert span.start_time <= event.timestamp == span.end_time
     else:
         assert not span.events
