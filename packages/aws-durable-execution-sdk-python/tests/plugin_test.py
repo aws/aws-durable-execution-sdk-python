@@ -2779,6 +2779,43 @@ def test_plugin_error_projection_preserves_checkpoint_state(
         assert error.to_dict() == payload
 
 
+def test_empty_wire_invoke_details_keep_plugin_operation_maps() -> None:
+    operation = Operation.from_dict(
+        {
+            "Id": "op-1",
+            "Type": "CHAINED_INVOKE",
+            "Status": "FAILED",
+            "ChainedInvokeDetails": {},
+        }
+    )
+    observed: list[OperationInfo] = [OperationInfo.from_operation(operation)]
+
+    class Observe(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info: InvocationStartInfo) -> None:
+            observed.extend([info.operations["op-1"], info.updated_operations["op-1"]])
+
+        def on_operation_end(self, info: OperationEndInfo) -> None:
+            observed.append(info)
+
+    executor = PluginExecutor([plugin_factory(Observe())])
+    with executor.run():
+        executor.on_invocation_start(
+            execution_arn="arn:exec",
+            lambda_context=LAMBDA_CTX,
+            execution_start_time=START_TS,
+            is_first_invocation=False,
+            operations_provider=lambda: {"op-1": operation},
+            updated_operation_ids=["op-1"],
+        )
+        executor.on_operation_update(operation)
+
+    assert len(observed) == 4
+    for info in observed:
+        assert info.operation_id == "op-1"
+        assert info.status is OperationStatus.FAILED
+        assert info.error is None
+
+
 class TestPluginExecutorIsTerminalStatus(unittest.TestCase):
     """Tests for PluginExecutor._is_terminal_status static method."""
 

@@ -79,11 +79,7 @@ def _extract_error(operation: Operation) -> ErrorObject | None:
         operation.chained_invoke_details,
         operation.context_details,
     ):
-        if (
-            details is not None
-            and details.error is not None
-            and details.error.to_dict()
-        ):
+        if details and details.error is not None and details.error.to_dict():
             return details.error
     return None
 
