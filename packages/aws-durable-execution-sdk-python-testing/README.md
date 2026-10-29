@@ -172,15 +172,19 @@ flow, pagination, and a map of the code.
 
 ### Error Handling
 
-A callback failure with omitted diagnostics or an empty `ErrorObject` has no
-error details in SDK-facing operation state, in both memory and filesystem stores.
-Detailed callback-failure history preserves `Error.Payload: {}` with
+A callback failure with omitted diagnostics or an empty `ErrorObject` retains an
+empty error object in SDK-facing operation state, in both memory and filesystem
+stores. Detailed callback-failure history preserves `Error.Payload: {}` with
 `Truncated: false`; history requested without execution data omits the payload and
-sets `Truncated: true`. Reconstructing operations from detailed history restores
-the same absent diagnostics. Present diagnostic fields remain intact, including
-explicit empty strings and empty stack-trace lists. The callback still fails and
-raises the existing `CallbackExternalError`, including its default message when
-diagnostics are absent. Timeout history is unchanged.
+sets `Truncated: true`. Reconstructing operations from detailed history preserves
+that empty object. Missing or null errors remain `None` when decoded. Present
+diagnostic fields remain intact, including explicit empty strings and empty
+stack-trace lists. The callback still fails and raises the existing
+`CallbackExternalError`, including its default message when diagnostics are absent.
+Plugin operation information omits wholly empty diagnostics without changing the
+stored error. Failed step, child-context, and invoke replay use their existing
+default exception message when the stored error has no fields. Timeout history
+retains the same data-inclusion rules.
 
 The testing framework implements AWS-compliant error responses that match the exact format expected by boto3 and AWS services. For detailed information about error response formats, exception types, and troubleshooting, see:
 
