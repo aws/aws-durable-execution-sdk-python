@@ -41,7 +41,7 @@ def error_object_exception_attributes(error: ErrorObject) -> dict[str, Any]:
 
 
 def record_error_object_exception(
-    span: Any, error: ErrorObject | None, *, timestamp: int | None = None
+    span: Any, error: ErrorObject | None, *, timestamp: int
 ) -> None:
     """Record a span exception that preserves the SDK's original error type.
 

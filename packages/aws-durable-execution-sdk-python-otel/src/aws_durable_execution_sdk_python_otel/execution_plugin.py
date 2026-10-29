@@ -892,7 +892,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span_id_override=span_id_override,
         )
 
-        end_timestamp = _to_otel_timestamp(
+        end_timestamp = to_otel_timestamp(
             end_time or datetime.datetime.now(datetime.UTC)
         )
         if info.error:
@@ -1033,7 +1033,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             and info.outcome is not UserFunctionOutcome.INCOMPLETE
         ):
             span.set_attributes(self._operation_attributes(info))
-            end_timestamp = _to_otel_timestamp(
+            end_timestamp = to_otel_timestamp(
                 end_time or datetime.datetime.now(datetime.UTC)
             )
             if info.outcome is UserFunctionOutcome.FAILED:
