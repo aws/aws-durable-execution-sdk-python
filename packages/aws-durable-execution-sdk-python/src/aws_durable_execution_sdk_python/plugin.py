@@ -73,14 +73,18 @@ def _extract_result(operation: Operation) -> str | None:
 
 
 def _extract_error(operation: Operation) -> ErrorObject | None:
-    if operation.step_details and operation.step_details.error:
-        return operation.step_details.error
-    if operation.callback_details and operation.callback_details.error:
-        return operation.callback_details.error
-    if operation.chained_invoke_details and operation.chained_invoke_details.error:
-        return operation.chained_invoke_details.error
-    if operation.context_details and operation.context_details.error:
-        return operation.context_details.error
+    for details in (
+        operation.step_details,
+        operation.callback_details,
+        operation.chained_invoke_details,
+        operation.context_details,
+    ):
+        if (
+            details is not None
+            and details.error is not None
+            and details.error.to_dict()
+        ):
+            return details.error
     return None
 
 
