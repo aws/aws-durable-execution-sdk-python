@@ -1,7 +1,7 @@
 """History preserves empty payload presence without inventing SDK diagnostics."""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -26,9 +26,11 @@ from aws_durable_execution_sdk_python_testing.model import (
     events_to_operations,
 )
 from aws_durable_execution_sdk_python_testing.runner import (
+    CallbackOperation,
     ContextOperation,
     DurableFunctionTestResult,
     InvokeOperation,
+    StepOperation,
 )
 
 
@@ -68,26 +70,35 @@ def test_event_error_omitted_and_null_payload_remain_absent(
 
 
 @pytest.mark.parametrize(
-    "event_type,details_field,details_type,operation_field",
+    "event_type,details_field,details_type,operation_field,wrapper_type",
     [
         (
             "CallbackFailed",
             "callback_failed_details",
             CallbackFailedDetails,
             "callback_details",
+            CallbackOperation,
         ),
-        ("StepFailed", "step_failed_details", StepFailedDetails, "step_details"),
+        (
+            "StepFailed",
+            "step_failed_details",
+            StepFailedDetails,
+            "step_details",
+            StepOperation,
+        ),
         (
             "ContextFailed",
             "context_failed_details",
             ContextFailedDetails,
             "context_details",
+            ContextOperation,
         ),
         (
             "ChainedInvokeFailed",
             "chained_invoke_failed_details",
             ChainedInvokeFailedDetails,
             "chained_invoke_details",
+            InvokeOperation,
         ),
     ],
 )
@@ -103,6 +114,7 @@ def test_failure_history_reconstruction_normalizes_only_empty_errors(
         | ChainedInvokeFailedDetails
     ],
     operation_field: str,
+    wrapper_type: type[ContextOperation | InvokeOperation],
     payload: dict[str, Any] | None,
     decode_wire: bool,
 ) -> None:
@@ -123,14 +135,18 @@ def test_failure_history_reconstruction_normalizes_only_empty_errors(
             )
         ]
     )
-    expected_wire = history.to_dict()
     if decode_wire:
+        expected_wire = history.to_dict()
         history = GetDurableExecutionHistoryResponse.from_dict(expected_wire)
-    assert history.to_dict() == expected_wire
+        assert history.to_dict() == expected_wire
     expected_error = error if payload else None
     (operation,) = events_to_operations(history.events)
     assert operation.status is OperationStatus.FAILED
     assert getattr(operation, operation_field).error == expected_error
+    if expected_error is not None:
+        roundtripped = Operation.from_json_dict(operation.to_json_dict())
+        assert roundtripped.status is OperationStatus.FAILED
+        assert getattr(roundtripped, operation_field).error == expected_error
 
     execution = GetDurableExecutionResponse(
         durable_execution_arn="arn:execution",
@@ -140,10 +156,12 @@ def test_failure_history_reconstruction_normalizes_only_empty_errors(
         start_timestamp=timestamp,
     )
     result = DurableFunctionTestResult.from_execution_history(execution, history)
-    result_operation = result.get_operation_by_name("failed-operation")
-    assert isinstance(result_operation, (ContextOperation, InvokeOperation))
+    result_operation = cast(
+        ContextOperation | InvokeOperation,
+        result.get_operation_by_name("failed-operation"),
+    )
+    assert type(result_operation) is wrapper_type
     assert result_operation.error == expected_error
-    assert history.to_dict() == expected_wire
 
 
 @pytest.mark.parametrize("include_data", [False, True])

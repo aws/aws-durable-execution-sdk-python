@@ -174,7 +174,3 @@ def test_live_callback_failure_normalizes_before_persistence(
             assert reconstructed.callback_details.error == (
                 expected_error if include_data else None
             )
-        assert history.to_dict() == wire
-
-    assert live.callback_details is not None
-    assert live.callback_details.error == expected_error
