@@ -109,35 +109,9 @@ Resources:
       NotImplemented:
         - id: otel-invocation-21
           reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-invocation-22
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-invocation-23
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-invocation-24
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-invocation-25
-          reason: >-
-            Deferred until terminal failure status and empty callback error history
-            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/853
-            and https://github.com/aws/aws-durable-execution-sdk-python/issues/862.
-        - id: otel-invocation-26
-          reason: >-
-            Deferred until callback completion delivery and replay acknowledgment
-            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/854,
-            https://github.com/aws/aws-durable-execution-sdk-python/issues/860,
-            and https://github.com/aws/aws-durable-execution-sdk-python/issues/861.
-        - id: otel-invocation-27
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+            Deferred until the shared history requirement accepts WaitSucceeded
+            before or after InvocationCompleted while preserving replay assertions:
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796#discussion_r4394770596.
     Properties:
       CodeUri: src/
       Handler: otel_1_success.handler
@@ -441,6 +415,104 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-otel-invocation-20"
       Role: !Ref LambdaExecutionRoleArn
 
+  Otel22UserFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-22
+    Properties:
+      CodeUri: src/
+      Handler: otel_22_user_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-22"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel23CallbackFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-23
+    Properties:
+      CodeUri: src/
+      Handler: otel_23_callback_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-23"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel24InvocationRetryStatus:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-24
+    Properties:
+      CodeUri: src/
+      Handler: otel_24_invocation_retry_status.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-24"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel25CallbackFailureWithoutError:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-25
+    Properties:
+      CodeUri: src/
+      Handler: otel_25_caught_callback_failure_replay.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-25"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel26ExternalCallbackReplay:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-26
+    Properties:
+      CodeUri: src/
+      Handler: otel_26_external_callback_completion_replay.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-26"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel27ChainedInvokeSuspend:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-27
+    Properties:
+      CodeUri: src/
+      Handler: otel_27_chained_invoke_suspend.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-27"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_INVOKE_TARGET_FUNCTION_NAME: !Sub "${Otel27InvokeTarget.Arn}:$LATEST"
+
+  Otel27InvokeTarget:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: src/
+      Handler: otel_27_chained_invoke_suspend.target_handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-27-target"
+      Role: !Ref LambdaExecutionRoleArn
+
   OtelExecution1Success:
     Type: AWS::Serverless::Function
     Condition: DeployExecutionView
@@ -452,35 +524,9 @@ Resources:
       NotImplemented:
         - id: otel-execution-21
           reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-execution-22
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-execution-23
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-execution-24
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
-        - id: otel-execution-25
-          reason: >-
-            Deferred until terminal failure status and empty callback error history
-            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/853
-            and https://github.com/aws/aws-durable-execution-sdk-python/issues/862.
-        - id: otel-execution-26
-          reason: >-
-            Deferred until callback completion delivery and replay acknowledgment
-            are implemented: https://github.com/aws/aws-durable-execution-sdk-python/issues/854,
-            https://github.com/aws/aws-durable-execution-sdk-python/issues/860,
-            and https://github.com/aws/aws-durable-execution-sdk-python/issues/861.
-        - id: otel-execution-27
-          reason: >-
-            Conformance handler coverage is pending in
-            https://github.com/aws/aws-durable-execution-sdk-python/pull/796.
+            Deferred until the shared history requirement accepts WaitSucceeded
+            before or after InvocationCompleted while preserving replay assertions:
+            https://github.com/aws/aws-durable-execution-sdk-python/pull/796#discussion_r4394770596.
     Properties:
       CodeUri: src/
       Handler: otel_1_success.handler
@@ -841,6 +887,123 @@ Resources:
       CodeUri: src/
       Handler: otel_20_virtual_context.handler
       FunctionName: !Sub "${AWS::StackName}-otel-execution-20"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution22UserFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-22
+    Properties:
+      CodeUri: src/
+      Handler: otel_22_user_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-22"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution23CallbackFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-23
+    Properties:
+      CodeUri: src/
+      Handler: otel_23_callback_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-23"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution24InvocationRetryStatus:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-24
+    Properties:
+      CodeUri: src/
+      Handler: otel_24_invocation_retry_status.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-24"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution25CallbackFailureWithoutError:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-25
+    Properties:
+      CodeUri: src/
+      Handler: otel_25_caught_callback_failure_replay.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-25"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution26ExternalCallbackReplay:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-26
+    Properties:
+      CodeUri: src/
+      Handler: otel_26_external_callback_completion_replay.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-26"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution27ChainedInvokeSuspend:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-27
+    Properties:
+      CodeUri: src/
+      Handler: otel_27_chained_invoke_suspend.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-27"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+          OTEL_INVOKE_TARGET_FUNCTION_NAME: !Sub "${OtelExecution27InvokeTarget.Arn}:$LATEST"
+
+  OtelExecution27InvokeTarget:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: src/
+      Handler: otel_27_chained_invoke_suspend.target_handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-27-target"
       Role: !Ref LambdaExecutionRoleArn
       Environment:
         Variables:
