@@ -253,6 +253,9 @@ The function's execution role needs the `AWSXRayDaemonWriteAccess` managed polic
 
 See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-started/lambda#sampling-configuration) for more details. When the backend header contains an explicit `Sampled` value, that backend decision takes precedence over local sampler configuration for durable spans.
 
+Keep sampler configuration unchanged across retries and reinvocations, and use
+only the [supported sampling modes](#supported-sampling-modes).
+
 ## Configuration
 
 ### Plugin Options
@@ -377,10 +380,9 @@ provider resources and custom processor enrichment may vary. The SDK does not
 replace configured service identity or freeze detector fields.
 
 Complete remote parents are externally owned and are never materialized by the
-SDK. Unsampled invocations emit no anchor. Sampling remains resolved per
-invocation: a later sampled fallback invocation also emits the anchor even if
-an earlier invocation was unsampled. Missing execution start time continues to
-disable telemetry; no wall-clock timestamp is invented for the anchor.
+SDK. Unsampled invocations emit no anchor. Every sampled fallback invocation
+emits the anchor. Missing execution start time continues to disable telemetry;
+no wall-clock timestamp is invented for the anchor.
 
 ### Sampling
 
@@ -395,8 +397,32 @@ context. Precedence is:
 3. the configured OpenTelemetry sampler
 
 The resolved decision is applied to Workflow, Invocation, operation, and attempt
-spans. This avoids independently querying stateful or ratio-based samplers for
-each durable span in the same invocation.
+spans. This avoids independently querying the sampler for each durable span in
+the same invocation.
+
+#### Supported sampling modes
+
+Durable spans support two sampling modes:
+
+1. **Explicit upstream decision.** A propagated `Sampled=1` records durable spans
+   even when the configured sampler is `always_off` or `traceidratio`.
+   `Sampled=0` suppresses durable spans even when the sampler is `always_on`.
+2. **Deterministic trace-ID decision.** Without an explicit upstream decision,
+   the same canonical trace ID and sampler configuration must produce the same
+   decision across retries and reinvocations. Keep configuration unchanged for
+   the execution. `TraceIdRatioBased` is supported, as are the constant decisions
+   from `ALWAYS_ON` (`always_on`) and `ALWAYS_OFF` (`always_off`). When the plugin
+   inherits a same-trace ambient span's state, that span's sampling policy must
+   satisfy the same stability requirement.
+
+Without an explicit upstream decision, local policies that can change the
+decision for the same trace ID based on randomness, time, load, or mutable state
+are unsupported. Resolving sampling once per invocation does not persist the
+decision across reinvocations. In-memory caches are not durable persistence and
+do not make such a non-deterministic local policy supported.
+
+See the [supported sampling modes in the developer guide](https://docs.aws.amazon.com/durable-execution/sdk-reference/observability/opentelemetry/#supported-sampling-modes)
+for the cross-language contract.
 
 ### Status attributes
 
@@ -505,7 +531,13 @@ After deploying your function with the plugin configured:
 
 3. **Check log correlation** — verify that your logs include `traceId` and `spanId` fields matching the spans in X-Ray.
 
-4. **Confirm sampling** — If you set `OTEL_TRACES_SAMPLER=traceidratio` and `OTEL_TRACES_SAMPLER_ARG` to a value less than 1.0, verify that only the expected proportion of traces appear.
+4. **Confirm sampling** — Check the propagated `Sampled` value first:
+   `Sampled=1` retains durable spans and `Sampled=0` suppresses them, regardless
+   of `OTEL_TRACES_SAMPLER`. To validate `traceidratio`, use executions without
+   an explicit upstream decision and account for the same-trace ambient span's
+   precedence. With a stable canonical trace ID and unchanged ratio, every
+   invocation of an execution must keep the same decision; check the approximate
+   proportion across many independent executions.
 
 5. **Span links** — For operations that span multiple invocations (e.g., after a wait resumes), though span links are set, they are not visualized within the CloudWatch console.
 
@@ -515,7 +547,7 @@ After deploying your function with the plugin configured:
 | --------------------------------- | --------------------------------------------------------------- |
 | No traces appear                  | ADOT layer not configured, or `AWS_LAMBDA_EXEC_WRAPPER` not set |
 | Traces appear but are fragmented  | Backend trace context is not propagated to every invocation     |
-| Missing spans for some operations | `OTEL_TRACES_SAMPLER_ARG` set below 1.0                         |
+| Some executions have no SDK spans | Upstream `Sampled=0` or a deterministic sampler chose not to sample the execution |
 | `_X_AMZN_TRACE_ID` not populated  | X-Ray active tracing not enabled                                |
 
 ## API Reference
