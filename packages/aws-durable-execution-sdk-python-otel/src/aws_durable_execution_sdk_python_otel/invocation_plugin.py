@@ -563,23 +563,22 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         return span
 
     def _end_span(
-        self, operation_id: str | None, end_timestamp: datetime.datetime | None = None
-    ):
+        self, operation_id: str | None, end_timestamp: int | None = None
+    ) -> None:
         """End and unregister the active span for an operation ID.
 
         Args:
             operation_id: Durable operation ID, or ``None`` for the invocation
                 span.
-            end_timestamp: Optional durable end timestamp to use as the span end
-                time. When omitted, OpenTelemetry uses the current time.
+            end_timestamp: Normalized nanoseconds; omit for the next ordered time.
         """
         logger.debug("Ending OTel span: operation_id=%s", operation_id)
         with self._operation_spans_lock:
             span = self._operation_spans.pop(operation_id, None)
         if span:
-            # the span is not going to be populated if it has the same end_time and start_time
-            end_time = self._next_ordered_timestamp(end_timestamp)
-            span.end(end_time=end_time)
+            if end_timestamp is None:
+                end_timestamp = self._next_ordered_timestamp()
+            span.end(end_time=end_timestamp)
             logger.debug("Ended OTel span: %s", span)
 
     # ------------------------------------------------------------------
@@ -963,13 +962,20 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         else:
             span.set_attributes(self._extract_attributes(info))
 
+        end_timestamp = self._next_ordered_timestamp(info.end_time)
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
-            record_error_object_exception(span, info.error)
+            record_error_object_exception(span, info.error, timestamp=end_timestamp)
+        elif info.status in {
+            OperationStatus.FAILED,
+            OperationStatus.TIMED_OUT,
+            OperationStatus.STOPPED,
+        }:
+            span.set_status(StatusCode.ERROR)
         elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
-        self._end_span(info.operation_id, info.end_time)
+        self._end_span(info.operation_id, end_timestamp)
 
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         """Called when a context or step operation starts user code.
@@ -1084,17 +1090,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             and info.outcome is not UserFunctionOutcome.INCOMPLETE
         ):
             span.set_attributes(self._extract_attributes(info))
+            end_timestamp = self._next_ordered_timestamp(info.end_time)
             if info.outcome is UserFunctionOutcome.FAILED:
                 span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
-                record_error_object_exception(span, info.error)
+                record_error_object_exception(span, info.error, timestamp=end_timestamp)
             else:
                 span.set_status(StatusCode.OK)
 
-            end_timestamp = info.end_time
-            if end_timestamp is not None and end_timestamp == info.start_time:
-                end_timestamp += datetime.timedelta(microseconds=1)
             self._end_span(span_key, end_timestamp)
         # Restore the enclosing context by releasing the scope this user
         # function attached. Code that runs after this operation (e.g. between
