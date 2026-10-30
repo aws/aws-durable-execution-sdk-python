@@ -1551,7 +1551,8 @@ class Executor(ExecutionObserver):
         self._set_invocation_gate(execution_arn, InvocationState.INVOKING)
         execution.begin_new_invocation()
         invocation_input = self._invoker.create_invocation_input(execution=execution)
-        execution.mark_state_delivered()
+        # Retain input updates until a valid response acknowledges this snapshot.
+        # A failed invocation must be able to receive the same updates on retry.
         self._store.save(execution)
         return execution, invocation_input, execution.seq_counter
 
@@ -1618,6 +1619,12 @@ class Executor(ExecutionObserver):
         # A clean invocation resets the retry counter.
         reset_target = self._store.load(execution_arn)
         reset_target.consecutive_failed_invocation_attempts = 0
+        if invocation_seq is not None:
+            # A valid response acknowledges input even without a checkpoint.
+            # Preserve changes newer than the input and any newer checkpoint ack.
+            OperationPaginatorState.pin(reset_target).advance_handler_seen(
+                invocation_seq
+            )
         self._store.save(reset_target)
 
         # Release the gate: terminal -> COMPLETED, otherwise PRE_INVOKE
