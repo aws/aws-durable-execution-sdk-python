@@ -335,7 +335,7 @@ class CheckpointedResult:
         ensures async operations whose checkpoint carries a downstream error type
         (invoke/callback) still surface as the correct per-operation error.
         """
-        if self.error is None:
+        if self.error is None or not self.error.to_dict():
             err_msg: str = (
                 msg
                 or "Unknown error. No ErrorObject exists on the Checkpoint Operation."

@@ -19,8 +19,11 @@ import pytest
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
+    ChildContextError,
     DurableApiErrorCategory,
+    DurableOperationError,
     GetExecutionStateError,
+    InvokeError,
     NonDeterministicExecutionError,
     OrphanedChildException,
     StepError,
@@ -415,6 +418,84 @@ def test_checkpointed_result_raise_operation_error_no_error_with_message():
 
     with pytest.raises(StepError, match="Custom error message"):
         result.raise_operation_error(StepError, "Custom error message")
+
+
+@pytest.mark.parametrize(
+    "operation_type,error_cls",
+    [
+        (OperationType.STEP, StepError),
+        (OperationType.CONTEXT, ChildContextError),
+        (OperationType.CHAINED_INVOKE, InvokeError),
+    ],
+)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"ErrorMessage": ""},
+        {"ErrorType": ""},
+        {"ErrorData": ""},
+        {"StackTrace": []},
+        {
+            "ErrorMessage": "stored failure",
+            "ErrorType": "ExternalError",
+            "ErrorData": "details",
+            "StackTrace": ["original frame"],
+        },
+    ],
+)
+@pytest.mark.parametrize("message", [None, "Custom error message"])
+def test_checkpointed_error_uses_only_available_diagnostics(
+    operation_type: OperationType,
+    error_cls: type[DurableOperationError],
+    payload: dict[str, str | list[str]] | None,
+    message: str | None,
+) -> None:
+    error = ErrorObject.from_dict(payload) if payload is not None else None
+    operation = Operation(
+        operation_id="failed-operation",
+        operation_type=operation_type,
+        status=OperationStatus.FAILED,
+        step_details=(
+            StepDetails(error=error) if operation_type is OperationType.STEP else None
+        ),
+        context_details=(
+            ContextDetails(error=error)
+            if operation_type is OperationType.CONTEXT
+            else None
+        ),
+        chained_invoke_details=(
+            ChainedInvokeDetails(error=error)
+            if operation_type is OperationType.CHAINED_INVOKE
+            else None
+        ),
+    )
+    result = CheckpointedResult.create_from_operation(operation)
+
+    with pytest.raises(error_cls) as raised:
+        result.raise_operation_error(error_cls, message)
+
+    assert type(raised.value) is error_cls
+    if payload:
+        assert raised.value.message == payload.get("ErrorMessage")
+        assert raised.value.error_type == (
+            payload.get("ErrorType")
+            or f"{error_cls.__module__}.{error_cls.__qualname__}"
+        )
+        assert raised.value.data == payload.get("ErrorData")
+        assert raised.value.stack_trace == payload.get("StackTrace")
+        assert raised.value.__cause__ is not None
+    else:
+        assert raised.value.message == (
+            message
+            or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
+        )
+        assert raised.value.__cause__ is None
+    assert result.error is error
+    assert result.status is OperationStatus.FAILED
+    if error is not None:
+        assert error.to_dict() == payload
 
 
 def test_checkpointed_result_immutable():

@@ -12,6 +12,8 @@ from dataclasses import asdict, fields
 from itertools import product
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
@@ -2689,6 +2691,129 @@ class TestPluginExecutorExtractError(unittest.TestCase):
 
         result = PluginExecutor._extract_error(op)
         self.assertEqual(result.message, "boom")
+
+
+@pytest.mark.parametrize(
+    "operation_type",
+    [
+        ServiceOperationType.STEP,
+        ServiceOperationType.CALLBACK,
+        ServiceOperationType.CHAINED_INVOKE,
+        ServiceOperationType.CONTEXT,
+    ],
+)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"ErrorMessage": ""},
+        {"ErrorType": ""},
+        {"ErrorData": ""},
+        {"StackTrace": []},
+        {
+            "ErrorMessage": "stored failure",
+            "ErrorType": "ExternalError",
+            "ErrorData": "details",
+            "StackTrace": ["original frame"],
+        },
+    ],
+)
+def test_plugin_error_projection_preserves_checkpoint_state(
+    operation_type: ServiceOperationType, payload: dict[str, str | list[str]] | None
+) -> None:
+    error = ErrorObject.from_dict(payload) if payload is not None else None
+    operation = Operation(
+        operation_id="op-1",
+        operation_type=operation_type,
+        status=OperationStatus.FAILED,
+        step_details=(
+            StepDetails(error=error)
+            if operation_type is ServiceOperationType.STEP
+            else None
+        ),
+        callback_details=(
+            CallbackDetails(callback_id="callback-1", error=error)
+            if operation_type is ServiceOperationType.CALLBACK
+            else None
+        ),
+        chained_invoke_details=(
+            ChainedInvokeDetails(error=error)
+            if operation_type is ServiceOperationType.CHAINED_INVOKE
+            else None
+        ),
+        context_details=(
+            ContextDetails(error=error)
+            if operation_type is ServiceOperationType.CONTEXT
+            else None
+        ),
+    )
+    checkpoint = deepcopy(operation.to_dict())
+    observed: list[OperationInfo | OperationEndInfo] = []
+
+    class Observe(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info: InvocationStartInfo) -> None:
+            observed.extend([info.operations["op-1"], info.updated_operations["op-1"]])
+
+        def on_operation_end(self, info: OperationEndInfo) -> None:
+            observed.append(info)
+
+    executor = PluginExecutor([plugin_factory(Observe())])
+    with executor.run():
+        executor.on_invocation_start(
+            execution_arn="arn:exec",
+            lambda_context=LAMBDA_CTX,
+            execution_start_time=START_TS,
+            is_first_invocation=False,
+            operations_provider=lambda: {"op-1": operation},
+            updated_operation_ids=["op-1"],
+        )
+        executor.on_operation_update(operation)
+
+    assert len(observed) == 3
+    for info in observed:
+        assert info.status is OperationStatus.FAILED
+        assert info.error == (error if payload else None)
+    assert operation.to_dict() == checkpoint
+    if error is not None:
+        assert error.to_dict() == payload
+
+
+def test_empty_wire_invoke_details_keep_plugin_operation_maps() -> None:
+    operation = Operation.from_dict(
+        {
+            "Id": "op-1",
+            "Type": "CHAINED_INVOKE",
+            "Status": "FAILED",
+            "ChainedInvokeDetails": {},
+        }
+    )
+    observed: list[OperationInfo] = [OperationInfo.from_operation(operation)]
+
+    class Observe(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info: InvocationStartInfo) -> None:
+            observed.extend([info.operations["op-1"], info.updated_operations["op-1"]])
+
+        def on_operation_end(self, info: OperationEndInfo) -> None:
+            observed.append(info)
+
+    executor = PluginExecutor([plugin_factory(Observe())])
+    with executor.run():
+        executor.on_invocation_start(
+            execution_arn="arn:exec",
+            lambda_context=LAMBDA_CTX,
+            execution_start_time=START_TS,
+            is_first_invocation=False,
+            operations_provider=lambda: {"op-1": operation},
+            updated_operation_ids=["op-1"],
+        )
+        executor.on_operation_update(operation)
+
+    assert len(observed) == 4
+    for info in observed:
+        assert info.operation_id == "op-1"
+        assert info.status is OperationStatus.FAILED
+        assert info.error is None
 
 
 class TestPluginExecutorIsTerminalStatus(unittest.TestCase):
