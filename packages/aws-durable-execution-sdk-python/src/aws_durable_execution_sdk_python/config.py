@@ -7,17 +7,64 @@ import random
 import string
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import ValidationError
+
+
+class DistributedMapStatus(Enum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    STOPPED = "STOPPED"
+    TIMED_OUT = "TIMED_OUT"
+
+
+class DistributedMapItemStatus(Enum):
+    """Terminal status of a single map run item."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    UNKNOWN_TO_SDK_VERSION = "UNKNOWN_TO_SDK_VERSION"
+
+
+class DistributedMapSourceFormat(Enum):
+    JSON_LINES = "JSON_LINES"
+    JSON_ARRAY = "JSON_ARRAY"
+    CSV = "CSV"
+
+
+class DistributedMapS3SourceType(Enum):
+    """What an S3 distributed map source reads."""
+
+    OBJECT = "OBJECT"
+    LISTED_OBJECT_METADATA = "LISTED_OBJECT_METADATA"
+    LISTED_OBJECTS = "LISTED_OBJECTS"
+
+
+class ProcessorResponseMode(Enum):
+    """How a processor function reports item outcomes."""
+
+    BATCH = "BATCH"
+    ITEM_OUTCOMES = "ITEM_OUTCOMES"
+
+
+class DistributedMapCsvDelimiter(Enum):
+    """Column delimiter for a CSV distributed map source."""
+
+    COMMA = "COMMA"
+    PIPE = "PIPE"
+    SEMICOLON = "SEMICOLON"
+    SPACE = "SPACE"
+    TAB = "TAB"
 
 
 P = TypeVar("P")  # Payload type
 R = TypeVar("R")  # Result type
 T = TypeVar("T")
+ItemOutput = TypeVar("ItemOutput")  # Map run item output type
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from aws_durable_execution_sdk_python.retries import RetryDecision
     from aws_durable_execution_sdk_python.serdes import SerDes
@@ -544,6 +591,687 @@ class StepConfig:
 
     def __post_init__(self) -> None:
         _validate_sub_type(self.sub_type)
+
+
+# region map run configuration
+
+
+@dataclass(frozen=True)
+class S3Uri:
+    """A parsed ``s3://bucket/path`` URI."""
+
+    bucket: str
+    path: str | None = None
+
+    @classmethod
+    def parse(cls, uri: str) -> S3Uri:
+        """Parse an ``s3://bucket/path`` URI, rejecting any other scheme."""
+        if not uri.startswith("s3://"):
+            msg = f"S3 URI must start with s3://, got: {uri}"
+            raise ValidationError(msg)
+        bucket, _, path = uri.removeprefix("s3://").partition("/")
+        if not bucket:
+            msg = f"Invalid S3 URI: {uri}"
+            raise ValidationError(msg)
+        return cls(bucket=bucket, path=path or None)
+
+
+def _validate_bucket_owner(value: str | None) -> None:
+    """Validate an expected bucket owner is a 12-digit account id."""
+    if value is not None and (
+        len(value) != 12 or not (value.isascii() and value.isdigit())  # noqa: PLR2004
+    ):
+        msg = f"expected_bucket_owner must be a 12-digit account id, got: {value}"
+        raise ValidationError(msg)
+
+
+_MAX_CSV_COLUMNS = 1000
+_MAX_CSV_COLUMN_LENGTH = 256
+_MAX_ITEMS_TO_READ = 100_000_000
+_MAX_DESTINATION_PREFIX_BYTES = 900
+
+
+def _validate_destination_prefix(value: str) -> None:
+    """Validate a destination prefix fits the service's length limit.
+
+    The service caps the prefix at 900 characters and at 900 UTF-8 bytes. A UTF-8
+    string never has fewer bytes than characters, so checking the byte length
+    enforces both. A longer prefix is rejected by the start checkpoint, so it is
+    rejected here instead.
+    """
+    size = len(value.encode("utf-8"))
+    if size > _MAX_DESTINATION_PREFIX_BYTES:
+        msg = (
+            f"prefix must be at most {_MAX_DESTINATION_PREFIX_BYTES} UTF-8 bytes, "
+            f"got: {size}"
+        )
+        raise ValidationError(msg)
+
+
+def _validate_columns(name: str, columns: list[str] | None) -> None:
+    """Validate a CSV columns/headers list against its count, uniqueness and length limits."""
+    if columns is None:
+        return
+    if len(columns) == 0:
+        msg = f"{name} must be non-empty"
+        raise ValidationError(msg)
+    if len(columns) > _MAX_CSV_COLUMNS:
+        msg = f"{name} must hold at most {_MAX_CSV_COLUMNS} names, got: {len(columns)}"
+        raise ValidationError(msg)
+    if len(set(columns)) != len(columns):
+        msg = f"{name} must not contain duplicates"
+        raise ValidationError(msg)
+    for column in columns:
+        if len(column) > _MAX_CSV_COLUMN_LENGTH:
+            msg = (
+                f"each {name} name must be at most {_MAX_CSV_COLUMN_LENGTH} "
+                f"characters, got: {len(column)}"
+            )
+            raise ValidationError(msg)
+
+
+# NamespacedFunctionName max length; the service enforces the full grammar.
+_MAX_FUNCTION_NAME_LENGTH = 170
+
+
+def _validate_function_name(name: str) -> None:
+    """Validate a Lambda function reference is present and within the length limit."""
+    if not name:
+        msg = "function name must be non-empty"
+        raise ValidationError(msg)
+    if len(name) > _MAX_FUNCTION_NAME_LENGTH:
+        msg = f"function name must be at most {_MAX_FUNCTION_NAME_LENGTH} characters"
+        raise ValidationError(msg)
+
+
+@dataclass(frozen=True)
+class DistributedMapCompletionConfig:
+    """Failure-tolerance configuration for a map run."""
+
+    tolerated_failure_count: int | None = None
+    tolerated_failure_percentage: int | float | None = None
+    minimum_sample_size: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.tolerated_failure_count is not None
+            and self.tolerated_failure_percentage is not None
+        ):
+            msg = (
+                "tolerated_failure_count and tolerated_failure_percentage "
+                "are mutually exclusive"
+            )
+            raise ValidationError(msg)
+        if (
+            self.tolerated_failure_count is None
+            and self.tolerated_failure_percentage is None
+        ):
+            # Omitting the config entirely means zero tolerated failures, so an
+            # empty one is rejected rather than resolved to the same thing.
+            msg = (
+                "a completion config must set tolerated_failure_count or "
+                "tolerated_failure_percentage"
+            )
+            raise ValidationError(msg)
+        if (
+            self.minimum_sample_size is not None
+            and self.tolerated_failure_percentage is None
+        ):
+            msg = "minimum_sample_size is only valid with tolerated_failure_percentage"
+            raise ValidationError(msg)
+        if (
+            self.tolerated_failure_count is not None
+            and self.tolerated_failure_count < 0
+        ):
+            msg = (
+                "tolerated_failure_count must be non-negative, got: "
+                f"{self.tolerated_failure_count}"
+            )
+            raise ValidationError(msg)
+        if self.tolerated_failure_percentage is not None and not (
+            0 <= self.tolerated_failure_percentage <= 100  # noqa: PLR2004
+        ):
+            msg = (
+                "tolerated_failure_percentage must be between 0 and 100, got: "
+                f"{self.tolerated_failure_percentage}"
+            )
+            raise ValidationError(msg)
+        if self.minimum_sample_size is not None and self.minimum_sample_size < 1:
+            msg = (
+                "minimum_sample_size must be at least 1, got: "
+                f"{self.minimum_sample_size}"
+            )
+            raise ValidationError(msg)
+
+    @staticmethod
+    def failure_count(count: int) -> DistributedMapCompletionConfig:
+        """Abort once this many items have permanently failed."""
+        return DistributedMapCompletionConfig(tolerated_failure_count=count)
+
+    @staticmethod
+    def failure_percentage(
+        percentage: int | float, *, minimum_sample_size: int | None = None
+    ) -> DistributedMapCompletionConfig:
+        """Abort once the failure rate exceeds this percentage."""
+        return DistributedMapCompletionConfig(
+            tolerated_failure_percentage=percentage,
+            minimum_sample_size=minimum_sample_size,
+        )
+
+
+@dataclass(frozen=True)
+class DistributedMapProcessorRetryConfig:
+    """Retry policy applied to each failing item of a map run."""
+
+    UNLIMITED: ClassVar[Literal["unlimited"]] = "unlimited"
+
+    max_retry_attempts: int | Literal["unlimited"] | None = None
+    max_retry_duration: Duration | None = None
+
+    def __post_init__(self) -> None:
+        attempts = self.max_retry_attempts
+        # A value that is neither an int nor UNLIMITED carries no retry limit to the
+        # wire, so the service would apply its own default instead of this value.
+        # Rejecting it here is what makes the omission impossible.
+        if (
+            attempts is not None
+            and attempts != self.UNLIMITED
+            and (not isinstance(attempts, int) or attempts < 0)
+        ):
+            msg = (
+                "max_retry_attempts must be a non-negative integer or "
+                "DistributedMapProcessorRetryConfig.UNLIMITED, "
+                f"got: {attempts!r}"
+            )
+            raise ValidationError(msg)
+        if self.max_retry_duration is not None and not (
+            60 <= self.max_retry_duration.to_seconds() <= 21600  # noqa: PLR2004
+        ):
+            msg = (
+                "max_retry_duration must be between 1 minute and 6 hours, got: "
+                f"{self.max_retry_duration.to_seconds()}s"
+            )
+            raise ValidationError(msg)
+
+
+@dataclass(frozen=True)
+class DistributedMapProcessor:
+    """Processor configuration for a map run."""
+
+    function_name: str
+    response_mode: ProcessorResponseMode = ProcessorResponseMode.BATCH
+    batch_size: int | None = None
+    retry: DistributedMapProcessorRetryConfig | None = None
+    durable_execution_name_prefix: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_function_name(self.function_name)
+        if self.batch_size is not None and not (
+            1 <= self.batch_size <= 10000  # noqa: PLR2004
+        ):
+            msg = f"batch_size must be between 1 and 10000, got: {self.batch_size}"
+            raise ValidationError(msg)
+        if self.durable_execution_name_prefix is not None and not (
+            1 <= len(self.durable_execution_name_prefix) <= 36  # noqa: PLR2004
+        ):
+            msg = (
+                "durable_execution_name_prefix must be 1 to 36 characters, got: "
+                f"{len(self.durable_execution_name_prefix)}"
+            )
+            raise ValidationError(msg)
+
+    @classmethod
+    def report_batch_outcome(
+        cls,
+        name: str,
+        *,
+        batch_size: int | None = None,
+        retry: DistributedMapProcessorRetryConfig | None = None,
+        durable_execution_name_prefix: str | None = None,
+    ) -> DistributedMapProcessor:
+        """Processor that reports one outcome for the whole batch. Items have no outputs."""
+        return cls(
+            function_name=name,
+            response_mode=ProcessorResponseMode.BATCH,
+            batch_size=batch_size,
+            retry=retry,
+            durable_execution_name_prefix=durable_execution_name_prefix,
+        )
+
+    @classmethod
+    def report_item_outcomes(
+        cls,
+        name: str,
+        *,
+        batch_size: int | None = None,
+        retry: DistributedMapProcessorRetryConfig | None = None,
+        durable_execution_name_prefix: str | None = None,
+    ) -> DistributedMapProcessor:
+        """Processor that may report a failure or an output per item. Unlisted items succeed."""
+        return cls(
+            function_name=name,
+            response_mode=ProcessorResponseMode.ITEM_OUTCOMES,
+            batch_size=batch_size,
+            retry=retry,
+            durable_execution_name_prefix=durable_execution_name_prefix,
+        )
+
+
+def _parse_delimiter(
+    value: str | DistributedMapCsvDelimiter,
+) -> DistributedMapCsvDelimiter:
+    """Normalize a delimiter passed as a string or enum member."""
+    if isinstance(value, DistributedMapCsvDelimiter):
+        return value
+    try:
+        return DistributedMapCsvDelimiter(value)
+    except ValueError:
+        allowed = ", ".join(d.value for d in DistributedMapCsvDelimiter)
+        msg = f"delimiter must be one of ({allowed}), got: {value!r}"
+        raise ValidationError(msg) from None
+
+
+@dataclass(frozen=True)
+class S3Source:
+    """Resolved S3 source."""
+
+    source_type: DistributedMapS3SourceType
+    bucket: str
+    key: str | None = None
+    key_prefix: str | None = None
+    fmt: DistributedMapSourceFormat | None = None
+    delimiter: DistributedMapCsvDelimiter | None = None
+    headers: list[str] | None = None
+    expected_bucket_owner: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_bucket_owner(self.expected_bucket_owner)
+        _validate_columns("headers", self.headers)
+        if self.source_type is DistributedMapS3SourceType.OBJECT:
+            if not self.key:
+                msg = "an OBJECT source requires a key"
+                raise ValidationError(msg)
+            if self.fmt is None:
+                msg = "an OBJECT source requires a format"
+                raise ValidationError(msg)
+        else:
+            if self.key_prefix is None:
+                msg = f"a {self.source_type.value} source requires a key prefix"
+                raise ValidationError(msg)
+            if (
+                self.source_type is DistributedMapS3SourceType.LISTED_OBJECTS
+                and self.fmt is None
+            ):
+                msg = "a LISTED_OBJECTS source requires a format"
+                raise ValidationError(msg)
+            if (
+                self.source_type is DistributedMapS3SourceType.LISTED_OBJECT_METADATA
+                and self.fmt is not None
+            ):
+                msg = "a LISTED_OBJECT_METADATA source reads no contents, so it takes no format"
+                raise ValidationError(msg)
+
+
+@dataclass(frozen=True)
+class ReaderSource:
+    """Resolved reader-function source."""
+
+    function_name: str
+    initial_state: Any = None
+    state_serdes: SerDes | None = None  # None = DEFAULT_JSON_SERDES
+
+    def __post_init__(self) -> None:
+        _validate_function_name(self.function_name)
+
+
+@dataclass(frozen=True)
+class DistributedMapSource:
+    """Source configuration for a map run."""
+
+    max_items: int | None = None
+    inline_items: list[Any] | None = None
+    inline_serdes: SerDes | None = None  # None = DEFAULT_JSON_SERDES
+    s3: S3Source | None = None
+    reader: ReaderSource | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_items is not None and not (
+            1 <= self.max_items <= _MAX_ITEMS_TO_READ
+        ):
+            msg = (
+                f"max_items must be between 1 and {_MAX_ITEMS_TO_READ}, "
+                f"got: {self.max_items}"
+            )
+            raise ValidationError(msg)
+        populated = sum(
+            1
+            for value in (self.inline_items, self.s3, self.reader)
+            if value is not None
+        )
+        if populated != 1:
+            msg = "exactly one of inline_items, s3 or reader must be set"
+            raise ValidationError(msg)
+
+    @classmethod
+    def inline(
+        cls,
+        items: Sequence[Any],
+        *,
+        serdes: SerDes | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """An in-memory list of items embedded in the start checkpoint."""
+        return cls(
+            inline_items=list(items),
+            inline_serdes=serdes,
+            max_items=max_items,
+        )
+
+    @classmethod
+    def s3_json_lines(
+        cls,
+        uri: str,
+        *,
+        expected_bucket_owner: str | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Read a single object, treating each line as an item."""
+        parsed_uri = S3Uri.parse(uri)
+        bucket, key = parsed_uri.bucket, parsed_uri.path
+        if key is None:
+            msg = "s3_json_lines requires an S3 object key"
+            raise ValidationError(msg)
+        return cls(
+            max_items=max_items,
+            s3=S3Source(
+                source_type=DistributedMapS3SourceType.OBJECT,
+                bucket=bucket,
+                key=key,
+                fmt=DistributedMapSourceFormat.JSON_LINES,
+                expected_bucket_owner=expected_bucket_owner,
+            ),
+        )
+
+    @classmethod
+    def s3_json_array(
+        cls,
+        uri: str,
+        *,
+        expected_bucket_owner: str | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Read a single object holding a JSON array, treating each element as an item."""
+        parsed_uri = S3Uri.parse(uri)
+        bucket, key = parsed_uri.bucket, parsed_uri.path
+        if key is None:
+            msg = "s3_json_array requires an S3 object key"
+            raise ValidationError(msg)
+        return cls(
+            max_items=max_items,
+            s3=S3Source(
+                source_type=DistributedMapS3SourceType.OBJECT,
+                bucket=bucket,
+                key=key,
+                fmt=DistributedMapSourceFormat.JSON_ARRAY,
+                expected_bucket_owner=expected_bucket_owner,
+            ),
+        )
+
+    @classmethod
+    def s3_csv(
+        cls,
+        uri: str,
+        *,
+        headers: Sequence[str] | None = None,
+        delimiter: str | DistributedMapCsvDelimiter = DistributedMapCsvDelimiter.COMMA,
+        expected_bucket_owner: str | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Read a single object, treating each record as an item."""
+        parsed_uri = S3Uri.parse(uri)
+        bucket, key = parsed_uri.bucket, parsed_uri.path
+        if key is None:
+            msg = "s3_csv requires an S3 object key"
+            raise ValidationError(msg)
+        return cls(
+            max_items=max_items,
+            s3=S3Source(
+                source_type=DistributedMapS3SourceType.OBJECT,
+                bucket=bucket,
+                key=key,
+                fmt=DistributedMapSourceFormat.CSV,
+                delimiter=_parse_delimiter(delimiter),
+                headers=list(headers) if headers is not None else None,
+                expected_bucket_owner=expected_bucket_owner,
+            ),
+        )
+
+    @classmethod
+    def s3_objects(
+        cls,
+        prefix_uri: str,
+        *,
+        expected_bucket_owner: str | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Read each object under a prefix as one item, without reading its contents."""
+        parsed_uri = S3Uri.parse(prefix_uri)
+        bucket, prefix = parsed_uri.bucket, parsed_uri.path
+        return cls(
+            max_items=max_items,
+            s3=S3Source(
+                source_type=DistributedMapS3SourceType.LISTED_OBJECT_METADATA,
+                bucket=bucket,
+                key_prefix=prefix or "",
+                expected_bucket_owner=expected_bucket_owner,
+            ),
+        )
+
+    @classmethod
+    def s3_flattened_json_lines(
+        cls,
+        prefix_uri: str,
+        *,
+        expected_bucket_owner: str | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Read every object under a prefix, treating each line as an item."""
+        parsed_uri = S3Uri.parse(prefix_uri)
+        bucket, prefix = parsed_uri.bucket, parsed_uri.path
+        return cls(
+            max_items=max_items,
+            s3=S3Source(
+                source_type=DistributedMapS3SourceType.LISTED_OBJECTS,
+                bucket=bucket,
+                key_prefix=prefix or "",
+                fmt=DistributedMapSourceFormat.JSON_LINES,
+                expected_bucket_owner=expected_bucket_owner,
+            ),
+        )
+
+    @classmethod
+    def s3_flattened_json_array(
+        cls,
+        prefix_uri: str,
+        *,
+        expected_bucket_owner: str | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Read every object under a prefix, treating each array element as an item."""
+        parsed_uri = S3Uri.parse(prefix_uri)
+        bucket, prefix = parsed_uri.bucket, parsed_uri.path
+        return cls(
+            max_items=max_items,
+            s3=S3Source(
+                source_type=DistributedMapS3SourceType.LISTED_OBJECTS,
+                bucket=bucket,
+                key_prefix=prefix or "",
+                fmt=DistributedMapSourceFormat.JSON_ARRAY,
+                expected_bucket_owner=expected_bucket_owner,
+            ),
+        )
+
+    @classmethod
+    def s3_flattened_csv(
+        cls,
+        prefix_uri: str,
+        *,
+        headers: Sequence[str] | None = None,
+        delimiter: str | DistributedMapCsvDelimiter = DistributedMapCsvDelimiter.COMMA,
+        expected_bucket_owner: str | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Read every object under a prefix, treating each record as an item."""
+        parsed_uri = S3Uri.parse(prefix_uri)
+        bucket, prefix = parsed_uri.bucket, parsed_uri.path
+        return cls(
+            max_items=max_items,
+            s3=S3Source(
+                source_type=DistributedMapS3SourceType.LISTED_OBJECTS,
+                bucket=bucket,
+                key_prefix=prefix or "",
+                fmt=DistributedMapSourceFormat.CSV,
+                delimiter=_parse_delimiter(delimiter),
+                headers=list(headers) if headers is not None else None,
+                expected_bucket_owner=expected_bucket_owner,
+            ),
+        )
+
+    @classmethod
+    def reader_function(
+        cls,
+        name: str,
+        *,
+        initial_state: Any = None,
+        state_serdes: SerDes | None = None,
+        max_items: int | None = None,
+    ) -> DistributedMapSource:
+        """Page items from a customer-supplied reader Lambda function."""
+        return cls(
+            max_items=max_items,
+            reader=ReaderSource(
+                function_name=name,
+                initial_state=initial_state,
+                state_serdes=state_serdes,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class SuccessDestination:
+    """S3 destination for succeeded items."""
+
+    bucket: str
+    prefix: str
+    include_input: bool = False
+    include_output: bool = True
+    expected_bucket_owner: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_bucket_owner(self.expected_bucket_owner)
+        _validate_destination_prefix(self.prefix)
+        if not (self.include_input or self.include_output):
+            msg = "success destination must include input or output"
+            raise ValidationError(msg)
+
+
+@dataclass(frozen=True)
+class FailureDestination:
+    """S3 destination for permanently-failed items."""
+
+    bucket: str
+    prefix: str
+    include_input: bool = True
+    include_error: bool = True
+    expected_bucket_owner: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_bucket_owner(self.expected_bucket_owner)
+        _validate_destination_prefix(self.prefix)
+        if not (self.include_input or self.include_error):
+            msg = "failure destination must include input or error"
+            raise ValidationError(msg)
+
+
+class DistributedMapDestination:
+    """Factories for the destinations a map run writes item records to."""
+
+    @staticmethod
+    def s3_successes(
+        prefix_uri: str,
+        *,
+        include_input: bool = False,
+        include_output: bool = True,
+        expected_bucket_owner: str | None = None,
+    ) -> SuccessDestination:
+        """Route succeeded item records to an S3 prefix."""
+        parsed_uri = S3Uri.parse(prefix_uri)
+        return SuccessDestination(
+            bucket=parsed_uri.bucket,
+            prefix=parsed_uri.path or "",
+            include_input=include_input,
+            include_output=include_output,
+            expected_bucket_owner=expected_bucket_owner,
+        )
+
+    @staticmethod
+    def s3_failures(
+        prefix_uri: str,
+        *,
+        include_input: bool = True,
+        include_error: bool = True,
+        expected_bucket_owner: str | None = None,
+    ) -> FailureDestination:
+        """Route permanently-failed item records to an S3 prefix."""
+        parsed_uri = S3Uri.parse(prefix_uri)
+        return FailureDestination(
+            bucket=parsed_uri.bucket,
+            prefix=parsed_uri.path or "",
+            include_input=include_input,
+            include_error=include_error,
+            expected_bucket_owner=expected_bucket_owner,
+        )
+
+
+@dataclass(frozen=True)
+class DistributedMapDestinationConfig:
+    """Destination routing for map run results."""
+
+    on_success: SuccessDestination | None = None
+    on_failure: FailureDestination | None = None
+
+
+@dataclass(frozen=True)
+class DistributedMapConfig:
+    """Configuration for map run operations."""
+
+    destination: DistributedMapDestinationConfig | None = None
+    completion_config: DistributedMapCompletionConfig | None = None
+    timeout: Duration | None = None
+
+    def __post_init__(self) -> None:
+        if self.timeout is not None and not (
+            0 < self.timeout.to_seconds() <= 7776000  # noqa: PLR2004
+        ):
+            msg = (
+                "timeout must be positive and at most 90 days, got: "
+                f"{self.timeout.to_seconds()}s"
+            )
+            raise ValidationError(msg)
+
+
+@dataclass(frozen=True)
+class DistributedMapResultConfig(DistributedMapConfig, Generic[ItemOutput]):
+    """Configuration that collects per-item results inline.
+
+    Passing this instead of ``DistributedMapConfig`` makes ``ctx.distributed_map``
+    return a ``DistributedMapResult``, which carries the per-item outcomes.
+    """
+
+    result_serdes: SerDes[ItemOutput] | None = None  # None = DEFAULT_JSON_SERDES
+
+
+# endregion map run configuration
 
 
 @dataclass(frozen=True)

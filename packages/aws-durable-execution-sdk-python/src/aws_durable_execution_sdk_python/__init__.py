@@ -16,6 +16,8 @@ from aws_durable_execution_sdk_python.config import (
     CompletionItemStatus,
     CompletionOutcome,
     CompletionStatus,
+    DistributedMapItemStatus,
+    DistributedMapStatus,
     ParallelBranch,
     complete_batch,
     continue_batch,
@@ -27,6 +29,18 @@ from aws_durable_execution_sdk_python.context import (
     durable_wait_for_callback,
     durable_with_child_context,
 )
+from aws_durable_execution_sdk_python.dmap.handlers import (
+    distributed_map_batch_handler,
+    distributed_map_item_handler,
+    distributed_map_reader,
+    durable_distributed_map_batch_handler,
+    durable_distributed_map_item_handler,
+)
+from aws_durable_execution_sdk_python.dmap.models import (
+    DistributedMapResult,
+    DistributedMapResultItem,
+    DistributedMapSummary,
+)
 
 # Most common exceptions - users need to handle these exceptions
 from aws_durable_execution_sdk_python.exceptions import (
@@ -35,6 +49,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CallbackSubmitterError,
     CallbackTimeoutError,
     ChildContextError,
+    DistributedMapError,
     DurableExecutionsError,
     DurableOperationError,
     ExecutionError,
@@ -69,6 +84,12 @@ __all__ = [
     "CompletionItemStatus",
     "CompletionOutcome",
     "CompletionStatus",
+    "DistributedMapError",
+    "DistributedMapItemStatus",
+    "DistributedMapResult",
+    "DistributedMapResultItem",
+    "DistributedMapStatus",
+    "DistributedMapSummary",
     "DurableContext",
     "DurableExecutionsError",
     "DurableOperationError",
@@ -87,6 +108,11 @@ __all__ = [
     "__version__",
     "complete_batch",
     "continue_batch",
+    "distributed_map_batch_handler",
+    "distributed_map_item_handler",
+    "distributed_map_reader",
+    "durable_distributed_map_batch_handler",
+    "durable_distributed_map_item_handler",
     "durable_execution",
     "durable_parallel_branch",
     "durable_step",
