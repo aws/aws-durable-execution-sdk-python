@@ -42,6 +42,8 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStatus,
     InvocationStartInfo,
     OperationEndInfo,
+    OperationChangeInfo,
+    OperationInfo,
     OperationStartInfo,
     OperationStatus,
     OperationType,
@@ -64,6 +66,11 @@ from opentelemetry.trace import (
     TraceState,
 )
 
+from aws_durable_execution_sdk_python_otel._invocation_state import (
+    CompletionState,
+    completed_input_parent_ids,
+    parent_first,
+)
 from aws_durable_execution_sdk_python_otel.context_extractors import (
     ContextExtractor,
     ExtractedContext,
@@ -192,13 +199,15 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # A context absent from this set is checkpointless (for example, a FLAT
         # map/parallel branch) and needs a fresh per-invocation span identity.
         self._checkpointed_context_ids: set[str] = set()
-        # Operations whose span was already exported this invocation, so a
-        # repeated on_operation_end does not export it twice.
-        self._ended_operation_ids: set[str] = set()
         # Tokens returned by context.attach(), keyed by the span registry key,
         # paired with the thread that attached them. Every attach the plugin
         # owns is released through _detach_context so the plugin never leaves a
         # scope on the context stack.
+        # Completion delivery is invocation-owned, separate from active context
+        # segments. Registration and dequeue use the same span-registry lock.
+        self._completions = CompletionState()
+        self._completed_input_parent_ids: set[str] = set()
+        self._completed_parent_spans: dict[str, Span] = {}
         self._context_tokens: dict[str, tuple[int, object]] = {}
         self._lock = threading.RLock()
         self._tracing_enabled = False
@@ -235,6 +244,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def _set_span(self, key: str, span: Span) -> None:
         with self._lock:
             self._operation_spans[key] = span
+            pending = self._completions.take_children(key)
+        self._drain_registered_children(pending)
 
     def _get_span(self, key: str | None) -> Span | None:
         if key is None:
@@ -596,6 +607,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._start_workflow_span(info)
         # Keep the invocation on the shared execution trace.
         self._start_invocation_span(info)
+        self._completed_input_parent_ids = completed_input_parent_ids(info)
+        self._remember_completions(info.updated_operations)
 
         # Make the Workflow span the active span so auto-instrumented spans
         # created during the invocation become its children. The token is
@@ -739,6 +752,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def _end_invocation_spans(self, info: InvocationEndInfo) -> None:
         """End this invocation's open spans and export the Workflow span."""
+        self._drain_pending_completions()
         # End the invocation span regardless of terminal status. Record the
         # invocation status and map it to a span status:
         #   SUCCEEDED/PENDING -> OK  (this invocation did its work, whether it
@@ -815,6 +829,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._detach_remaining_contexts()
         unbind_invocation(self)
         self._tracing_enabled = False
+        with self._lock:
+            self._completions.clear()
+            self._completed_input_parent_ids.clear()
+            self._completed_parent_spans.clear()
 
     # ------------------------------------------------------------------
     # Operation lifecycle
@@ -840,24 +858,103 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._note_parent_start(info.parent_id, info.start_time)
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
+        """Observe one natural completion, sharing delivery with snapshots."""
+        self._render_operation_end(info)
+
+    def on_operation_change(self, info: OperationChangeInfo) -> None:
+        """Retain checkpoint completions until their natural End or finalization."""
+        if self._tracing_enabled:
+            self._remember_completions(info.updated_operations)
+
+    def _remember_completions(self, updates: dict[str, OperationInfo]) -> None:
+        with self._lock:
+            self._completions.remember(updates)
+
+    def _completion_parent_span(self, parent_id: str | None) -> Span | None:
+        """Prefer the active replay segment, then its retained completed context."""
+        with self._lock:
+            return (
+                self._operation_spans.get(parent_id)
+                or self._completed_parent_spans.get(parent_id)
+                if parent_id is not None
+                else self._workflow_span
+            )
+
+    def _drain_pending_completions(self) -> None:
+        """Export pending parents before children while Invocation is still open."""
+        with self._lock:
+            pending = dict(self._completions.pending)
+        for operation in parent_first(pending):
+            parent = self._completion_parent_span(operation.parent_id)
+            if parent is None:
+                parent = self._fallback_parent(operation)
+            self._render_operation_end(operation, fallback_parent=parent)
+
+    def _render_operation_end(
+        self, info: OperationInfo, *, fallback_parent: Span | None = None
+    ) -> None:
+        """Claim a completion outside customer callbacks; record success last."""
         logger.debug("Durable operation ended: %s", info)
         if not self._tracing_enabled:
             return
-        # ReplayChildren and virtual child contexts intentionally re-execute
-        # without creating a new terminal checkpoint. Their end callback is
-        # replay-only and must not re-export the deterministic logical span.
         if info.is_replayed:
             return
-        # Export the span only on the first end for this operation.
         with self._lock:
-            if info.operation_id in self._ended_operation_ids:
+            parent_available = (
+                info.parent_id is None
+                or fallback_parent is not None
+                or self._completion_parent_span(info.parent_id) is not None
+            )
+            if not self._completions.claim(
+                info,
+                parent_available=parent_available,
+            ):
                 return
-            self._ended_operation_ids.add(info.operation_id)
+        try:
+            self._finish_operation_end(info, fallback_parent)
+            with self._lock:
+                self._completions.complete(info)
+        finally:
+            with self._lock:
+                self._completions.release(info.operation_id)
+
+    def _drain_registered_children(self, pending: list[OperationInfo]) -> None:
+        """A child exporter must not interrupt its parent's context attachment."""
+        for operation in pending:
+            try:
+                self._render_operation_end(operation)
+            except Exception:
+                logger.exception(
+                    "Completion export failed while registering parent %s",
+                    operation.parent_id,
+                )
+
+    def _fallback_parent(self, operation: OperationInfo) -> Span:
+        parent_id = operation.parent_id
+        parent_context = (
+            self._operation_span_context(parent_id) if parent_id is not None else None
+        )
+        if parent_context is None:
+            raise ValueError(
+                "No execution trace context available for completion fallback"
+            )
+        if parent_id not in self._completed_input_parent_ids:
+            logger.warning(
+                "Using fallback parent context for operation %s: parent %s "
+                "has no available span",
+                operation.operation_id,
+                parent_id,
+            )
+        return DurableParentSpan(parent_context)
+
+    def _finish_operation_end(
+        self, info: OperationInfo, fallback_parent: Span | None
+    ) -> None:
+        """Materialize the existing terminal span without a registry gap."""
         # An open operation is held as a non-recording placeholder; drop it and
         # create the single recording span for the operation now.
         placeholder = self._get_span(info.operation_id)
-        self._pop_span(info.operation_id)
-        parent = self._resolve_parent(info.parent_id)
+        parent = fallback_parent or self._completion_parent_span(info.parent_id)
         start_time = info.start_time
         end_time = info.end_time
         if isinstance(placeholder, DurableParentSpan):
@@ -899,9 +996,14 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span.set_status(StatusCode.OK)
 
         self._note_parent_end(info.parent_id, end_time)
-        popped = self._pop_span(info.operation_id)
-        if popped is not None:
-            popped.end(end_time=_to_otel_timestamp(end_time))
+        span.end(end_time=_to_otel_timestamp(end_time))
+        with self._lock:
+            if self._operation_spans.get(info.operation_id) is span:
+                del self._operation_spans[info.operation_id]
+            if info.operation_type is OperationType.CONTEXT:
+                self._completed_parent_spans[info.operation_id] = DurableParentSpan(
+                    span.get_span_context(), start_time=start_time
+                )
 
     def _start_span(
         self,
@@ -921,36 +1023,35 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         pass ``deterministic=False`` for a fresh ID beneath the operation span.
         """
         key = span_key if span_key is not None else operation_id
-        with self._lock:
-            existing = self._operation_spans.get(key)
-            if existing is not None and existing.is_recording():
-                existing.set_attribute("durable.span.replaced_on_reentry", True)
-                existing.end()
-            links = self._build_invocation_links()
-            span_id = (
-                span_id_override
-                if span_id_override is not None
-                else (
-                    operation_id_to_span_id(self._execution_arn, operation_id)
-                    if deterministic
-                    else None
-                )
+        existing = self._get_span(key)
+        if existing is not None and existing.is_recording():
+            existing.set_attribute("durable.span.replaced_on_reentry", True)
+            existing.end()
+        links = self._build_invocation_links()
+        span_id = (
+            span_id_override
+            if span_id_override is not None
+            else (
+                operation_id_to_span_id(self._execution_arn, operation_id)
+                if deterministic
+                else None
             )
-            if parent is None:
-                parent_ctx = self._with_sampling(Context())
-            else:
-                parent_ctx = self._with_sampling(
-                    trace.set_span_in_context(parent, Context())
-                )
-            with self._id_generator.use_ids(trace_id=None, span_id=span_id):
-                span = self._tracer.start_span(
-                    name=name,
-                    attributes=self._operation_attributes(info),
-                    start_time=_to_otel_timestamp(start_time),
-                    context=parent_ctx,
-                    links=links,
-                )
-            self._operation_spans[key] = span
+        )
+        if parent is None:
+            parent_ctx = self._with_sampling(Context())
+        else:
+            parent_ctx = self._with_sampling(
+                trace.set_span_in_context(parent, Context())
+            )
+        with self._id_generator.use_ids(trace_id=None, span_id=span_id):
+            span = self._tracer.start_span(
+                name=name,
+                attributes=self._operation_attributes(info),
+                start_time=_to_otel_timestamp(start_time),
+                context=parent_ctx,
+                links=links,
+            )
+        self._set_span(key, span)
         return span
 
     # ------------------------------------------------------------------
