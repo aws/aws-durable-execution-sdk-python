@@ -203,6 +203,32 @@ Combined tags such as `sdk-v1.6.0,otel-v0.3.0` match the `sdk-v*` pattern becaus
 the full tag name starts with that prefix; the comma-separated parts are not
 separate Git tags.
 
+### 3. Update the shared documentation
+
+The release engineer owns this step for every new version release. Complete it
+after the published packages are available on PyPI.
+
+The shared documentation lives in
+[`aws/aws-durable-execution-docs`](https://github.com/aws/aws-durable-execution-docs).
+Checking version strings alone is insufficient. Review the changes in every
+package released, including the OTel and testing packages when applicable, and
+update the documentation to match:
+
+- [ ] API references and guides that describe new or changed behavior
+- [ ] `examples/python/` snippets that use new or changed APIs
+- [ ] Dependency versions, compatibility guidance, and migration instructions
+
+Search the entire documentation repository so references are not missed:
+
+```bash
+rg -n 'aws-durable-execution-sdk-python' docs examples/python
+```
+
+Open or update the documentation pull request, link this GitHub release in its
+description, and follow through on review and merge. If the release needs no
+documentation changes, add a note to the GitHub release stating that the
+documentation review was completed and found no changes needed.
+
 ## How Publishing Works
 
 Creating a GitHub Release triggers the [`pypi-publish.yml`](.github/workflows/pypi-publish.yml) workflow automatically. The workflow:
@@ -335,3 +361,7 @@ Before publishing a release:
 - [ ] Release notes written with separate sections per package
 - [ ] Tag follows the naming convention (`sdk-vX.Y.Z`, `otel-vX.Y.Z`, `testing-vX.Y.Z`,
       `telemetry-exporter-vX.Y.Z`, or comma-separated)
+
+After publishing a release:
+
+- [ ] Shared documentation reviewed per [Update the shared documentation](#3-update-the-shared-documentation), and the docs pull request opened or "no documentation changes needed" recorded on the release
