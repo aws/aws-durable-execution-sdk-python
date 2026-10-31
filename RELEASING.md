@@ -224,15 +224,6 @@ Search the entire documentation repository so references are not missed:
 rg -n 'aws-durable-execution-sdk-python' docs examples/python
 ```
 
-Run the documentation checks before opening the pull request:
-
-```bash
-mdformat --check docs/
-codespell docs/
-python3 scripts/check_example_refs.py
-zensical build --clean
-```
-
 Open or update the documentation pull request, link this GitHub release in its
 description, and follow through on review and merge. If the release needs no
 documentation changes, add a note to the GitHub release stating that the
