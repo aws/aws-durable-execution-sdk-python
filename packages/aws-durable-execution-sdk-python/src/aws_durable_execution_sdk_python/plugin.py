@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, MutableMapping, Protocol, cast
 
+from aws_durable_execution_sdk_python.exceptions import PluginLoadError
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
@@ -717,6 +718,94 @@ def _factory_name(factory: object) -> str:
     except BaseException:  # noqa: BLE001 - a name is never worth failing a hook for
         return "<unnamed factory>"
     return _type_name(factory)
+
+
+def _module_qualified_name(named: object) -> str:
+    """Join a class's or function's module and qualified name.
+
+    Both attributes are read with a default, because a rejected entry can be any
+    object at all, and a missing name must not become an ``AttributeError``.
+    """
+    module = getattr(named, "__module__", None) or "unknown module"
+    qualified = getattr(named, "__qualname__", None) or getattr(named, "__name__", None)
+    return f"{module}.{qualified or '<unnamed>'}"
+
+
+def _registration_api_owner(plugin_type: type[object]) -> type[object] | None:
+    """Find the first explicit marker in the MRO without metaclass descriptors.
+
+    A subclass inherits its declaring class's registration contract. Its legacy
+    same-named fields/helpers are not part of that contract unless it repeats
+    the marker. An explicit unsupported marker shadows any inherited opt-in.
+    """
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
+        plugin_type, type(plugin_type)
+    )
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        if "__durable_registration_api__" in namespace:
+            version = namespace["__durable_registration_api__"]
+            return declaring_type if type(version) is int and version == 1 else None
+    return None
+
+
+def _exclusive_groups(plugin_type: type[object]) -> list[str]:
+    """Accumulate opted-in MRO contracts without interpreting legacy fields."""
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
+        plugin_type, type(plugin_type)
+    )
+    groups: list[str] = []
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        version = namespace.get("__durable_registration_api__")
+        if type(version) is not int or version != 1:
+            continue
+        try:
+            group = getattr(declaring_type, "exclusive_group", None)
+        except Exception as error:
+            raise PluginLoadError(
+                f"Cannot read exclusive_group for {_module_qualified_name(plugin_type)}."
+            ) from error
+        if group is None:
+            continue
+        if type(group) is not str or not group.strip():
+            raise PluginLoadError(
+                f"Durable instrumentation plugin {_module_qualified_name(plugin_type)} "
+                "must declare exclusive_group as None or a non-empty string."
+            )
+        # Repeating a marker or a group does not register this one plugin twice.
+        if group not in groups:
+            groups.append(group)
+    return groups
+
+
+def _validate_exclusive_groups(
+    plugin_types: Sequence[type[object]],
+) -> None:
+    """Reject competing instrumentation before any lifecycle hooks run."""
+    groups: dict[str, type[object]] = {}
+    for plugin_type in plugin_types:
+        if _registration_api_owner(plugin_type) is None:
+            continue
+        for group in _exclusive_groups(plugin_type):
+            if (previous := groups.get(group)) is not None:
+                if previous is plugin_type:
+                    raise PluginLoadError(
+                        f"Durable instrumentation plugin {_module_qualified_name(plugin_type)} "
+                        f"is registered more than once in exclusive group '{group}'. "
+                        "Register this plugin only once in plugins."
+                    )
+                raise PluginLoadError(
+                    f"Durable instrumentation plugins {_module_qualified_name(previous)} "
+                    f"and {_module_qualified_name(plugin_type)} are mutually exclusive "
+                    f"(group '{group}'). Keep only one plugin from this group in "
+                    "plugins and DURABLE_EXECUTION_PLUGINS."
+                )
+            groups[group] = plugin_type
 
 
 # Raised out of plugin code, these three are not reports of a plugin defect but
@@ -1448,6 +1537,12 @@ class PluginExecutor:
                 )
                 continue
             plugins.append(plugin)
+        # The returned plugin is the actual instrumentation, and its concrete
+        # type may declare an exclusive group even when the factory that built it
+        # does not -- a delegating wrapper carries no marker of its own. Check
+        # the returned types before any hook is dispatched, and outside the
+        # containment above: a conflict is configuration, not a plugin failure.
+        _validate_exclusive_groups([type(plugin) for plugin in plugins])
         self._plugins = plugins
 
     @staticmethod
