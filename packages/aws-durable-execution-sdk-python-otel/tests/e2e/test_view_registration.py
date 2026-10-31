@@ -4,12 +4,24 @@ import logging
 from types import SimpleNamespace
 from collections.abc import Iterator
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.exceptions import PluginLoadError
-from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python.execution import (
+    durable_execution,
+    DurableExecutionInvocationInputWithClient,
+    InitialExecutionState,
+)
+from aws_durable_execution_sdk_python.lambda_service import (
+    DurableServiceClient,
+    ExecutionDetails,
+    Operation,
+    OperationStatus,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     DurableInstrumentationPluginFactory,
@@ -49,6 +61,95 @@ def telemetry(
 
 def _handler(_event: Any, _context: DurableContext) -> str:
     return "unused"
+
+
+def _invoke_once(configured: Any) -> Any:
+    """Call a decorated handler once against an injected in-process service client.
+
+    The local runner retries an invocation whose handler raises, turning a
+    registration conflict raised at invocation start into a timeout; calling the
+    handler directly keeps the raised error observable.
+    """
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token",  # noqa: S106 - test fixture value
+        initial_execution_state=InitialExecutionState(
+            operations=[operation], next_marker=""
+        ),
+        service_client=Mock(spec=DurableServiceClient),
+    )
+    lambda_context = Mock(
+        aws_request_id="test-request",
+        client_context=None,
+        identity=None,
+        _epoch_deadline_time_in_ms=1_000_000,
+        invoked_function_arn=None,
+        tenant_id=None,
+    )
+    return configured(invocation_input, lambda_context)
+
+
+class _DelegatingFactory:
+    """A user factory delegating to a built-in one, carrying no registration marker.
+
+    The reported shape: ``create_plugin`` and nothing else, so its class has no
+    marker even though the plugin it returns does.
+    """
+
+    def __init__(self, delegate: Any) -> None:        self._delegate = delegate
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        return self._delegate.create_plugin(info)
+
+
+@pytest.mark.parametrize("wrapped", ["execution", "invocation", "both"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_wrapper_factory_cannot_bypass_view_exclusion(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    wrapped: str,
+    reverse: bool,
+) -> None:
+    provider, exporter = telemetry
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    execution = ExecutionOtelPluginFactory(config)
+    invocation = InvocationOtelPluginFactory(config)
+    plugins: list[DurableInstrumentationPluginFactory] = [
+        _DelegatingFactory(execution),
+        _DelegatingFactory(invocation),
+    ]
+    if wrapped == "execution":
+        plugins[1] = invocation
+    elif wrapped == "invocation":
+        plugins[0] = execution
+    if reverse:
+        plugins.reverse()
+
+    configured = durable_execution(_handler, plugins=plugins)
+    with pytest.raises(PluginLoadError) as error:
+        _invoke_once(configured)
+    assert "ExecutionOtelPlugin" in str(error.value)
+    assert "InvocationOtelPlugin" in str(error.value)
+    assert "Keep only one" in str(error.value)
+    assert not exporter.get_finished_spans()
+
+
+def test_single_wrapped_view_with_unrelated_plugin_is_accepted(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+) -> None:
+    provider, exporter = telemetry
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    execution = ExecutionOtelPluginFactory(config)
+    configured = durable_execution(
+        _handler, plugins=[_DelegatingFactory(execution), _ObserverFactory()]
+    )
+    assert _invoke_once(configured)["Status"] == "SUCCEEDED"
+    assert not exporter.get_finished_spans()
 
 
 @pytest.mark.parametrize("registration", ["explicit", "environment", "mixed"])

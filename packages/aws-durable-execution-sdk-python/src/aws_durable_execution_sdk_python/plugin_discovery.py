@@ -10,6 +10,9 @@ from typing import cast
 from aws_durable_execution_sdk_python.exceptions import PluginLoadError
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPluginFactory,
+    _module_qualified_name,
+    _registration_api_owner,
+    _validate_exclusive_groups,
 )
 
 
@@ -52,18 +55,6 @@ def _distribution_name(entry_point: metadata.EntryPoint) -> str:
     if distribution is None:
         return "unknown distribution"
     return distribution.metadata.get("Name", "unknown distribution")
-
-
-def _module_qualified_name(named: object) -> str:
-    """Join a class's or function's module and qualified name.
-
-    Both attributes are read with a default, because a rejected entry can be any
-    object at all. A missing name must not replace the configuration error with an
-    ``AttributeError``.
-    """
-    module = getattr(named, "__module__", None) or "unknown module"
-    qualified = getattr(named, "__qualname__", None) or getattr(named, "__name__", None)
-    return f"{module}.{qualified or '<unnamed>'}"
 
 
 def _describe_value(value: object) -> str:
@@ -286,26 +277,6 @@ def _factory_type(factory: object) -> type[object]:
     )
 
 
-def _registration_api_owner(plugin_type: type[object]) -> type[object] | None:
-    """Find the first explicit marker in the MRO without metaclass descriptors.
-
-    A subclass inherits its declaring class's registration contract. Its legacy
-    same-named fields/helpers are not part of that contract unless it repeats
-    the marker. An explicit unsupported marker shadows any inherited opt-in.
-    """
-    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
-        plugin_type, type(plugin_type)
-    )
-    for declaring_type in mro:
-        namespace = type.__dict__["__dict__"].__get__(
-            declaring_type, type(declaring_type)
-        )
-        if "__durable_registration_api__" in namespace:
-            version = namespace["__durable_registration_api__"]
-            return declaring_type if type(version) is int and version == 1 else None
-    return None
-
-
 def _registration_result_callback(plugin: object, owner: type[object]) -> object | None:
     """Bind the opted-in contract without calling a legacy subclass helper."""
     if owner is _factory_type(plugin):
@@ -320,63 +291,6 @@ def _registration_result_callback(plugin: object, owner: type[object]) -> object
             bind = getattr(callback, "__get__", None)
             return bind(plugin, _factory_type(plugin)) if bind is not None else callback
     return None
-
-
-def _exclusive_groups(plugin_type: type[object]) -> list[str]:
-    """Accumulate opted-in MRO contracts without interpreting legacy fields."""
-    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
-        plugin_type, type(plugin_type)
-    )
-    groups: list[str] = []
-    for declaring_type in mro:
-        namespace = type.__dict__["__dict__"].__get__(
-            declaring_type, type(declaring_type)
-        )
-        version = namespace.get("__durable_registration_api__")
-        if type(version) is not int or version != 1:
-            continue
-        try:
-            group = getattr(declaring_type, "exclusive_group", None)
-        except Exception as error:
-            raise PluginLoadError(
-                f"Cannot read exclusive_group for {_module_qualified_name(plugin_type)}."
-            ) from error
-        if group is None:
-            continue
-        if type(group) is not str or not group.strip():
-            raise PluginLoadError(
-                f"Durable instrumentation plugin {_module_qualified_name(plugin_type)} "
-                "must declare exclusive_group as None or a non-empty string."
-            )
-        # Repeating a marker or a group does not register this one plugin twice.
-        if group not in groups:
-            groups.append(group)
-    return groups
-
-
-def _validate_exclusive_groups(
-    plugin_types: Sequence[type[object]],
-) -> None:
-    """Reject competing instrumentation before any lifecycle hooks run."""
-    groups: dict[str, type[object]] = {}
-    for plugin_type in plugin_types:
-        if _registration_api_owner(plugin_type) is None:
-            continue
-        for group in _exclusive_groups(plugin_type):
-            if (previous := groups.get(group)) is not None:
-                if previous is plugin_type:
-                    raise PluginLoadError(
-                        f"Durable instrumentation plugin {_module_qualified_name(plugin_type)} "
-                        f"is registered more than once in exclusive group '{group}'. "
-                        "Register this plugin only once in plugins."
-                    )
-                raise PluginLoadError(
-                    f"Durable instrumentation plugins {_module_qualified_name(previous)} "
-                    f"and {_module_qualified_name(plugin_type)} are mutually exclusive "
-                    f"(group '{group}'). Keep only one plugin from this group in "
-                    "plugins and DURABLE_EXECUTION_PLUGINS."
-                )
-            groups[group] = plugin_type
 
 
 def _notify_registration_result(

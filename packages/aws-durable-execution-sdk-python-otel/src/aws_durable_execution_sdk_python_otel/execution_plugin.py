@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any, TYPE_CHECKING, cast
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -154,6 +154,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             (globally configured provider, X-Ray extractor, "Workflow" root
             span).
     """
+
+    __durable_registration_api__: ClassVar[int] = 1
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self._config = config or OtelPluginConfig()

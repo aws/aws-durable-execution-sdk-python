@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any, TYPE_CHECKING, cast
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -133,6 +133,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             uses the globally configured tracer provider (for example, the
             provider installed by the ADOT Lambda layer).
     """
+
+    __durable_registration_api__: ClassVar[int] = 1
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
 
