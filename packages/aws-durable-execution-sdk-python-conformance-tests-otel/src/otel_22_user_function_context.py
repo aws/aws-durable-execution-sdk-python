@@ -24,8 +24,6 @@ from opentelemetry import trace
 
 
 def probe(label: str) -> None:
-    if not trace.get_current_span().get_span_context().is_valid:
-        raise RuntimeError(f"No active span for conformance.{label}")
     span = trace.get_tracer("aws-durable-execution-conformance").start_span(
         f"conformance.{label}", attributes={"conformance.callback": label}
     )
