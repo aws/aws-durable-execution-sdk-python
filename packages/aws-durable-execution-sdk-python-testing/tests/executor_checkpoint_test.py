@@ -166,6 +166,43 @@ def test_non_empty_checkpoint_returns_only_new_ops():
     assert op_ids_r2 == {"C"}
 
 
+def test_first_checkpoint_response_omits_operations_the_input_carried():
+    """
+    Building the invocation input records that the handler observed the
+    state up to that point. So the first checkpoint response of the next
+    invocation returns only B, not the wait W that changed while suspended
+    and that the input carried.
+    """
+    executor, store, execution, token_0 = _make_executor_with_started_execution()
+    arn = execution.durable_execution_arn
+    executor.checkpoint_execution(
+        execution_arn=arn, checkpoint_token=token_0, updates=[_step_start_update("A")]
+    )
+
+    suspended = store.load(arn)
+    suspended.operations.append(
+        SvcOperation(
+            operation_id="W",
+            operation_type=OperationType.WAIT,
+            status=OperationStatus.SUCCEEDED,
+        )
+    )
+    suspended.touch_operation("W")
+    suspended.mark_state_delivered()
+    store.save(suspended)
+
+    response = executor.checkpoint_execution(
+        execution_arn=arn,
+        checkpoint_token=CheckpointToken(
+            execution_arn=arn, token_sequence=suspended.token_sequence
+        ).to_str(),
+        updates=[_step_start_update("B")],
+    )
+
+    assert response.new_execution_state is not None
+    assert {op.operation_id for op in response.new_execution_state.operations} == {"B"}
+
+
 # endregion
 # region: Async completion between polls surfaces in next poll
 
