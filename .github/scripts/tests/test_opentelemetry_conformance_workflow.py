@@ -4,7 +4,6 @@ from pathlib import Path
 import yaml
 
 
-SHARED_WORKFLOW_REF = "main"
 CONFORMANCE_TEST_REF = "main"
 
 WORKFLOW_PATH = (
@@ -24,7 +23,7 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
     )
     shared_ref = re.search(re.escape(orchestrator) + r"(\S+)", workflow)
     assert shared_ref is not None
-    assert shared_ref.group(1) == SHARED_WORKFLOW_REF
+    assert re.fullmatch(r"[0-9a-f]{40}", shared_ref.group(1))
     assert f"default: {CONFORMANCE_TEST_REF}" in workflow
     assert "python-opentelemetry.yml@" not in workflow
     assert "\n      otlp_endpoint:" not in workflow
@@ -59,6 +58,18 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "DATADOG_OTLP_HEADERS",
     ):
         assert f"{obsolete_secret_name}:" not in workflow
+
+
+def test_opentelemetry_conformance_manual_runs_keep_only_active_inputs() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text())
+
+    assert set(workflow[True]["workflow_dispatch"]["inputs"]) == {
+        "aws_region",
+        "conformance_test_ref",
+    }
+    assert not {"phase", "delay_seconds"} & set(
+        workflow["jobs"]["opentelemetry"]["with"]
+    )
 
 
 def test_opentelemetry_conformance_handlers_come_from_this_repository() -> None:
