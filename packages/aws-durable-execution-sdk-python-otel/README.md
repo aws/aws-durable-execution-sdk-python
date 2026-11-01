@@ -401,11 +401,28 @@ each durable span in the same invocation.
 ### Status attributes
 
 `durable.invocation.status` uses `RETRYING` when the core plugin hook reports
-`InvocationStatus.RETRY`. The core enum remains unchanged. Operation spans use
-OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
-`UNSET` for other outcomes without error details, including `FAILED`,
-`CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
-remains in `durable.operation.status`.
+`InvocationStatus.RETRY`, with OTel `UNSET`. The core enum remains unchanged.
+Operation spans use the following mapping in both views:
+
+| Durable operation outcome | Error details | OTel status | Exception event |
+| --- | --- | --- | --- |
+| `SUCCEEDED` | Absent | `OK` | None |
+| `FAILED`, `TIMED_OUT`, `STOPPED` | Absent | `ERROR` | None |
+| `CANCELLED` and other non-success outcomes | Absent | `UNSET` | None |
+| Any outcome | Present | `ERROR` | Available diagnostics |
+
+The original durable operation status remains in `durable.operation.status`.
+Failure status does not fabricate an exception when diagnostics are absent,
+including for failed step attempts. A caught operation failure leaves the
+enclosing Invocation and Workflow spans successful if the handler succeeds.
+
+Terminal operation and attempt exception events use the same normalized end
+timestamp as their span, including delayed or replayed completion delivery.
+Execution view retains durable timing and normalizes an end at or before its
+start; Invocation view retains its invocation-local timestamp ordering. A
+checkpointless context with no durable start uses its completion time as the
+lower bound in Execution view. When an end timestamp is absent, the current time
+is chosen once for both the event and span end.
 
 ### Invocation context isolation
 
