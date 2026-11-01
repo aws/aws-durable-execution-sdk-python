@@ -120,38 +120,33 @@ in the execution view. Re-enable the SAM functions and build targets after the
 shared requirement accepts both history orderings without relaxing those replay
 assertions.
 
-## Callback regressions awaiting fixes
+## Callback replay validation
 
 Cases 25 and 26 are active in both views, including their SAM functions, build
-targets, and local integration tests. These tests intentionally keep CI failing
-until the required SDK and testing-library fixes merge. They are ordinary
-failing tests, without skips, expected-failure markers, or failure suppression.
+targets, and local integration tests. Their assertions remain merge gates,
+without skips or expected-failure markers.
 
-- Case 25 needs terminal failure status without diagnostic details
-  ([#853](https://github.com/aws/aws-durable-execution-sdk-python/issues/853))
-  and consistent empty callback error history
-  ([#862](https://github.com/aws/aws-durable-execution-sdk-python/issues/862)).
-- Case 26 needs completion discovery and export
-  ([#854](https://github.com/aws/aws-durable-execution-sdk-python/issues/854)),
-  callback update production
-  ([#860](https://github.com/aws/aws-durable-execution-sdk-python/issues/860)),
-  and invocation-input acknowledgment
-  ([#861](https://github.com/aws/aws-durable-execution-sdk-python/issues/861)).
-- The additional case 17 callback-error regression also needs snapshot isolation
-  ([#852](https://github.com/aws/aws-durable-execution-sdk-python/issues/852)).
-  The existing case 17 handler and supplied-error coverage remain active.
+- Case 25's terminal-status and empty-error fixes are in `main` through
+  [#865](https://github.com/aws/aws-durable-execution-sdk-python/pull/865) and
+  [#870](https://github.com/aws/aws-durable-execution-sdk-python/pull/870).
+- Case 26's local test still requires callback completions to populate updated
+  operations ([#860](https://github.com/aws/aws-durable-execution-sdk-python/issues/860),
+  implemented in [#868](https://github.com/aws/aws-durable-execution-sdk-python/pull/868)).
+  The combined tests pass with that fix, without #867 or #869. Keep #868 as a
+  prerequisite to merging this coverage.
 
-Case 25 asserts the local-runner contract proposed in #862: detailed failure
-history includes an empty `Payload` with `Truncated: false`, while metadata-only
-history omits the payload and sets `Truncated: true`. The exact empty history
-`Payload` shape remains **unverified** against deployed AWS Lambda and requires
-service evidence before claiming service parity. The test inspects raw exported
-spans and ordinary pytest diagnostics; it has no configurable proof-file output.
+The [case 25 cloud run](https://github.com/aws/aws-durable-execution-sdk-python/actions/runs/40769339007)
+saved `Error: {Payload: {}, Truncated: false}` on the errorless `CallbackFailed`
+event in both views with both ADOT/X-Ray and Community/S3. This verifies the
+detailed-history expectation against AWS Lambda. The metadata-only expectation
+(`Error: {Truncated: true}`) remains **unverified** against the service; it is
+covered by the local runner test. Raw spans record when each export occurs.
 
-Case 26 asserts inside the observed step that the terminal callback has already
-reached the exporter, then checks that its raw export count remains one at both
-later barriers and after completion. Recorded span timestamps alone are not
-evidence of export order.
+Case 26 records the terminal callback's export count inside the observed step
+and asserts afterward that it was already one at that point. This keeps SDK
+step retries from consuming the assertion failure. The test also checks that
+the raw export count remains one at both later barriers and after completion.
+Recorded span timestamps alone are not evidence of export order.
 
 The additional case 17 test remains available for follow-up in
 [commit `6484e577`](https://github.com/aws/aws-durable-execution-sdk-python/commit/6484e577b478aeb6345e346515b40bd516cacb1f).
@@ -282,13 +277,14 @@ write access; the runner identity needs list, read, and cleanup access.
 `.github/workflows/opentelemetry-conformance-tests.yml` calls the shared
 orchestrator in the conformance repository and points it at this package with
 `examples_dir`, so orchestration stays centralized while the handlers run from
-the commit under test. The shared workflow tracks the conformance repository's
-`main` branch, and the test catalog defaults to `main`. Manual runs can override
-the catalog with the `conformance_test_ref` input. Pull requests run the
-invocation and execution suites, with only case 21 reported as
-`NOT_IMPLEMENTED`. Cases 25 and 26 remain enabled while their prerequisite fixes
-are pending. The orchestrator no longer runs the legacy long-running
-suite; its templates and local contract tests remain in this package.
+the commit under test. The shared workflow is pinned to a reviewed commit,
+with Dependabot maintaining the pin. The test catalog defaults to `main`;
+manual runs can override it with the `conformance_test_ref` input. Pull requests
+and manual runs execute the invocation and execution suites, with only case 21
+reported as `NOT_IMPLEMENTED`. Case 26 remains enabled while #868 is pending.
+The orchestrator no longer runs the legacy long-running suite or provides
+launch/check modes; its templates and local contract tests remain in this
+package.
 
 Case 27 (`chained-invoke-suspend`) invokes a child that performs a one-second
 durable wait and returns the original payload after resuming. Both views

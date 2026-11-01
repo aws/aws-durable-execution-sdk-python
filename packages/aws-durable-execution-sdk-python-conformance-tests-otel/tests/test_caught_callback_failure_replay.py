@@ -271,12 +271,13 @@ def test_case25_public_caught_failure_and_replay(
         assert {type(error) for _, error in failures} == {CallbackExternalError}
         assert len({error.error_type for _, error in failures}) == 1
         failed = history["Events"][6]
-        # Intended local history contract from #862. The exact empty Payload
-        # service shape remains unverified against deployed AWS Lambda.
+        # Verified in all four case-25 cloud histories from this run:
+        # https://github.com/aws/aws-durable-execution-sdk-python/actions/runs/40769339007
         assert failed["CallbackFailedDetails"]["Error"] == {
             "Payload": {},
             "Truncated": False,
         }
+        # Metadata-only history remains unverified against deployed AWS Lambda.
         assert metadata_history["Events"][6]["CallbackFailedDetails"]["Error"] == {
             "Truncated": True,
         }
