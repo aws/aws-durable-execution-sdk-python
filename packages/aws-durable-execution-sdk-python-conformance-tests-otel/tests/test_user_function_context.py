@@ -97,6 +97,7 @@ def test_user_function_probes_keep_sdk_context_across_resume(
         barrier = Barrier(2, timeout=5)
         barriers.update(dict.fromkeys(pair, barrier))
     original_probe = module.probe
+    probe_contexts: list[tuple[str, context.Context, context.Context]] = []
 
     def synchronized_probe(label: str) -> None:
         callback_context = context.get_current()
@@ -107,10 +108,11 @@ def test_user_function_probes_keep_sdk_context_across_resume(
         original_probe(label)
         if label in barriers:
             barriers[label].wait()
-        assert context.get_current() is callback_context
+        probe_contexts.append((label, callback_context, context.get_current()))
 
     monkeypatch.setattr(module, "probe", synchronized_probe)
     invocation_contexts: list[tuple[context.Context, context.Context]] = []
+    host_contexts: list[tuple[context.Context, context.Context]] = []
 
     def entry(
         event: DurableExecutionInvocationInput, lambda_context: LambdaContext
@@ -136,7 +138,7 @@ def test_user_function_probes_keep_sdk_context_across_resume(
                         (invocation_context, context.get_current())
                     )
         finally:
-            assert context.get_current() is host_context
+            host_contexts.append((host_context, context.get_current()))
 
     try:
         with DurableFunctionTestRunner(handler=entry, skip_time=False) as runner:
@@ -146,6 +148,8 @@ def test_user_function_probes_keep_sdk_context_across_resume(
             )
             result = runner.wait_for_result(arn, timeout=30)
             history = runner.get_execution_history(arn)
+        for label, before, after in probe_contexts:
+            assert after is before, f"context was not restored after {label}"
         assert result.status.value == "SUCCEEDED", result.error
         assert result.result is not None
         assert json.loads(result.result) == "context-complete"
@@ -181,6 +185,7 @@ def test_user_function_probes_keep_sdk_context_across_resume(
         } == {canonical_trace_id}
 
         probes = [span for span in spans if span.name.startswith("conformance.")]
+        assert len(probe_contexts) == len(probes)
         # Count raw exports so replayed callback bodies and duplicate exports
         # fail even if they reuse a span ID.
         assert Counter(span.name for span in probes) == Counter(
@@ -257,6 +262,8 @@ def test_user_function_probes_keep_sdk_context_across_resume(
         # PENDING, rather than checking only the pytest caller's context.
         assert len(invocation_contexts) == 2
         assert all(before is after for before, after in invocation_contexts)
+        assert len(host_contexts) == 2
+        assert all(before is after for before, after in host_contexts)
         assert context.get_current() is before_context
     finally:
         provider.shutdown()

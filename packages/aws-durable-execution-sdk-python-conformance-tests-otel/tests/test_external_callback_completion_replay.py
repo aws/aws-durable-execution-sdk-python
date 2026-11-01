@@ -93,7 +93,7 @@ def test_external_callback_completion_precedes_later_replays(
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    calls: list[str] = []
+    calls: list[tuple[str, int]] = []
     original_observe = module.observe_target
 
     def terminal_target_exports() -> tuple[ReadableSpan, ...]:
@@ -108,11 +108,7 @@ def test_external_callback_completion_precedes_later_replays(
         step = original_observe(value)
 
         def counted(step_context: Any) -> str:
-            targets = terminal_target_exports()
-            assert len(targets) == 1, (
-                "target completion must reach the exporter before the observed step"
-            )
-            calls.append(value)
+            calls.append((value, len(terminal_target_exports())))
             return step(step_context)
 
         return counted
@@ -155,7 +151,9 @@ def test_external_callback_completion_precedes_later_replays(
         assert result.status.value == "SUCCEEDED"
         assert result.result is not None
         assert json.loads(result.result) == "target/one/two"
-        assert calls == ["target"]
+        assert calls == [("target", 1)], (
+            "target completion must reach the exporter before the observed step"
+        )
         assert gates == [(2, 3), (8, 11), (15, 18)]
         assert [
             event.event_id
