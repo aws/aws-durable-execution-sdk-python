@@ -43,6 +43,16 @@ END = START + timedelta(seconds=1)
 ARN = (
     "arn:aws:lambda:us-west-2:123456789012:function:status:1/durable-execution/test/id"
 )
+_STATUS_WITHOUT_ERROR: dict[OperationStatus, StatusCode] = {
+    OperationStatus.STARTED: StatusCode.UNSET,
+    OperationStatus.PENDING: StatusCode.UNSET,
+    OperationStatus.READY: StatusCode.UNSET,
+    OperationStatus.SUCCEEDED: StatusCode.OK,
+    OperationStatus.FAILED: StatusCode.ERROR,
+    OperationStatus.CANCELLED: StatusCode.UNSET,
+    OperationStatus.TIMED_OUT: StatusCode.ERROR,
+    OperationStatus.STOPPED: StatusCode.ERROR,
+}
 
 
 InstrumentedView = tuple[
@@ -121,15 +131,7 @@ def test_operation_status_and_exception(
     span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
     assert span.attributes is not None
     assert span.attributes["durable.operation.status"] == status.value
-    expected = (
-        StatusCode.ERROR
-        if with_error
-        or status
-        in {OperationStatus.FAILED, OperationStatus.TIMED_OUT, OperationStatus.STOPPED}
-        else (
-            StatusCode.OK if status is OperationStatus.SUCCEEDED else StatusCode.UNSET
-        )
-    )
+    expected = StatusCode.ERROR if with_error else _STATUS_WITHOUT_ERROR[status]
     assert span.status.status_code is expected
     if with_error:
         assert span.status.description == "deadline exceeded"
@@ -495,6 +497,8 @@ def test_failed_operation_without_type_or_message_uses_fallback(
     plugin.on_operation_end(_operation_end_info(ErrorObject(None, None, None, None)))
     _end_invocation(plugin)
     span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.status.description == ""
     attributes = _exception_attributes(span)
     assert attributes["exception.message"] == "Unknown error"
     assert attributes["exception.type"] == "Exception"
