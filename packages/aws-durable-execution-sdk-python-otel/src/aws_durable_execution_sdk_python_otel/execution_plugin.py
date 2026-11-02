@@ -43,7 +43,6 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
-    OperationStatus,
     OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -95,6 +94,9 @@ from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     canonical_trace_id,
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from aws_durable_execution_sdk_python_otel.operation_span_status import (
+    set_operation_span_status,
+)
 from aws_durable_execution_sdk_python_otel.log_filter import (
     bind_invocation,
     install_log_filter,
@@ -895,17 +897,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         end_timestamp = to_otel_timestamp(
             end_time or datetime.datetime.now(datetime.UTC)
         )
-        if info.error:
-            span.set_status(StatusCode.ERROR, info.error.message or "")
-            record_error_object_exception(span, info.error, timestamp=end_timestamp)
-        elif info.status in {
-            OperationStatus.FAILED,
-            OperationStatus.TIMED_OUT,
-            OperationStatus.STOPPED,
-        }:
-            span.set_status(StatusCode.ERROR)
-        elif info.status is OperationStatus.SUCCEEDED:
-            span.set_status(StatusCode.OK)
+        set_operation_span_status(span, info)
+        record_error_object_exception(span, info.error, timestamp=end_timestamp)
 
         self._note_parent_end(info.parent_id, end_time)
         popped = self._pop_span(info.operation_id)

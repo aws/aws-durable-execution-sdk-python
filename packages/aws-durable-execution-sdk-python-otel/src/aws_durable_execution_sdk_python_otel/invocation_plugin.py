@@ -14,7 +14,6 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
-    OperationStatus,
     OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -69,6 +68,9 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
     unbind_invocation,
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from aws_durable_execution_sdk_python_otel.operation_span_status import (
+    set_operation_span_status,
+)
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
 from aws_durable_execution_sdk_python_otel.propagation import propagation_metadata
 from aws_durable_execution_sdk_python_otel.timestamps import to_otel_timestamp
@@ -963,17 +965,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span.set_attributes(self._extract_attributes(info))
 
         end_timestamp = self._next_ordered_timestamp(info.end_time)
-        if info.error:
-            span.set_status(StatusCode.ERROR, info.error.message or "")
-            record_error_object_exception(span, info.error, timestamp=end_timestamp)
-        elif info.status in {
-            OperationStatus.FAILED,
-            OperationStatus.TIMED_OUT,
-            OperationStatus.STOPPED,
-        }:
-            span.set_status(StatusCode.ERROR)
-        elif info.status is OperationStatus.SUCCEEDED:
-            span.set_status(StatusCode.OK)
+        set_operation_span_status(span, info)
+        record_error_object_exception(span, info.error, timestamp=end_timestamp)
 
         self._end_span(info.operation_id, end_timestamp)
 

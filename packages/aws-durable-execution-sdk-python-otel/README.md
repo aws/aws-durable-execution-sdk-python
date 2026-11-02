@@ -416,13 +416,18 @@ Failure status does not fabricate an exception when diagnostics are absent,
 including for failed step attempts. A caught operation failure leaves the
 enclosing Invocation and Workflow spans successful if the handler succeeds.
 
-Terminal operation and attempt exception events use the same normalized end
-timestamp as their span, including delayed or replayed completion delivery.
-Execution view retains durable timing and normalizes an end at or before its
-start; Invocation view retains its invocation-local timestamp ordering. A
-checkpointless context with no durable start uses its completion time as the
-lower bound in Execution view. When an end timestamp is absent, the current time
-is chosen once for both the event and span end.
+Operation and step-attempt exception events have the same timestamp as their
+span end, including when completions arrive late or are observed on replay.
+
+Execution view uses the end time supplied by the SDK, extending operation spans
+to include later observed child ends. An end at or before the start moves to
+1 µs after the start.
+
+Invocation view keeps timestamps in order within an invocation. An end at or
+before the last timestamp it used moves to 1 µs after that timestamp.
+
+When no end time is available, the view reads the clock once for the event and
+span end. Invocation view still applies its timestamp ordering.
 
 ### Invocation context isolation
 
