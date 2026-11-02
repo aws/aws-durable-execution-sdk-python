@@ -37,11 +37,16 @@ def record_error_object_exception(
 ) -> None:
     """Record a span exception event that preserves the checkpointed error.
 
-    A failed outcome without an error object has no diagnostic event. Terminal
-    callers supply the normalized span-end timestamp so delayed delivery does
-    not place an event outside the span.
+    A failed outcome with no error object, or with neither a type nor a message,
+    has no diagnostic event: the OTel exception conventions require whichever of
+    the two the other lacks, so an event carrying neither would be malformed,
+    and inventing one of them is what this module exists to avoid. The span's
+    error status and ``durable.operation.status`` still record the failure.
+
+    Terminal callers supply the normalized span-end timestamp so delayed
+    delivery does not place an event outside the span.
     """
-    if error is None:
+    if error is None or (error.type is None and error.message is None):
         return
     span.add_event(
         "exception",

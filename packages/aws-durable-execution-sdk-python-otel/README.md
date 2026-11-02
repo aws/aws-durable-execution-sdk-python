@@ -420,7 +420,10 @@ An exception event carries `exception.type`, `exception.message` and
 `exception.stacktrace` only when the checkpoint stored them, so a partial error
 such as a callback failure with a message and no type omits the field it lacks
 instead of reporting an invented one. An explicitly supplied empty string stays
-an empty string and remains distinct from an absent field.
+an empty string and remains distinct from an absent field. The OTel exception
+conventions require whichever of type and message the other lacks, so an error
+supplying neither records no event at all; its failure still appears in the
+span's error status and in `durable.operation.status`.
 
 Terminal operation and attempt exception events use the same normalized end
 timestamp as their span, including delayed or replayed completion delivery.
