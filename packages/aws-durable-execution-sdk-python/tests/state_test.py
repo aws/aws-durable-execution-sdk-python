@@ -19,8 +19,11 @@ import pytest
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
+    ChildContextError,
     DurableApiErrorCategory,
+    DurableOperationError,
     GetExecutionStateError,
+    InvokeError,
     NonDeterministicExecutionError,
     OrphanedChildException,
     StepError,
@@ -56,6 +59,7 @@ from aws_durable_execution_sdk_python.plugin import (
 from aws_durable_execution_sdk_python.state import (
     _BLOCKED_CALLER_WAIT_SECONDS,
     _STOP_SIGNAL_POLL_SECONDS,
+    _BatchAccumulator,
     _Signal,
     CheckpointBatcherConfig,
     CheckpointedResult,
@@ -414,6 +418,84 @@ def test_checkpointed_result_raise_operation_error_no_error_with_message():
 
     with pytest.raises(StepError, match="Custom error message"):
         result.raise_operation_error(StepError, "Custom error message")
+
+
+@pytest.mark.parametrize(
+    "operation_type,error_cls",
+    [
+        (OperationType.STEP, StepError),
+        (OperationType.CONTEXT, ChildContextError),
+        (OperationType.CHAINED_INVOKE, InvokeError),
+    ],
+)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"ErrorMessage": ""},
+        {"ErrorType": ""},
+        {"ErrorData": ""},
+        {"StackTrace": []},
+        {
+            "ErrorMessage": "stored failure",
+            "ErrorType": "ExternalError",
+            "ErrorData": "details",
+            "StackTrace": ["original frame"],
+        },
+    ],
+)
+@pytest.mark.parametrize("message", [None, "Custom error message"])
+def test_checkpointed_error_uses_only_available_diagnostics(
+    operation_type: OperationType,
+    error_cls: type[DurableOperationError],
+    payload: dict[str, str | list[str]] | None,
+    message: str | None,
+) -> None:
+    error = ErrorObject.from_dict(payload) if payload is not None else None
+    operation = Operation(
+        operation_id="failed-operation",
+        operation_type=operation_type,
+        status=OperationStatus.FAILED,
+        step_details=(
+            StepDetails(error=error) if operation_type is OperationType.STEP else None
+        ),
+        context_details=(
+            ContextDetails(error=error)
+            if operation_type is OperationType.CONTEXT
+            else None
+        ),
+        chained_invoke_details=(
+            ChainedInvokeDetails(error=error)
+            if operation_type is OperationType.CHAINED_INVOKE
+            else None
+        ),
+    )
+    result = CheckpointedResult.create_from_operation(operation)
+
+    with pytest.raises(error_cls) as raised:
+        result.raise_operation_error(error_cls, message)
+
+    assert type(raised.value) is error_cls
+    if payload:
+        assert raised.value.message == payload.get("ErrorMessage")
+        assert raised.value.error_type == (
+            payload.get("ErrorType")
+            or f"{error_cls.__module__}.{error_cls.__qualname__}"
+        )
+        assert raised.value.data == payload.get("ErrorData")
+        assert raised.value.stack_trace == payload.get("StackTrace")
+        assert raised.value.__cause__ is not None
+    else:
+        assert raised.value.message == (
+            message
+            or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
+        )
+        assert raised.value.__cause__ is None
+    assert result.error is error
+    assert result.status is OperationStatus.FAILED
+    if error is not None:
+        assert error.to_dict() == payload
 
 
 def test_checkpointed_result_immutable():
@@ -1365,6 +1447,96 @@ def test_collect_checkpoint_batch_uses_overflow_queue():
     assert len(batch) >= 2
     assert batch[0].operation_update.operation_id == "overflow_1"
     assert batch[1].operation_update.operation_id == "overflow_2"
+
+
+def _oversized_queued_operation(
+    operation_id: str, max_batch_size_bytes: int
+) -> QueuedOperation:
+    """A sync operation whose serialized size alone exceeds the batch limit."""
+    return QueuedOperation(
+        OperationUpdate(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            action=OperationAction.SUCCEED,
+            payload="y" * (2 * max_batch_size_bytes),
+        ),
+        CompletionEvent(),
+    )
+
+
+def test_collect_checkpoint_batch_sends_oversized_operation_from_overflow() -> None:
+    """An operation above max_batch_size_bytes that reached the overflow queue is
+    still sent, alone, in the next batch (issue #871).
+
+    This is the default AT_LEAST_ONCE_PER_RETRY step shape: a small START is
+    already in the batch when the large SUCCEED arrives, so SUCCEED does not fit
+    and moves to the overflow queue. The next batch must send it rather than
+    return it to the queue forever.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(max_batch_size_bytes=500)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+        batcher_config=config,
+    )
+
+    small_op = QueuedOperation(
+        OperationUpdate(
+            operation_id="big_step",
+            operation_type=OperationType.STEP,
+            action=OperationAction.START,
+        ),
+        None,
+    )
+    large_op = _oversized_queued_operation("big_step", config.max_batch_size_bytes)
+    assert state._calculate_operation_size(large_op) > config.max_batch_size_bytes
+    state._checkpoint_queue.put(small_op)
+    state._checkpoint_queue.put(large_op)
+
+    first_batch = state._collect_checkpoint_batch()
+    assert first_batch == [small_op]
+    assert state._overflow_queue.qsize() == 1
+
+    # The handler thread is blocked on large_op, so no further operation will
+    # arrive. Stopping the batcher makes a regression return [] instead of
+    # blocking the test forever in _wait_for_first_operation.
+    state._checkpointing_stopped.set()
+    second_batch = state._collect_checkpoint_batch()
+    assert second_batch == [large_op]
+    assert state._overflow_queue.empty()
+
+
+def test_drain_overflow_takes_oversized_operation_when_batch_is_empty() -> None:
+    """_drain_overflow adds an operation above the size limit to an empty batch,
+    and refuses it once the batch holds another operation.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(max_batch_size_bytes=500)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+        batcher_config=config,
+    )
+    first_large = _oversized_queued_operation("large_1", config.max_batch_size_bytes)
+    second_large = _oversized_queued_operation("large_2", config.max_batch_size_bytes)
+    state._overflow_queue.put(first_large)
+    state._overflow_queue.put(second_large)
+
+    batch = _BatchAccumulator(config)
+    state._drain_overflow(batch)
+
+    # The first operation is taken despite its size. The second does not fit
+    # beside it and stays queued for the next batch.
+    assert batch.operations == [first_large]
+    assert state._overflow_queue.qsize() == 1
+    assert state._overflow_queue.get_nowait() is second_large
 
 
 def test_collect_checkpoint_batch_handles_empty_checkpoint():

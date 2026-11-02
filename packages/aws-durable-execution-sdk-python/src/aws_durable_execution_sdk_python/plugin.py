@@ -73,14 +73,14 @@ def _extract_result(operation: Operation) -> str | None:
 
 
 def _extract_error(operation: Operation) -> ErrorObject | None:
-    if operation.step_details and operation.step_details.error:
-        return operation.step_details.error
-    if operation.callback_details and operation.callback_details.error:
-        return operation.callback_details.error
-    if operation.chained_invoke_details and operation.chained_invoke_details.error:
-        return operation.chained_invoke_details.error
-    if operation.context_details and operation.context_details.error:
-        return operation.context_details.error
+    for details in (
+        operation.step_details,
+        operation.callback_details,
+        operation.chained_invoke_details,
+        operation.context_details,
+    ):
+        if details and details.error is not None and details.error.to_dict():
+            return details.error
     return None
 
 
@@ -311,13 +311,17 @@ class InvocationStartInfo(InvocationInfo):
         compare=False,
         hash=False,
     )
-    """Operations updated externally while this execution was suspended.
+    """Operations updated since the last successful invocation.
 
-    A wait timer that expired, a callback that was delivered, or a chained
-    invoke that completed between the previous invocation and this one. This is
-    the subset of :attr:`InvocationInfo.operations` named by the durable
-    invocation input's ``UpdatedOperationIds``, so it is empty on the first
-    invocation.
+    This is the subset of :attr:`InvocationInfo.operations` named by the
+    durable invocation input's ``UpdatedOperationIds``. Until an invocation
+    succeeds, the service lists every operation, starting with the EXECUTION
+    operation. After that, it lists the operations that changed after the
+    state the last successful invocation observed: a wait timer that expired,
+    a callback that was delivered, or a chained invoke that completed. A failed
+    invocation does not move that point, so its retry lists again every change
+    since the last successful invocation, including the changes the failed
+    invocation observed or made.
 
     Excluded from ``repr``, ``__eq__`` and ``__hash__`` like
     :attr:`InvocationInfo.operations`.
@@ -1612,7 +1616,8 @@ class PluginExecutor:
             operations_provider: Returns the current checkpointed operation map,
                 converted here into the plugin's ``OperationInfo`` view.
             updated_operation_ids: Operation ids from the invocation input's
-                ``UpdatedOperationIds`` -- those updated while suspended.
+                ``UpdatedOperationIds`` -- those updated since the last
+                successful invocation.
         """
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
         self._operations_provider = (
@@ -1818,8 +1823,9 @@ class PluginExecutor:
     ):
         """Run the end hooks for operation updates here, and queue the change hook.
 
-        Called for an operation that changed while the execution was suspended,
-        by the thread that replays it; the end hook runs on that thread. The
+        Called for an operation that the invocation input lists in
+        ``UpdatedOperationIds``, by the thread that replays it; the end hook
+        runs on that thread. The
         change hook, built only when both operation maps are given, goes to
         the plugin change thread. Checkpoint responses during the invocation
         take the other path: the checkpoint thread records their hooks with

@@ -1,8 +1,12 @@
 """Record serialized errors without reconstructing application exceptions.
 
-Use a plain exception as the event carrier and explicitly supply the original
-checkpointed type, message, and stack trace. Resolving the original class is
-unnecessary and could run application imports or constructors during replay.
+Emit the event directly from the checkpointed fields instead of handing OTel a
+carrier exception. Resolving the original class is unnecessary and could run
+application imports or constructors during replay, and a placeholder carrier is
+worse than none: ``Span.record_exception`` derives ``exception.type``,
+``exception.message``, and ``exception.stacktrace`` from the carrier and only
+then merges the explicit attributes, so a field the checkpoint never stored
+would be reported as an invented value rather than left out.
 """
 
 from __future__ import annotations
@@ -12,23 +16,11 @@ from typing import Any
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
 
-_DEFAULT_MESSAGE = "Unknown error"
-
-
-def exception_from_error_object(error: ErrorObject) -> Exception:
-    """Create a plain event carrier; attributes preserve the original details."""
-    message: str = error.message if error.message is not None else ""
-    if not error.type:
-        message = message or _DEFAULT_MESSAGE
-    return Exception(message)
-
-
 def error_object_exception_attributes(error: ErrorObject) -> dict[str, Any]:
-    """Return explicit event attributes for a checkpointed error.
+    """Return event attributes holding exactly the checkpointed fields.
 
-    OTel derives exception attributes from the supplied exception. The plain
-    carrier has neither the original runtime type nor its traceback, so the
-    checkpointed values are supplied explicitly.
+    An absent field is omitted so consumers can tell missing metadata apart
+    from a supplied empty value.
     """
     attributes: dict[str, Any] = {}
     if error.type is not None:
@@ -40,16 +32,24 @@ def error_object_exception_attributes(error: ErrorObject) -> dict[str, Any]:
     return attributes
 
 
-def record_error_object_exception(span: Any, error: ErrorObject | None) -> None:
-    """Record a span exception that preserves the SDK's original error type.
+def record_error_object_exception(
+    span: Any, error: ErrorObject | None, *, timestamp: int
+) -> None:
+    """Record a span exception event that preserves the checkpointed error.
 
-    ``error`` may be ``None`` for a failed outcome that carried no metadata; a
-    generic exception is recorded in that case.
+    A failed outcome with no error object, or with neither a type nor a message,
+    has no diagnostic event: the OTel exception conventions require whichever of
+    the two the other lacks, so an event carrying neither would be malformed,
+    and inventing one of them is what this module exists to avoid. The span's
+    error status and ``durable.operation.status`` still record the failure.
+
+    Terminal callers supply the normalized span-end timestamp so delayed
+    delivery does not place an event outside the span.
     """
-    if error is None:
-        span.record_exception(Exception(_DEFAULT_MESSAGE))
+    if error is None or (error.type is None and error.message is None):
         return
-    span.record_exception(
-        exception_from_error_object(error),
+    span.add_event(
+        "exception",
         attributes=error_object_exception_attributes(error),
+        timestamp=timestamp,
     )
