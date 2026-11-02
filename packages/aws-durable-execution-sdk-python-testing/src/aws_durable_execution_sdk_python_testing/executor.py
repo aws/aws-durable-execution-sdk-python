@@ -1403,12 +1403,8 @@ class Executor(ExecutionObserver):
         execution_arn: str,
         response: DurableExecutionInvocationOutput,
         execution: Execution,
-        invocation_seq: int | None = None,
     ):
         """Validate response status and save it to the store if fine.
-
-        ``invocation_seq`` is the execution's ``seq_counter`` when the
-        invocation's input was built.
 
         Raises:
             InvalidParameterValueException: If the response status is invalid.
@@ -1474,12 +1470,7 @@ class Executor(ExecutionObserver):
                 if (
                     not execution.has_deferred_invocation
                     and not execution.has_pending_operations(execution)
-                    and not (
-                        invocation_seq is not None
-                        and execution.has_changes_after(
-                            max(invocation_seq, execution.handler_seen_seq)
-                        )
-                    )
+                    and not execution.has_unseen_changes()
                 ):
                     msg_pending_ops: str = (
                         "Cannot return PENDING status with no pending operations."
@@ -1495,18 +1486,17 @@ class Executor(ExecutionObserver):
 
     def _begin_invocation(
         self, execution_arn: str
-    ) -> tuple[Execution, DurableExecutionInvocationInput, int] | None:
+    ) -> tuple[Execution, DurableExecutionInvocationInput] | None:
         """Claim the invocation gate and build the handler input.
 
-        Returns the execution, its invocation input, and the execution's
-        ``seq_counter`` at that moment when this call claims the gate
-        (PRE_INVOKE -> INVOKING); returns None when the execution is
-        already complete, the gate is COMPLETED, or another invocation
-        is in flight (recording a deferred re-invoke).
+        Returns the execution and its invocation input when this call
+        claims the gate (PRE_INVOKE -> INVOKING); returns None when the
+        execution is already complete, the gate is COMPLETED, or another
+        invocation is in flight (recording a deferred re-invoke).
 
-        The counter is captured here, on the execution's serial lane,
-        because a completion queued behind this call mutates the same
-        object before the caller resumes.
+        Building the input records, on the execution's serial lane, the
+        sequence the handler has now observed. A completion queued behind
+        this call is touched after it, so it counts as unseen.
         """
         execution = self._store.load(execution_arn)
 
@@ -1553,7 +1543,7 @@ class Executor(ExecutionObserver):
         invocation_input = self._invoker.create_invocation_input(execution=execution)
         execution.mark_state_delivered()
         self._store.save(execution)
-        return execution, invocation_input, execution.seq_counter
+        return execution, invocation_input
 
     def _finish_invocation(
         self,
@@ -1561,7 +1551,6 @@ class Executor(ExecutionObserver):
         invoke_response: InvokeResponse,
         invocation_start: datetime,
         invocation_end: datetime,
-        invocation_seq: int | None = None,
     ) -> None:
         """Apply a completed handler invocation.
 
@@ -1593,7 +1582,7 @@ class Executor(ExecutionObserver):
         response = invoke_response.invocation_output
         try:
             self._validate_invocation_response_and_store(
-                execution_arn, response, execution, invocation_seq
+                execution_arn, response, execution
             )
         except (InvalidParameterValueException, IllegalStateException) as e:
             logger.warning(
@@ -1615,9 +1604,10 @@ class Executor(ExecutionObserver):
                 self._fail_workflow(execution_arn, error_obj)
             return
 
-        # A clean invocation resets the retry counter.
+        # A clean invocation resets the retry counter and saves the
+        # handler's watermark for the next input's updated operations.
         reset_target = self._store.load(execution_arn)
-        reset_target.consecutive_failed_invocation_attempts = 0
+        reset_target.record_successful_invocation()
         self._store.save(reset_target)
 
         # Release the gate: terminal -> COMPLETED, otherwise PRE_INVOKE
@@ -1725,7 +1715,7 @@ class Executor(ExecutionObserver):
                 )
                 if claim is None:
                     return
-                execution, invocation_input, invocation_seq = claim
+                execution, invocation_input = claim
 
                 invocation_start = self._clock.now()
                 invoke_response = await asyncio.wait_for(
@@ -1757,7 +1747,6 @@ class Executor(ExecutionObserver):
                                 invoke_response,
                                 invocation_start,
                                 invocation_end,
-                                invocation_seq,
                             )
                         ),
                     )

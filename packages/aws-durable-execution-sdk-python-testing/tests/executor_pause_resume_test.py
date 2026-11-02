@@ -360,7 +360,7 @@ def test_paused_pending_is_accepted_only_when_a_token_was_withheld():
 
     with pytest.raises(InvalidParameterValueException) as exc_info:
         executor._validate_invocation_response_and_store(  # noqa: SLF001
-            execution.durable_execution_arn, pending, execution, execution.seq_counter
+            execution.durable_execution_arn, pending, execution
         )
     assert str(exc_info.value) == (
         "Cannot return PENDING status with no pending operations."
@@ -375,14 +375,14 @@ def test_paused_pending_is_accepted_only_when_a_token_was_withheld():
     assert response.checkpoint_token is None
     assert execution.pause_state is PauseState.PAUSED_INVOCATION_DEFERRED
     executor._validate_invocation_response_and_store(  # noqa: SLF001
-        execution.durable_execution_arn, pending, execution, execution.seq_counter
+        execution.durable_execution_arn, pending, execution
     )
 
     executor.resume_execution(execution.durable_execution_arn)
 
     with pytest.raises(InvalidParameterValueException, match="no pending operations"):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
-            execution.durable_execution_arn, pending, execution, execution.seq_counter
+            execution.durable_execution_arn, pending, execution
         )
 
 
