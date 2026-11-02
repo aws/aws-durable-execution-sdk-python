@@ -132,7 +132,6 @@ class Execution:
         self.updates: list[OperationUpdate] = []
         self.update_timestamps: list[datetime] = []
         self.invocation_completions: list[InvocationCompletedDetails] = []
-        self.updated_operation_ids: list[str] = []
         # Two monotonic counters. `token_sequence` is the checkpoint-response
         # version carried on the wire; `seq_counter` is the internal
         # event counter bumped on every state-affecting mutation.
@@ -142,6 +141,12 @@ class Execution:
         # about (via InitialExecutionState or a successful checkpoint
         # response). Filters the "unseen" delta on the next checkpoint.
         self.handler_seen_seq: int = 0
+        # `handler_seen_seq` as it stood when the last successful invocation
+        # ended. The next input lists every operation touched after it. A
+        # failed invocation leaves it unchanged, so the retry lists those
+        # operations again. None means that no invocation has succeeded yet,
+        # so the input lists every operation.
+        self.last_successful_invocation_seq: int | None = None
         # Per-op "last touched at `seq_counter`" bookkeeping. Sparse:
         # ops not in the dict are treated as touch-seq 0.
         self.operation_last_touched_seq: dict[str, int] = {}
@@ -271,10 +276,10 @@ class Execution:
             "InvocationCompletions": [
                 completion.to_json_dict() for completion in self.invocation_completions
             ],
-            "UpdatedOperationIds": self.updated_operation_ids,
             "TokenSequence": self.token_sequence,
             "SeqCounter": self.seq_counter,
             "HandlerSeenSeq": self.handler_seen_seq,
+            "LastSuccessfulInvocationSeq": self.last_successful_invocation_seq,
             "OperationLastTouchedSeq": dict(self.operation_last_touched_seq),
             "OperationSizeBytes": dict(self.operation_size_bytes),
             "ChainedInvokeChildren": dict(self.chained_invoke_children),
@@ -321,7 +326,6 @@ class Execution:
             InvocationCompletedDetails.from_json_dict(item)
             for item in data.get("InvocationCompletions", [])
         ]
-        execution.updated_operation_ids = list(data.get("UpdatedOperationIds", []))
         # NOTE: prior format included a "UsedTokens" set. Current
         # removed it (the Executor no longer consults it — token
         # validity is via _is_current_token against token_sequence).
@@ -330,6 +334,11 @@ class Execution:
         # Safe defaults for fields added after the original schema.
         execution.seq_counter = data.get("SeqCounter", 0)
         execution.handler_seen_seq = data.get("HandlerSeenSeq", 0)
+        # A file from an older runner has no saved watermark. Its next input
+        # then lists every operation once, as after a failed first invocation.
+        execution.last_successful_invocation_seq = data.get(
+            "LastSuccessfulInvocationSeq"
+        )
         execution.operation_last_touched_seq = dict(
             data.get("OperationLastTouchedSeq", {})
         )
@@ -458,12 +467,9 @@ class Execution:
     def has_unseen_changes(self) -> bool:
         """True if any operation changed after the handler's last
         observed sequence watermark."""
-        return self.has_changes_after(self.handler_seen_seq)
-
-    def has_changes_after(self, seq: int) -> bool:
-        """True if any operation changed after ``seq_counter`` was ``seq``."""
         return any(
-            touched > seq for touched in self.operation_last_touched_seq.values()
+            touched > self.handler_seen_seq
+            for touched in self.operation_last_touched_seq.values()
         )
 
     def record_invocation_completion(
@@ -479,23 +485,46 @@ class Execution:
         )
 
     def mark_state_delivered(self) -> None:
-        """Reset the list of changed operations once an invocation's input
-        carries them.
+        """Record that the handler has observed the state up to ``seq_counter``.
 
-        The service reports, on each invocation, the operations that
-        changed after the last state the handler observed. The runner
-        delivers state in the invocation input. So the list is reset when
-        that input is built, not when the invocation completes: an
-        operation that completes while the handler is still running is
-        reported on the next invocation.
+        The runner calls this when it builds an invocation input. The input
+        carries the state as of ``seq_counter``. So the next checkpoint
+        response returns only the operations touched after it.
         """
-        self.updated_operation_ids = []
+        self.handler_seen_seq = self.seq_counter
 
-    def _record_updated_operation(self, operation_id: str) -> None:
-        """Remember an operation that changed since the handler last saw
-        the state."""
-        if operation_id not in self.updated_operation_ids:
-            self.updated_operation_ids.append(operation_id)
+    def record_successful_invocation(self) -> None:
+        """Record that an invocation returned a valid response.
+
+        A valid response is a valid ``PENDING``, ``SUCCEEDED`` or ``FAILED``
+        output. It resets the failed-attempt count and saves the handler's
+        watermark. An invocation that raised, timed out or returned an invalid
+        output leaves the watermark unchanged. So the next input lists again
+        every change since the last successful invocation, including the
+        changes the failed invocation observed or made.
+        """
+        self.consecutive_failed_invocation_attempts = 0
+        self.last_successful_invocation_seq = self.handler_seen_seq
+
+    @property
+    def updated_operation_ids(self) -> list[str]:
+        """The ``UpdatedOperationIds`` of the next invocation input.
+
+        Until an invocation succeeds, every operation, the EXECUTION operation
+        first. After that, every operation touched after the watermark the
+        last successful invocation saved. A change the handler observed in a
+        successful invocation, in its input or in a checkpoint response, is
+        not listed again. The list is derived from the touch sequences, so
+        every state change is covered once it is touched.
+        """
+        watermark = self.last_successful_invocation_seq
+        return [
+            operation.operation_id
+            for operation in self.operations
+            if watermark is None
+            or self.operation_last_touched_seq.get(operation.operation_id, 0)
+            > watermark
+        ]
 
     def complete_success(self, result: str | None, now: datetime | None = None) -> None:
         """Complete execution successfully (DecisionType.COMPLETE_WORKFLOW_EXECUTION)."""
@@ -580,7 +609,6 @@ class Execution:
                 status=OperationStatus.SUCCEEDED,
                 end_timestamp=now if now is not None else real_now(),
             )
-            self._record_updated_operation(operation_id)
             return self.operations[index]
 
     def complete_retry(self, operation_id: str) -> Operation:
@@ -614,7 +642,6 @@ class Execution:
 
             # Assign
             self.operations[index] = updated_operation
-            self._record_updated_operation(operation_id)
             return updated_operation
 
     def complete_due_operations(self, now: datetime) -> bool:
@@ -678,13 +705,16 @@ class Execution:
             raise IllegalStateException(msg)
 
         with self._state_lock:
-            self.touch_operation(operation.operation_id)
+            # Decode first: a result that fails to decode must leave no
+            # touch behind, or the next input would list a change that
+            # never happened.
             updated_callback_details = None
             if operation.callback_details:
                 updated_callback_details = replace(
                     operation.callback_details,
                     result=result.decode() if result else None,
                 )
+            self.touch_operation(operation.operation_id)
 
             self.operations[index] = replace(
                 operation,
@@ -792,7 +822,6 @@ class Execution:
             self.operation_size_bytes[operation_id] = len(
                 (result if result is not None else "").encode()
             ) + (len(json.dumps(error.to_dict())) if error is not None else 0)
-            self._record_updated_operation(operation_id)
             return self.operations[index]
 
     def executed_version(self) -> str:

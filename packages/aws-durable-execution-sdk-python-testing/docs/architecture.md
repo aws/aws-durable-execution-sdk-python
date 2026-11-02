@@ -163,13 +163,13 @@ the handler would wait on a lane it needs in order to make progress.
 `_invoke_handler` splits the invocation into three steps.
 
 1. Begin. A task on the lane claims the gate from `PRE_INVOKE` to
-   `INVOKING` and builds the invocation input.
+   `INVOKING`, builds the invocation input, and sets `handler_seen_seq`.
 2. Invoke. The blocking call to the function runs off the lane, bounded
    by the invocation timeout. While it blocks, the handler's checkpoint
    and get state tasks run on the now free lane.
 3. Finish. A task on the lane records the response and releases the
    gate. It moves `PENDING` to `PRE_INVOKE`, or a terminal result to
-   `COMPLETED`.
+   `COMPLETED`. A valid response saves `last_successful_invocation_seq`.
 
 ```mermaid
 sequenceDiagram
@@ -225,19 +225,27 @@ the checkpoint write transaction.
 - Idempotent replays advance neither.
 - Pure reads advance neither.
 
-## The watermark and delta
+## The watermarks and the delta
 
-`Execution.handler_seen_seq` records the highest `seq_counter` the
-handler has been told about. The handler learns of operations through
-`InitialExecutionState` on an invocation, or through the `operations`
-list in a checkpoint response. The delta for the next response is the
-operations whose `operation_last_touched_seq` is greater than
-`handler_seen_seq`.
+The runner keeps two watermarks over `seq_counter`.
 
-The watermark advances only when a checkpoint response is built. It never
-advances when invocation input is built. That is what makes retries
-correct. A failed invocation never moves the watermark. So the retry
-delivers the same state again.
+1. `Execution.handler_seen_seq` is the highest sequence the handler has
+   observed. Building the invocation input sets it to `seq_counter`,
+   because the input carries the state as of that point. Each checkpoint
+   response raises it to the highest touch it returns. A paused checkpoint
+   returns no operations and leaves it. The delta for the next checkpoint
+   response is the operations whose `operation_last_touched_seq` is
+   greater than `handler_seen_seq`.
+2. `Execution.last_successful_invocation_seq` is `handler_seen_seq` as it
+   stood when the last successful invocation ended. A successful
+   invocation returned a valid `PENDING`, `SUCCEEDED` or `FAILED` output.
+   A failed invocation leaves the value unchanged.
+
+The next input's `UpdatedOperationIds` lists every operation touched after
+`last_successful_invocation_seq`, or every operation while it is `None`.
+The list is derived from these values and is not stored. So every change
+that touches an operation is listed, and a retry lists again every change
+since the last successful invocation, as the service does.
 
 ```
       seq_counter    handler_seen_seq    delta next checkpoint
