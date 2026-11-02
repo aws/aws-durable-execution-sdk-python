@@ -1,0 +1,1 @@
+{"finding_digest":"389e603564b5ddecefb35fc0b1ddfe72140a2fb0cce32158ca0164f475d5a30a","finding_id":"arf_v1_hcpganlewxo6z35tl7aldxp6oi","identity_key":"otel/exception_events.py::record_error_object_exception::decision-mismatch","pull_request_number":901,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
