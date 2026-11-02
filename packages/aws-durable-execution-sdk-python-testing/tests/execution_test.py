@@ -3,6 +3,8 @@
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal
 from unittest.mock import patch, Mock
 
 import pytest
@@ -28,6 +30,17 @@ from aws_durable_execution_sdk_python_testing.execution import (
     OperationPaginatorState,
 )
 from aws_durable_execution_sdk_python_testing.model import StartDurableExecutionInput
+from aws_durable_execution_sdk_python_testing.invoker import (
+    InProcessInvoker,
+    LambdaInvoker,
+)
+from aws_durable_execution_sdk_python_testing.stores.base import ExecutionStore
+from aws_durable_execution_sdk_python_testing.stores.filesystem import (
+    FileSystemExecutionStore,
+)
+from aws_durable_execution_sdk_python_testing.stores.memory import (
+    InMemoryExecutionStore,
+)
 
 
 def test_execution_init():
@@ -1638,38 +1651,7 @@ def test_start_without_invocation_id_raises():
         execution.start()
 
 
-def test_complete_wait_records_updated_operation_id():
-    """Wait completion happens outside the invocation and is reported on the next input."""
-    start_input = StartDurableExecutionInput(
-        account_id="123456789012",
-        function_name="test-function",
-        function_qualifier="$LATEST",
-        execution_name="test-execution",
-        execution_timeout_seconds=300,
-        execution_retention_period_days=7,
-        invocation_id="invocation-id",
-    )
-    execution = Execution(
-        "test-arn",
-        start_input,
-        [
-            Operation(
-                operation_id="wait-1",
-                operation_type=OperationType.WAIT,
-                status=OperationStatus.STARTED,
-            )
-        ],
-    )
-
-    execution.complete_wait("wait-1")
-
-    assert execution.updated_operation_ids == ["wait-1"]
-
-
-def test_record_invocation_completion_keeps_updated_operation_ids():
-    """An operation that changes while the handler runs is reported on the
-    next invocation. So completing the invocation keeps the list; only
-    delivering the state in an input resets it."""
+def _updated_ids_execution() -> Execution:
     start_input = StartDurableExecutionInput(
         account_id="123456789012",
         function_name="test-function",
@@ -1680,14 +1662,256 @@ def test_record_invocation_completion_keeps_updated_operation_ids():
         invocation_id="invocation-id",
     )
     execution = Execution("test-arn", start_input, [])
-    execution.updated_operation_ids = ["wait-1"]
+    execution.start()
+    for operation_id in ("step-1", "wait-1"):
+        execution.operations.append(
+            Operation(
+                operation_id=operation_id,
+                operation_type=OperationType.WAIT,
+                status=OperationStatus.STARTED,
+            )
+        )
+    return execution
 
-    now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    execution.record_invocation_completion(now, now, "request-1")
-    assert execution.updated_operation_ids == ["wait-1"]
+
+def test_updated_operation_ids_list_every_operation_before_any_success():
+    """Before any invocation succeeds, the service lists the invocation id
+    and every operation. A failed first invocation keeps that rule."""
+    execution = _updated_ids_execution()
+    execution.touch_operation("step-1")
 
     execution.mark_state_delivered()
+
+    assert execution.updated_operation_ids == [
+        "invocation-id",
+        "step-1",
+        "wait-1",
+    ]
+
+
+def test_updated_operation_ids_list_changes_after_the_last_success():
+    """After a successful invocation, the list holds the operations touched
+    after the watermark it saved: a wait that completes later is listed, an
+    operation the handler already observed is not."""
+    execution = _updated_ids_execution()
+    execution.touch_operation("step-1")
+    execution.mark_state_delivered()
+    execution.record_successful_invocation()
+
+    execution.complete_wait("wait-1")
+
+    assert execution.updated_operation_ids == ["wait-1"]
+
+
+def test_a_failed_invocation_keeps_the_watermark():
+    """A failed invocation does not save its watermark. So the retry lists
+    again what the failed invocation observed, as the service does."""
+    execution = _updated_ids_execution()
+    execution.mark_state_delivered()
+    execution.record_successful_invocation()
+    execution.complete_wait("wait-1")
+
+    # The next invocation observes the wait and checkpoints step-1, then fails.
+    execution.mark_state_delivered()
+    execution.touch_operation("step-1")
+    execution.handler_seen_seq = execution.seq_counter
+
+    assert execution.updated_operation_ids == [
+        "step-1",
+        "wait-1",
+    ]
+
+
+def test_mark_state_delivered_records_the_handler_watermark():
+    """Building the input records that the handler observed the state up to
+    the current sequence."""
+    execution = _updated_ids_execution()
+    execution.touch_operation("step-1")
+    execution.touch_operation("wait-1")
+
+    execution.mark_state_delivered()
+
+    assert execution.handler_seen_seq == execution.seq_counter == 2
+    assert not execution.has_unseen_changes()
+
+
+def test_record_successful_invocation_saves_the_watermark_and_resets_attempts():
+    execution = _updated_ids_execution()
+    execution.consecutive_failed_invocation_attempts = 2
+    execution.touch_operation("step-1")
+    execution.handler_seen_seq = execution.seq_counter
+
+    execution.record_successful_invocation()
+
+    assert execution.last_successful_invocation_seq == 1
+    assert execution.consecutive_failed_invocation_attempts == 0
+
+
+@pytest.mark.parametrize("watermark", [None, 0, 3])
+def test_last_successful_invocation_seq_survives_json_round_trip(watermark):
+    execution = _updated_ids_execution()
+    execution.last_successful_invocation_seq = watermark
+
+    restored = Execution.from_json_dict(execution.to_json_dict())
+
+    assert restored.last_successful_invocation_seq == watermark
+
+
+def test_legacy_json_without_watermark_lists_every_operation_once():
+    """A file from an older runner has no saved watermark. Its next input
+    lists every operation once, as after a failed first invocation."""
+    data = _updated_ids_execution().to_json_dict()
+    data["HandlerSeenSeq"] = 5
+    data["UpdatedOperationIds"] = ["wait-1"]
+    del data["LastSuccessfulInvocationSeq"]
+
+    restored = Execution.from_json_dict(data)
+
+    assert restored.last_successful_invocation_seq is None
+    assert restored.updated_operation_ids == [
+        "invocation-id",
+        "step-1",
+        "wait-1",
+    ]
+
+
+def test_paused_first_invocation_lists_its_checkpoint_on_resume():
+    """A first invocation that a pause interrupts succeeds without seeing its
+    last checkpoint, because a paused checkpoint returns no operations. So the
+    resume lists that checkpoint's operation and not the EXECUTION operation,
+    as the service does."""
+    execution = _updated_ids_execution()
+    execution.mark_state_delivered()
+    execution.touch_operation("step-1")  # the paused checkpoint delivers nothing
+    execution.record_successful_invocation()
+
+    assert execution.last_successful_invocation_seq == 0
+    assert execution.updated_operation_ids == ["step-1"]
+
+
+def test_undecodable_callback_result_leaves_no_change():
+    execution = _updated_ids_execution()
+    execution.operations.append(
+        Operation(
+            operation_id="callback-1",
+            operation_type=OperationType.CALLBACK,
+            status=OperationStatus.STARTED,
+            callback_details=CallbackDetails(callback_id="cb-1"),
+        )
+    )
+    execution.mark_state_delivered()
+    execution.record_successful_invocation()
+    before = execution.to_json_dict()
+
+    with pytest.raises(UnicodeDecodeError):
+        execution.complete_callback_success("cb-1", b"\xff")
+
+    assert execution.to_json_dict() == before
     assert execution.updated_operation_ids == []
+
+
+CallbackOutcome = Literal["success", "failure", "timeout"]
+CALLBACK_NOW = datetime(2026, 10, 27, tzinfo=timezone.utc)
+CALLBACK_ERROR = ErrorObject(
+    "callback failure", "CallbackRejected", "details", ["original frame"]
+)
+
+
+def _complete_callback(
+    execution: Execution, outcome: CallbackOutcome, callback_id: str
+) -> Operation:
+    if outcome == "success":
+        return execution.complete_callback_success(
+            callback_id, b'"result"', now=CALLBACK_NOW
+        )
+    if outcome == "failure":
+        return execution.complete_callback_failure(
+            callback_id, CALLBACK_ERROR, now=CALLBACK_NOW
+        )
+    return execution.complete_callback_timeout(
+        callback_id, CALLBACK_ERROR, now=CALLBACK_NOW
+    )
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "timeout"])
+@pytest.mark.parametrize("filesystem", [False, True])
+@pytest.mark.parametrize("other_changed", [False, True])
+def test_callback_completion_is_listed_after_the_last_success(
+    outcome: CallbackOutcome, filesystem: bool, other_changed: bool, tmp_path: Path
+) -> None:
+    """Each callback outcome touches the callback, so the next input lists it
+    once. A rejected completion changes nothing."""
+    target = Operation(
+        operation_id="callback",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.STARTED,
+        callback_details=CallbackDetails(callback_id="callback-id"),
+    )
+    other = Operation(
+        operation_id="other",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.SUCCEEDED,
+        callback_details=CallbackDetails(callback_id="other-id", result='"other"'),
+    )
+    execution = Execution("test-arn", _make_start_input(), [target, other])
+    # The previous invocation succeeded after observing the state so far.
+    execution.mark_state_delivered()
+    execution.record_successful_invocation()
+    if other_changed:
+        execution.touch_operation("other")
+    expected = ["callback", "other"] if other_changed else ["callback"]
+    touched = 2 if other_changed else 1
+
+    before = execution.to_json_dict()
+    with pytest.raises(IllegalStateException):
+        _complete_callback(execution, outcome, "missing")
+    assert execution.to_json_dict() == before
+
+    completed = _complete_callback(execution, outcome, "callback-id")
+    assert execution.updated_operation_ids == expected
+    assert execution.operation_last_touched_seq["callback"] == touched
+    assert execution.token_sequence == 0
+    assert (
+        completed.status
+        is {
+            "success": OperationStatus.SUCCEEDED,
+            "failure": OperationStatus.FAILED,
+            "timeout": OperationStatus.TIMED_OUT,
+        }[outcome]
+    )
+    assert completed.end_timestamp == CALLBACK_NOW
+    assert completed.callback_details is not None
+    assert completed.callback_details.result == (
+        '"result"' if outcome == "success" else None
+    )
+    assert completed.callback_details.error == (
+        None if outcome == "success" else CALLBACK_ERROR
+    )
+    assert execution.operations[1] == other
+
+    store: ExecutionStore = (
+        FileSystemExecutionStore.create(tmp_path)
+        if filesystem
+        else InMemoryExecutionStore()
+    )
+    store.save(execution)
+    restored = store.load(execution.durable_execution_arn)
+    assert restored.updated_operation_ids == expected
+    assert restored.operations == execution.operations
+    for invoker in [InProcessInvoker(Mock(), Mock()), LambdaInvoker(Mock())]:
+        invocation_input = invoker.create_invocation_input(restored)
+        assert invocation_input.updated_operation_ids == expected
+        assert invocation_input.initial_execution_state.operations == [completed, other]
+
+    # After the next successful invocation, a rejected second completion
+    # lists nothing.
+    restored.mark_state_delivered()
+    restored.record_successful_invocation()
+    before = restored.to_json_dict()
+    with pytest.raises(IllegalStateException, match="not in STARTED state"):
+        _complete_callback(restored, outcome, "callback-id")
+    assert restored.to_json_dict() == before
+    assert restored.updated_operation_ids == []
 
 
 def test_function_arn_is_qualified_with_the_executed_version():

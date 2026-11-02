@@ -686,7 +686,7 @@ def test_should_retry_when_pending_response_has_no_operations(
     mock_execution.seq_counter = 0
     mock_execution.has_pending_operations.return_value = False  # No pending operations
     mock_execution.handler_seen_seq = 0
-    mock_execution.has_changes_after.return_value = False
+    mock_execution.has_unseen_changes.return_value = False
 
     # Mock invoker to return pending response
     mock_invocation_input = Mock()
@@ -734,10 +734,7 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
     mock_execution.consecutive_failed_invocation_attempts = 0
-    mock_execution.seq_counter = 4
-    mock_execution.handler_seen_seq = 2
     mock_execution.has_pending_operations.return_value = False
-    mock_execution.has_changes_after.side_effect = lambda seq: seq == 4
     mock_execution.has_unseen_changes.return_value = True
     mock_execution.needs_reinvoke = True
 
@@ -759,18 +756,18 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
         asyncio.run(handler())
 
-        mock_execution.has_changes_after.assert_called_once_with(4)
+        mock_execution.record_successful_invocation.assert_called_once_with()
         assert mock_execution.consecutive_failed_invocation_attempts == 0
         # timeout + initial invocation + the re-invoke, with no retry delay
         assert mock_scheduler.call_later.call_count == 3
         assert mock_scheduler.call_later.call_args_list[-1].kwargs["delay"] == 0
 
 
-def test_begin_invocation_baseline_predates_a_completion_queued_behind_it(
+def test_begin_invocation_watermark_predates_a_completion_queued_behind_it(
     executor, mock_store, mock_invoker, start_input
 ):
-    """The baseline is the counter when the input was built. A completion
-    applied to the same object afterward lies past it."""
+    """Building the input sets the handler's watermark to the counter. A
+    completion applied to the same object afterward lies past it."""
     execution = Execution.new(start_input)
     execution.operations.append(
         Operation(
@@ -784,20 +781,21 @@ def test_begin_invocation_baseline_predates_a_completion_queued_behind_it(
 
     claim = executor._begin_invocation(execution.durable_execution_arn)  # noqa: SLF001
     assert claim is not None
-    _, _, baseline = claim
-    assert baseline == execution.seq_counter
+    watermark = execution.handler_seen_seq
+    assert watermark == execution.seq_counter
+    assert not execution.has_unseen_changes()
 
     execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
-    assert execution.seq_counter > baseline
-    assert execution.has_changes_after(baseline)
+    assert execution.handler_seen_seq == watermark
+    assert execution.has_unseen_changes()
 
 
 def test_pending_response_with_only_input_time_state_is_still_an_error(
     executor, mock_store, start_input
 ):
-    """Operations the invocation input already delivered lie past the
-    handler's watermark but not past the invocation's baseline, so a
-    no-pending PENDING is rejected rather than accepted without a re-invoke."""
+    """Operations the invocation input already delivered are covered by the
+    watermark the input set, so a no-pending PENDING is rejected rather than
+    accepted without a re-invoke."""
     execution = Execution.new(start_input)
     execution.operations.append(
         Operation(
@@ -808,7 +806,7 @@ def test_pending_response_with_only_input_time_state_is_still_an_error(
     )
     execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
     assert execution.has_unseen_changes()
-    baseline = execution.seq_counter
+    execution.mark_state_delivered()
 
     with pytest.raises(
         InvalidParameterValueException,
@@ -818,14 +816,13 @@ def test_pending_response_with_only_input_time_state_is_still_an_error(
             execution.durable_execution_arn,
             DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),
             execution,
-            baseline,
         )
 
 
 def test_pending_response_is_an_error_when_the_handler_saw_the_completion(
     executor, mock_store, start_input
 ):
-    """A completion after the baseline that a checkpoint response already
+    """A completion after the input that a checkpoint response already
     delivered leaves nothing to re-invoke for, so PENDING is rejected."""
     execution = Execution.new(start_input)
     execution.operations.append(
@@ -835,7 +832,7 @@ def test_pending_response_is_an_error_when_the_handler_saw_the_completion(
             status=OperationStatus.STARTED,
         )
     )
-    baseline = execution.seq_counter
+    execution.mark_state_delivered()
     execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
     execution.handler_seen_seq = execution.seq_counter
 
@@ -847,7 +844,6 @@ def test_pending_response_is_an_error_when_the_handler_saw_the_completion(
             execution.durable_execution_arn,
             DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),
             execution,
-            baseline,
         )
 
 
@@ -3680,10 +3676,9 @@ def test_a_completion_during_the_invocation_reaches_the_next_input(
     mock_scheduler, mock_invoker, mock_checkpoint_processor
 ):
     """A chained target completes while the parent handler is still
-    running. The service reports it in the next invocation's
-    UpdatedOperationIds, because the handler never observed it. So must
-    the runner: completing the current invocation keeps the id, and the
-    next input carries it."""
+    running, and no checkpoint response delivers it. The service lists it
+    in the next invocation's UpdatedOperationIds, because the handler never
+    observed it. So must the runner."""
     store = InMemoryExecutionStore()
     parent, _child = _linked_parent_and_child(store)
     real_executor = Executor(
@@ -3692,25 +3687,22 @@ def test_a_completion_during_the_invocation_reaches_the_next_input(
     arn = parent.durable_execution_arn
     now = datetime.now(UTC)
 
-    # The parent handler is running: the child's completion lands first.
+    # The parent's input is built, then the child's completion lands.
+    running = store.load(arn)
+    running.mark_state_delivered()
+    store.save(running)
     real_executor._apply_chained_invoke_completion(  # noqa: SLF001
         arn, "invoke-1", OperationStatus.SUCCEEDED, '{"squared": 16}', None
     )
-    assert store.load(arn).updated_operation_ids == ["invoke-1"]
 
-    # Then the current invocation returns.
-    store.load(arn).record_invocation_completion(now, now, "request-1")
-    store.save(store.load(arn))
-    assert store.load(arn).updated_operation_ids == ["invoke-1"]
+    # Then the current invocation returns successfully.
+    finished = store.load(arn)
+    finished.record_invocation_completion(now, now, "request-1")
+    finished.record_successful_invocation()
+    store.save(finished)
 
-    # The next input carries the id, and delivering it resets the list.
-    execution = store.load(arn)
-    execution.begin_new_invocation()
-    invocation_input = mock_invoker.create_invocation_input(execution=execution)
-    mock_invoker.create_invocation_input.assert_called_once()
-    assert invocation_input is mock_invoker.create_invocation_input.return_value
-    execution.mark_state_delivered()
-    assert execution.updated_operation_ids == []
+    # The next input lists the completion.
+    assert store.load(arn).updated_operation_ids == ["invoke-1"]
 
 
 def test_a_target_exception_that_lands_after_shutdown_is_dropped(executor):

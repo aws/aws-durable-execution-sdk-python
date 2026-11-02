@@ -1,7 +1,10 @@
+import re
 from pathlib import Path
 
 import yaml
 
+
+CONFORMANCE_TEST_REF = "main"
 
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
@@ -18,7 +21,10 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "uses: aws/aws-durable-execution-conformance-tests/.github/workflows/"
         "opentelemetry-orchestrator.yml@"
     )
-    assert orchestrator in workflow
+    shared_ref = re.search(re.escape(orchestrator) + r"(\S+)", workflow)
+    assert shared_ref is not None
+    assert re.fullmatch(r"[0-9a-f]{40}", shared_ref.group(1))
+    assert f"default: {CONFORMANCE_TEST_REF}" in workflow
     assert "python-opentelemetry.yml@" not in workflow
     assert "\n      otlp_endpoint:" not in workflow
 
@@ -28,7 +34,7 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "resource_prefix: p",
         "sdk_repository: aws/aws-durable-execution-sdk-python",
         "sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}",
-        "conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}",
+        f"conformance_test_ref: ${{{{ inputs.conformance_test_ref || '{CONFORMANCE_TEST_REF}' }}}}",
         "checkout_sdk: true",
         f"examples_dir: {EXAMPLES_DIR}",
         "adot_release_repository: aws-observability/aws-otel-python-instrumentation",
@@ -52,6 +58,18 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "DATADOG_OTLP_HEADERS",
     ):
         assert f"{obsolete_secret_name}:" not in workflow
+
+
+def test_opentelemetry_conformance_manual_runs_keep_only_active_inputs() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text())
+
+    assert set(workflow[True]["workflow_dispatch"]["inputs"]) == {
+        "aws_region",
+        "conformance_test_ref",
+    }
+    assert not {"phase", "delay_seconds"} & set(
+        workflow["jobs"]["opentelemetry"]["with"]
+    )
 
 
 def test_opentelemetry_conformance_handlers_come_from_this_repository() -> None:
