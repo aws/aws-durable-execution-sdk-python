@@ -33,9 +33,6 @@ from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
     OtelPluginConfig,
 )
-from aws_durable_execution_sdk_python_otel.exception_events import (
-    exception_from_error_object,
-)
 
 
 START = datetime(2026, 10, 1, tzinfo=UTC)
@@ -459,45 +456,58 @@ def test_replay_attempt_event_uses_stored_error_metadata(
     assert attributes["exception.stacktrace"] == "\n".join(stack_trace)
 
 
-def test_failed_operation_without_type_falls_back(
+PARTIAL_CASES = [
+    # (message, type, expected attributes)
+    ("no type here", None, {"exception.message": "no type here"}),
+    (None, "ValueError", {"exception.type": "ValueError"}),
+    (None, None, {}),
+    # An explicitly supplied empty string is data, not absence.
+    ("", None, {"exception.message": ""}),
+    (None, "", {"exception.type": ""}),
+    ("", "", {"exception.message": "", "exception.type": ""}),
+]
+
+
+@pytest.mark.parametrize(("message", "error_type", "expected"), PARTIAL_CASES)
+def test_failed_operation_omits_absent_error_fields(
     instrumented_view: InstrumentedView,
+    message: str | None,
+    error_type: str | None,
+    expected: dict[str, str],
 ) -> None:
-    """Without type metadata the event still carries the original message."""
+    """A field the checkpoint never stored must not be invented."""
     plugin, exporter = instrumented_view
     _start_invocation(plugin)
     plugin.on_operation_end(
-        _operation_end_info(ErrorObject("no type here", None, None, None))
+        _operation_end_info(ErrorObject(message, error_type, None, None))
     )
     _end_invocation(plugin)
     span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
-    attributes = _exception_attributes(span)
-    assert attributes["exception.message"] == "no type here"
-    assert attributes["exception.type"] == "Exception"
+    assert dict(_exception_attributes(span)) == expected
 
 
-@pytest.mark.parametrize("error_type", [None, ""])
-@pytest.mark.parametrize("message", [None, ""])
-def test_exception_from_error_object_uses_fallback_message(
-    error_type: str | None,
-    message: str | None,
-) -> None:
-    """A missing or empty type with an empty message uses the default."""
-    error = ErrorObject(message, error_type, None, None)
-    assert str(exception_from_error_object(error)) == "Unknown error"
-
-
-def test_failed_operation_without_type_or_message_uses_fallback(
+@pytest.mark.parametrize("is_replayed", [False, True])
+@pytest.mark.parametrize(("message", "error_type", "expected"), PARTIAL_CASES)
+def test_failed_attempt_omits_absent_error_fields(
     instrumented_view: InstrumentedView,
+    message: str | None,
+    error_type: str | None,
+    expected: dict[str, str],
+    is_replayed: bool,
 ) -> None:
-    """Without type or message metadata the event uses the default message."""
+    """The failed-attempt recorder shares the operation recorder's fidelity."""
     plugin, exporter = instrumented_view
     _start_invocation(plugin)
-    plugin.on_operation_end(_operation_end_info(ErrorObject(None, None, None, None)))
+    _run_failed_step_attempt(
+        plugin,
+        ErrorObject(message, error_type, None, None),
+        is_replayed=is_replayed,
+    )
     _end_invocation(plugin)
-    span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
-    attributes = _exception_attributes(span)
-    assert attributes["exception.message"] == "Unknown error"
-    assert attributes["exception.type"] == "Exception"
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name == "step-1 attempt 1"
+    )
+    assert dict(_exception_attributes(span)) == expected
 
 
 class ConstructorSideEffectError(Exception):
