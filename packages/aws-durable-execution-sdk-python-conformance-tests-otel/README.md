@@ -129,11 +129,12 @@ without skips or expected-failure markers.
 - Case 25's terminal-status and empty-error fixes are in `main` through
   [#865](https://github.com/aws/aws-durable-execution-sdk-python/pull/865) and
   [#870](https://github.com/aws/aws-durable-execution-sdk-python/pull/870).
-- Case 26's local test still requires callback completions to populate updated
-  operations ([#860](https://github.com/aws/aws-durable-execution-sdk-python/issues/860),
-  implemented in [#868](https://github.com/aws/aws-durable-execution-sdk-python/pull/868)).
-  The combined tests pass with that fix, without #867 or #869. Keep #868 as a
-  prerequisite to merging this coverage.
+- Case 26's callback completion fix is in `main` through
+  [#898](https://github.com/aws/aws-durable-execution-sdk-python/pull/898), which
+  derives updated operations from their touch sequences and fixes
+  [#860](https://github.com/aws/aws-durable-execution-sdk-python/issues/860).
+  [#868](https://github.com/aws/aws-durable-execution-sdk-python/pull/868) is
+  superseded and is no longer a merge prerequisite.
 
 The [case 25 cloud run](https://github.com/aws/aws-durable-execution-sdk-python/actions/runs/40769339007)
 saved `Error: {Payload: {}, Truncated: false}` on the errorless `CallbackFailed`
@@ -281,7 +282,8 @@ the commit under test. The shared workflow is pinned to a reviewed commit,
 with Dependabot maintaining the pin. The test catalog defaults to `main`;
 manual runs can override it with the `conformance_test_ref` input. Pull requests
 and manual runs execute the invocation and execution suites, with only case 21
-reported as `NOT_IMPLEMENTED`. Case 26 remains enabled while #868 is pending.
+reported as `NOT_IMPLEMENTED`. Case 26 uses the callback completion fix merged
+in #898.
 The orchestrator no longer runs the legacy long-running suite or provides
 launch/check modes; its templates and local contract tests remain in this
 package.
