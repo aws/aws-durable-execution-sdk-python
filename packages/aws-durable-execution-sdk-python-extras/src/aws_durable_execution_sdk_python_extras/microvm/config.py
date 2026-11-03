@@ -382,7 +382,9 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
        checkpoint limit makes the child context run again on replay, and
        each run suspends again.
     4. A retry after the Lambda invocation fails can send the suspend again.
-       Suspending a suspended MicroVM succeeds.
+       The invocation can also end while the call runs, when other
+       operations wait. The call is then sent again. Suspending a suspended
+       MicroVM succeeds.
     5. The function's execution role needs ``lambda:SuspendMicrovm`` on the
        MicroVM image.
     6. Adding or removing ``suspend_after`` changes what the session does on
@@ -390,7 +392,8 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
 
     A failed ``SuspendMicrovm`` call logs a warning and does not fail the
     job. The MicroVM then keeps running until the next job or the end of
-    the session.
+    the session. The call ends at the invocation reserve, like the other
+    calls of the session, and that counts as a failed call.
 
     Set it on the job before a long wait, such as a durable wait or a
     callback. Do not set it on back-to-back jobs or on the last job of the

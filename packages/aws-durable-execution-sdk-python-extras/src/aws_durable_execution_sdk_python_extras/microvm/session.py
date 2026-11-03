@@ -218,11 +218,14 @@ class MicrovmSession:
         self._scope = scope
         self._launched = launched
         self._resume_before_delivery = resume_before_delivery
-        # Set by the first suspend_after job of this handle. Later jobs then
-        # check the state before delivery. The flag lives in memory only. A
-        # replay of a completed job, map item, or child context does not run
-        # its invoke() again, so it does not set the flag. The check after a
-        # sign of a suspended MicroVM covers that case.
+        # Set when a suspend_after job of this handle has returned or raised.
+        # Later jobs then check the state before delivery. The job itself
+        # does not, because its suspend has not run when it delivers. A
+        # replay of a completed job calls invoke() again, so it sets the flag
+        # too. The flag lives in memory only. A replay of a completed map
+        # item, parallel branch, or child context does not run its invoke()
+        # again, so it does not set the flag. The check after a sign of a
+        # suspended MicroVM covers that case.
         self._may_be_suspended = False
 
     @property
@@ -319,12 +322,6 @@ class MicrovmSession:
         suspend_after = _validate_suspend_after(name, options.suspend_after)
         _validate_input(name, job_input)
         launched = self._launched
-        if suspend_after:
-            # The flag is set before the child context. A replay of a
-            # completed job returns its result without running the child
-            # context's function. So the flag is set on every replay of this
-            # call too.
-            self._may_be_suspended = True
 
         def run(job_context: DurableContext) -> Any:
             callback = create_job_callback(
@@ -359,9 +356,19 @@ class MicrovmSession:
             return result
 
         try:
-            return context.run_in_child_context(run, name=name)
-        except ChildContextError as error:
-            raise MicrovmError.from_child_context_error(name, error) from error
+            result = context.run_in_child_context(run, name=name)
+        except Exception as error:
+            # SuspendExecution is a BaseException, so a wait for the job
+            # does not set the flag. Only a failed job sets it: any other
+            # error ends the invocation, and the flag lives in memory only.
+            if isinstance(error, ChildContextError):
+                if suspend_after:
+                    self._may_be_suspended = True
+                raise MicrovmError.from_child_context_error(name, error) from error
+            raise
+        if suspend_after:
+            self._may_be_suspended = True
+        return result
 
 
 @dataclass(frozen=True, kw_only=True)

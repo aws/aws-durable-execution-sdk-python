@@ -303,7 +303,7 @@ What happens:
 2. It adds no step and no checkpoint. The child context's own completion checkpoint covers it. On replay, a completed child context does not run again, so the session sends no second suspend.
 3. A failed `SuspendMicrovm` call logs a warning and does not fail the job. The next job already checks the state and resumes the MicroVM when needed.
 4. The job request carries no field for it, and the worker does nothing for it. The worker needs no change, and the MicroVM's role needs no suspend permission.
-5. The session records that the MicroVM may be suspended. Each later job of the session handle checks the MicroVM state before delivery, and resumes a suspended MicroVM, as with `auto_suspend_on_idle`. The `suspend_after` job itself checks the state too, because the record is set before the job starts.
+5. The session records that the MicroVM may be suspended. Each later job of the session handle checks the MicroVM state before delivery, and resumes a suspended MicroVM, as with `auto_suspend_on_idle`. The record is set after the `suspend_after` job's child context returns or raises, so that job does not check the state before its own delivery.
 
 The setting works with or without `auto_suspend_on_idle`. With both, the function suspends right after the job, and the worker's idle time applies after each resume.
 
@@ -311,7 +311,7 @@ The call is not a durable operation, so these rules are yours to follow. The ses
 
 1. Do not use it on a job that runs next to other jobs of the session (`map`, `parallel`, promise combinators). Those jobs freeze until the next job resumes the MicroVM, and can hit their heartbeat timeout.
 2. The suspend runs inside the job's child context, so it follows the child context replay rules. A result larger than the child context checkpoint limit makes the child context run again on replay, and each run suspends again.
-3. A retry after the Lambda invocation fails can send the suspend again. Suspending a suspended MicroVM succeeds.
+3. A retry after the Lambda invocation fails can send the suspend again. The invocation can also end while the call runs, when other operations wait. The call is then sent again. Suspending a suspended MicroVM succeeds.
 4. Adding or removing `suspend_after` changes what the session does on replay. Change it only through a new function version.
 
 The record that a job set `suspend_after` is kept in memory only. A replay of a completed job calls `vm.invoke` again, so it sets the record again. A replay of a completed `map` item, `parallel` branch, or child context does not run its function again. So the next job can skip the state check of a suspended MicroVM. For that case, every session job checks the state after a sign of a suspended MicroVM:
@@ -337,7 +337,9 @@ It needs:
 2. A `heartbeat_timeout` on the next job of at least its `retry_window` plus 30 seconds. The heartbeat timeout starts before delivery, so it includes the resume and the refusal.
 3. `lambda:GetMicrovm`, `lambda:ResumeMicrovm`, and `lambda:SuspendMicrovm` on the image in the function's role. The MicroVM's role needs `lambda:SuspendMicrovm` only for `auto_suspend_on_idle`.
 
-A failed suspend is not retried. The MicroVM then keeps running until the next job, the idle suspend, or the end of the session. The warning names `lambda:SuspendMicrovm` for a missing permission.
+The suspend runs after a job timeout or a heartbeat timeout too, so a job that still runs in the MicroVM is frozen, not stopped.
+
+The call ends at the invocation reserve, like the other calls of the session. A failed suspend, or a call that does not end in time, is not retried. The MicroVM then keeps running until the next job, the idle suspend, or the end of the session. The warning names `lambda:SuspendMicrovm` for a missing permission.
 
 ### Session permissions
 

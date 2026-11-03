@@ -77,7 +77,9 @@ from aws_durable_execution_sdk_python_extras.microvm.request import (
     DEFAULT_REQUEST_RETRY_WINDOW_SECONDS,
     MAX_REQUEST_RETRY_WINDOW_SECONDS,
     SendJobOptions,
+    call_before_deadline,
     require_time_for_call,
+    reserve_starts_at,
     send_job,
 )
 from aws_durable_execution_sdk_python_extras.microvm.retry import (
@@ -758,15 +760,31 @@ class _MicrovmScope:
         and resumes it when needed, and suspending a suspended MicroVM
         succeeds.
         """
+
+        def expired() -> Exception:
+            return TimeoutError(
+                "SuspendMicrovm did not end before the invocation reserve"
+            )
+
         try:
-            self._client().suspend_microvm(microvmIdentifier=microvm_id)
+            call_before_deadline(
+                lambda: self._client().suspend_microvm(microvmIdentifier=microvm_id),
+                reserve_starts_at(_remaining_seconds(child)),
+                expired,
+            )
         except Exception as error:  # noqa: BLE001
+            detail = (
+                str(add_request_id("SuspendMicrovm", error))
+                if isinstance(error, ClientError)
+                else str(error)
+            )
             child.logger.warning(
                 f'MicroVM "{self.name}": SuspendMicrovm failed for {microvm_id}. '
-                "The MicroVM keeps running, and the next job checks its state. "
-                "A missing permission needs lambda:SuspendMicrovm in the "
-                "function's execution role.",
-                extra={"microvmId": microvm_id, "error": str(error)},
+                "The MicroVM keeps running and is billed until the idle suspend "
+                "or the end of the session. The next job checks its state. A "
+                "missing permission needs lambda:SuspendMicrovm in the "
+                f"function's execution role. Error: {detail}",
+                extra={"microvmId": microvm_id, "error": detail},
             )
 
     def _terminate_call(self, microvm_id: str) -> None:
