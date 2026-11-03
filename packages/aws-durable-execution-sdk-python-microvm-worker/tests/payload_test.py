@@ -286,24 +286,12 @@ def test_an_unusable_callback_id_is_not_attached_to_errors(callback_id):
 # endregion dataclasses and callback IDs
 
 
-@pytest.mark.parametrize(
-    ("overrides", "suspend_after"),
-    [
-        ({"suspendAfter": True}, True),
-        ({"suspendAfter": False}, False),
-        ({"suspendAfter": "true"}, False),
-        ({"suspendAfter": 1}, False),
-        ({"suspendAfter": None}, False),
-        ({"suspendAfter": {}}, False),
-        ({}, False),
-    ],
-    ids=["true", "false", "string", "one", "null", "object", "absent"],
-)
-def test_job_request_reads_only_json_true_as_suspend_after(overrides, suspend_after):
-    # Any other value is ignored, not rejected, as in the JavaScript worker.
-    parsed = MicrovmJobRequest.from_dict(job_request(**overrides))
+def test_job_request_ignores_a_suspend_after_field():
+    # The durable function suspends the MicroVM itself. An older durable
+    # function can still send the field, and the worker ignores it.
+    parsed = MicrovmJobRequest.from_dict(job_request(suspendAfter=True))
 
-    assert parsed.suspend_after is suspend_after
+    assert not hasattr(parsed, "suspend_after")
 
 
 def test_run_hook_payload_ignores_suspend_after():
