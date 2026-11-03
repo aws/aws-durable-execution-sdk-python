@@ -49,6 +49,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     MicrovmNotRunningError,
     MicrovmSession,
     MicrovmSessionConfig,
+    MicrovmTimeoutError,
     microvm_session,
     operation,
 )
@@ -1703,17 +1704,20 @@ def test_does_not_suspend_after_a_failed_job_that_did_not_ask_for_it(
         try:
             vm.invoke(ctx, "build", job_input=1, options=job())
         except MicrovmJobFailedError as error:
-            return str(error)
-        return None
+            message = str(error)
+        return [message, vm.invoke(ctx, "test", job_input=2, options=job())]
 
     result = run(
         session_handler(session_config(client), body),
         None,
-        [("build", fail_with("BuildError", "no compiler"))],
+        [("build", fail_with("BuildError", "no compiler")), ("test", succeed_with(2))],
     )
 
-    assert "no compiler" in outcome(result)["result"]
+    assert "no compiler" in outcome(result)["result"][0]
     assert client.requests("suspend_microvm") == []
+    # The failed job did not ask for a suspend, so it set no flag. The
+    # second job then makes no state check.
+    assert client.requests("get_microvm") == []
 
 
 def test_does_not_suspend_when_the_wait_of_a_suspend_after_job_raises_an_sdk_error(
@@ -1753,6 +1757,31 @@ def test_does_not_suspend_when_the_wait_of_a_suspend_after_job_raises_an_sdk_err
 
     assert outcome(result) == {"result": "built"}
     assert raised == [True]
+    assert client.requests("suspend_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_suspends_and_fails_with_a_timeout_when_a_suspend_after_job_gets_no_result(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    client = fake_client(endpoint=fake_endpoint().url)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        try:
+            vm.invoke(
+                ctx,
+                "build",
+                job_input=1,
+                options=MicrovmInvokeOptions(
+                    timeout=Duration.from_seconds(1), suspend_after=True
+                ),
+            )
+        except MicrovmTimeoutError as error:
+            return type(error).__name__
+        return None
+
+    result = run(session_handler(session_config(client), body), None, [])
+
+    assert outcome(result) == {"result": "MicrovmTimeoutError"}
     assert client.requests("suspend_microvm") == [{"microvmIdentifier": "mvm-1"}]
 
 

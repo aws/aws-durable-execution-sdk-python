@@ -360,7 +360,8 @@ class MicrovmSession:
         except Exception as error:
             # SuspendExecution is a BaseException, so a wait for the job
             # does not set the flag. Only a failed job sets it: any other
-            # error ends the invocation, and the flag lives in memory only.
+            # error ends the invocation unless the handler catches it, and
+            # the flag lives in memory only.
             if isinstance(error, ChildContextError):
                 if suspend_after:
                     self._may_be_suspended = True
