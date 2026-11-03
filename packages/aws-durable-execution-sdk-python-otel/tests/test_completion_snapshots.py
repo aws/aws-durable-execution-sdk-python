@@ -368,7 +368,9 @@ def test_missing_ancestor_fallback_preserves_available_descendant_hierarchy(
 
 
 def test_partial_start_releases_pending_metadata_at_end(
-    trace_case: TraceCase, monkeypatch: pytest.MonkeyPatch
+    trace_case: TraceCase,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     plugin, _exporter, invocation = trace_case
 
@@ -379,10 +381,56 @@ def test_partial_start_releases_pending_metadata_at_end(
     with pytest.raises(RuntimeError, match="context extraction failed"):
         plugin.on_invocation_start(InvocationStartInfo(**invocation))
     plugin.on_operation_end(completion(parent_id="missing-parent"))
-    with pytest.raises(ValueError, match="available for completion fallback"):
-        plugin.on_invocation_end(
-            InvocationEndInfo(**invocation, status=InvocationStatus.PENDING)
-        )
+    # A start that never resolved an execution trace context leaves the
+    # fallback with nothing to anchor to. That is reported, not raised: the
+    # invocation still has to finish releasing its scope.
+    plugin.on_invocation_end(
+        InvocationEndInfo(**invocation, status=InvocationStatus.PENDING)
+    )
+    assert any(
+        "available for completion fallback" in str(record.exc_info[1])
+        for record in caplog.records
+        if record.exc_info
+    )
     assert not plugin._tracing_enabled
     assert not plugin._completions.pending
     assert not plugin._completions.children_by_parent
+
+
+def test_failing_processor_at_end_still_closes_the_invocation(
+    trace_case: TraceCase, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A completion that cannot be exported must not cost the whole invocation."""
+    plugin, exporter, invocation = trace_case
+    provider = plugin._provider
+    assert isinstance(provider, TracerProvider)
+
+    class RejectCompletion(SpanProcessor):
+        """Stays failing through invocation End, so no retry can succeed."""
+
+        def on_start(
+            self, span: SdkSpan, parent_context: Context | None = None
+        ) -> None:
+            if span.name == "b":
+                raise RuntimeError("completion processor failed")
+
+    provider.add_span_processor(RejectCompletion())
+    pending = completion()
+    plugin.on_invocation_start(
+        InvocationStartInfo(**invocation, updated_operations={"b": pending})
+    )
+    plugin.on_invocation_end(
+        InvocationEndInfo(**invocation, status=InvocationStatus.SUCCEEDED)
+    )
+    names = [span.name for span in exporter.get_finished_spans()]
+    # The completion is lost -- the processor rejects every attempt -- but the
+    # invocation and the execution-scoped Workflow span still close.
+    assert "b" not in names
+    assert "Invocation" in names
+    assert plugin._workflow_span_name in names
+    assert any(
+        "completion processor failed" in str(record.exc_info[1])
+        for record in caplog.records
+        if record.exc_info
+    )
+    assert not plugin._tracing_enabled
