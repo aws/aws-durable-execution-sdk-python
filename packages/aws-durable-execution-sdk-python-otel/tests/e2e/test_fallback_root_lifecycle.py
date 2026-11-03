@@ -45,6 +45,22 @@ class _RecordingFactory(Generic[_PluginT]):
         return plugin
 
 
+class _RecordingOtelFactory(Generic[_PluginT]):
+    """OTel-specific recording wrapper that keeps factory registration metadata."""
+
+    __durable_registration_api__ = 1
+    exclusive_group = "aws-durable-execution-otel-view"
+
+    def __init__(self, build: Callable[[], _PluginT]) -> None:
+        self.build = build
+        self.instances: list[_PluginT] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> _PluginT:
+        plugin = self.build()
+        self.instances.append(plugin)
+        return plugin
+
+
 class _CaptureInvocationEnd(DurableInstrumentationPlugin):
     def __init__(self, exporter: InMemorySpanExporter) -> None:
         self.exporter = exporter
@@ -65,7 +81,7 @@ def test_fallback_anchor_survives_suspension(
     provider.add_span_processor(
         BatchSpanProcessor(exporter, schedule_delay_millis=60000)
     )
-    factory = _RecordingFactory(
+    factory = _RecordingOtelFactory(
         lambda: plugin_type(
             OtelPluginConfig(
                 tracer_provider=provider,
@@ -177,7 +193,7 @@ def test_public_resume_keeps_anchor_stable_and_processor_sampling_independent(
     provider.add_span_processor(
         BatchSpanProcessor(exporter, schedule_delay_millis=60000)
     )
-    factory = _RecordingFactory(
+    factory = _RecordingOtelFactory(
         lambda: plugin_type(
             OtelPluginConfig(
                 tracer_provider=provider,

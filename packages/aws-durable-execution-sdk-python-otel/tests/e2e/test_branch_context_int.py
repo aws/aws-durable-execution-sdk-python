@@ -45,6 +45,22 @@ class _RecordingFactory(Generic[_PluginT]):
         return plugin
 
 
+class _RecordingOtelFactory(Generic[_PluginT]):
+    """OTel-specific recording wrapper that keeps factory registration metadata."""
+
+    __durable_registration_api__ = 1
+    exclusive_group = "aws-durable-execution-otel-view"
+
+    def __init__(self, build: Callable[[], _PluginT]) -> None:
+        self.build = build
+        self.instances: list[_PluginT] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> _PluginT:
+        plugin = self.build()
+        self.instances.append(plugin)
+        return plugin
+
+
 @pytest.mark.parametrize(
     ("view", "failed_start"),
     [
@@ -111,7 +127,7 @@ def test_public_branch_context_propagation_and_isolation(
         plugins.append(_RecordingFactory(Bind))
         if failed_start:
             plugins.append(_RecordingFactory(Broken))
-        otel_factory = _RecordingFactory(
+        otel_factory = _RecordingOtelFactory(
             lambda: view(
                 OtelPluginConfig(
                     tracer_provider=provider,
