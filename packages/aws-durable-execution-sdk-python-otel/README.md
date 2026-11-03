@@ -419,8 +419,11 @@ enclosing Invocation and Workflow spans successful if the handler succeeds.
 An exception event carries `exception.type`, `exception.message` and
 `exception.stacktrace` only when the checkpoint stored them, so a partial error
 such as a callback failure with a message and no type omits the field it lacks
-instead of reporting an invented one. An explicitly supplied empty string stays
-an empty string and remains distinct from an absent field. The OTel exception
+instead of reporting an invented one. An explicitly supplied empty type or
+message stays an empty string and remains distinct from an absent field. A stack
+is emitted only when joining its stored lines with newlines produces a nonempty
+string; supplied whitespace and newlines are preserved. The plugin does not
+recover handler frames that the checkpoint did not store. The OTel exception
 conventions require whichever of type and message the other lacks, so an error
 supplying neither records no event at all; its failure still appears in the
 span's error status and in `durable.operation.status`.
