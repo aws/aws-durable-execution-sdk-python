@@ -282,6 +282,16 @@ def test_natural_child_end_preserves_other_pending_children(
     assert [
         span.name for span in exporter.get_finished_spans() if span.name in updates
     ] == ["first"]
+    # Check the index before invocation finalization can recover the sibling
+    # from pending or clear an incorrectly retained empty parent entry.
+    assert plugin._completions.pending == {"second": updates["second"]}
+    assert plugin._completions.children_by_parent == {"parent": {"second": None}}
+    plugin.on_operation_end(updates["second"])
+    assert plugin._completions.pending == {}
+    assert plugin._completions.children_by_parent == {}
+    children = [span for span in exporter.get_finished_spans() if span.name in updates]
+    assert [span.name for span in children] == ["first", "second"]
+    assert all(span.parent == parent_context for span in children)
     plugin.on_user_function_end(UserFunctionEndInfo.from_start_info(start, None))
     plugin.on_operation_end(
         OperationEndInfo(
