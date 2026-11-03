@@ -26,6 +26,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from aws_durable_execution_sdk_python_otel import (
     ExecutionOtelPlugin,
     ExecutionOtelPluginFactory,
+    InvocationOtelPlugin,
     InvocationOtelPluginFactory,
     OtelPluginConfig,
 )
@@ -103,6 +104,183 @@ class _ObserverFactory:
         plugin = _Observer(self.statuses)
         self.instances.append(plugin)
         return plugin
+
+
+class _InheritedExecutionFactory(ExecutionOtelPluginFactory):
+    def __init__(self, config: OtelPluginConfig | None = None) -> None:
+        super().__init__(config)
+        self.instances: list[ExecutionOtelPlugin] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> ExecutionOtelPlugin:
+        plugin = super().create_plugin(info)
+        self.instances.append(plugin)
+        return plugin
+
+
+class _InheritedInvocationFactory(InvocationOtelPluginFactory):
+    def __init__(self, config: OtelPluginConfig | None = None) -> None:
+        super().__init__(config)
+        self.instances: list[InvocationOtelPlugin] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> InvocationOtelPlugin:
+        plugin = super().create_plugin(info)
+        self.instances.append(plugin)
+        return plugin
+
+
+class _ComposedExecutionFactory:
+    __durable_registration_api__ = 1
+    exclusive_group = "aws-durable-execution-otel-view"
+
+    def __init__(self, config: OtelPluginConfig | None = None) -> None:
+        self.factory = ExecutionOtelPluginFactory(config)
+        self.instances: list[DurableInstrumentationPlugin] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        plugin = self.factory.create_plugin(info)
+        self.instances.append(plugin)
+        return plugin
+
+
+class _ComposedInvocationFactory:
+    __durable_registration_api__ = 1
+    exclusive_group = "aws-durable-execution-otel-view"
+
+    def __init__(self, config: OtelPluginConfig | None = None) -> None:
+        self.factory = InvocationOtelPluginFactory(config)
+        self.instances: list[DurableInstrumentationPlugin] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        plugin = self.factory.create_plugin(info)
+        self.instances.append(plugin)
+        return plugin
+
+
+def _wrapped_execution_factory(
+    config: OtelPluginConfig, style: str
+) -> DurableInstrumentationPluginFactory:
+    if style == "inherit":
+        return _InheritedExecutionFactory(config)
+    return _ComposedExecutionFactory(config)
+
+
+def _wrapped_invocation_factory(
+    config: OtelPluginConfig, style: str
+) -> DurableInstrumentationPluginFactory:
+    if style == "inherit":
+        return _InheritedInvocationFactory(config)
+    return _ComposedInvocationFactory(config)
+
+
+def _created_plugins(factory: DurableInstrumentationPluginFactory) -> list[object]:
+    return list(getattr(factory, "instances", []))
+
+
+@pytest.mark.parametrize("wrapped", ["execution", "invocation", "both"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("style", ["inherit", "compose"])
+def test_wrapper_factory_cannot_bypass_view_exclusion(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    wrapped: str,
+    reverse: bool,
+    style: str,
+) -> None:
+    provider, exporter = telemetry
+    created: list[str] = []
+    handler_calls: list[str] = []
+    original_execution_create = ExecutionOtelPluginFactory.create_plugin
+    original_invocation_create = InvocationOtelPluginFactory.create_plugin
+
+    def create_execution(
+        self: ExecutionOtelPluginFactory, info: InvocationStartInfo
+    ) -> DurableInstrumentationPlugin:
+        created.append("execution")
+        return original_execution_create(self, info)
+
+    def create_invocation(
+        self: InvocationOtelPluginFactory, info: InvocationStartInfo
+    ) -> DurableInstrumentationPlugin:
+        created.append("invocation")
+        return original_invocation_create(self, info)
+
+    monkeypatch.setattr(ExecutionOtelPluginFactory, "create_plugin", create_execution)
+    monkeypatch.setattr(InvocationOtelPluginFactory, "create_plugin", create_invocation)
+
+    def handler(_event: Any, _context: DurableContext) -> str:
+        handler_calls.append("ran")
+        return "unused"
+
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    execution: DurableInstrumentationPluginFactory = (
+        _wrapped_execution_factory(config, style)
+        if wrapped in {"execution", "both"}
+        else ExecutionOtelPluginFactory(config)
+    )
+    invocation: DurableInstrumentationPluginFactory = (
+        _wrapped_invocation_factory(config, style)
+        if wrapped in {"invocation", "both"}
+        else InvocationOtelPluginFactory(config)
+    )
+    observer = _ObserverFactory()
+    plugins: list[DurableInstrumentationPluginFactory] = [
+        execution,
+        invocation,
+        observer,
+    ]
+    if reverse:
+        plugins.reverse()
+
+    with pytest.raises(PluginLoadError) as error:
+        durable_execution(handler, plugins=plugins)
+    message = str(error.value)
+    assert type(execution).__qualname__ in message
+    assert type(invocation).__qualname__ in message
+    assert "mutually exclusive" in message
+    assert "Keep only one" in message
+    assert "aws-durable-execution-otel-view" in message
+    assert created == []
+    assert _created_plugins(execution) == []
+    assert _created_plugins(invocation) == []
+    assert observer.instances == []
+    assert observer.statuses == []
+    assert handler_calls == []
+    assert not exporter.get_finished_spans()
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        _InheritedExecutionFactory,
+        _InheritedInvocationFactory,
+        _ComposedExecutionFactory,
+        _ComposedInvocationFactory,
+    ],
+)
+def test_single_wrapped_view_with_unrelated_plugin_is_accepted(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    wrapper: type[Any],
+) -> None:
+    provider, exporter = telemetry
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    factory = wrapper(config)
+    observer = _ObserverFactory()
+    handler_calls: list[str] = []
+
+    def handler(_event: Any, _context: DurableContext) -> str:
+        handler_calls.append("ran")
+        return "unused"
+
+    configured = durable_execution(handler, plugins=[factory, observer])
+    with DurableFunctionTestRunner(handler=configured) as runner:
+        assert runner.run(input="{}", execution_timeout=15).status.value == "SUCCEEDED"
+    assert handler_calls == ["ran"]
+    assert len(factory.instances) == 1
+    assert observer.statuses == [InvocationStatus.SUCCEEDED]
+    assert any(
+        span.name in {"Workflow", "Invocation"}
+        for span in exporter.get_finished_spans()
+    )
 
 
 @pytest.mark.parametrize(

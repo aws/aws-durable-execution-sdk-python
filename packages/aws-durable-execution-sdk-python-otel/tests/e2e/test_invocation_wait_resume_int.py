@@ -289,6 +289,22 @@ class _RecordingFactory(Generic[_PluginT]):
         return plugin
 
 
+class _RecordingOtelFactory(Generic[_PluginT]):
+    """OTel-specific recording wrapper that keeps factory registration metadata."""
+
+    __durable_registration_api__ = 1
+    exclusive_group = "aws-durable-execution-otel-view"
+
+    def __init__(self, build: Callable[[], _PluginT]) -> None:
+        self.build = build
+        self.instances: list[_PluginT] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> _PluginT:
+        plugin = self.build()
+        self.instances.append(plugin)
+        return plugin
+
+
 class InheritedInvocationPlugin(InvocationOtelPlugin):
     pass
 
@@ -322,7 +338,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    factory = _RecordingFactory(
+    factory = _RecordingOtelFactory(
         lambda: plugin_type(
             OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
         )
