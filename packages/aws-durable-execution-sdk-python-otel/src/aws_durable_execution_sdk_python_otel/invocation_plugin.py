@@ -982,14 +982,27 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             )
 
     def _drain_pending_completions(self) -> None:
-        """Export pending parents before children while Invocation is still open."""
+        """Export pending parents before children while Invocation is still open.
+
+        One completion that cannot be rendered must not take the rest of
+        finalization with it: the still-open operation segments, the Invocation
+        span and the Workflow span are closed after this returns, so a failure
+        here is contained per completion, as it is when a parent registration
+        drains its children.
+        """
         with self._operation_spans_lock:
             pending = dict(self._completions.pending)
         for operation in parent_first(pending):
-            parent = self._completion_parent_span(operation.parent_id)
-            if parent is None:
-                parent = self._fallback_parent(operation)
-            self._render_operation_end(operation, fallback_parent=parent)
+            try:
+                parent = self._completion_parent_span(operation.parent_id)
+                if parent is None:
+                    parent = self._fallback_parent(operation)
+                self._render_operation_end(operation, fallback_parent=parent)
+            except Exception:
+                logger.exception(
+                    "Completion export failed while finalizing operation %s",
+                    operation.operation_id,
+                )
 
     def _render_operation_end(
         self, info: OperationInfo, *, fallback_parent: Span | None = None
