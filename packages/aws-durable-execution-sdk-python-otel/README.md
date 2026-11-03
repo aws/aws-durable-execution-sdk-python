@@ -42,28 +42,46 @@ processors, and exporter.
 
 1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
 2. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
-3. Pass `InvocationOtelPluginFactory()` to your handler's `plugins` list
+3. Pass `OtelPlugin.factory()` to your handler's `plugins` list
 4. Add X-Ray write permissions
 
 The SDK's `plugins` list takes plugin *factories*, not plugin instances: it calls
 each factory's `create_plugin` once per invocation and the plugin it returns
-serves that one invocation. `InvocationOtelPluginFactory` and
-`ExecutionOtelPluginFactory` are the factories for the two bundled plugins; each
-takes the optional `OtelPluginConfig` that every plugin it builds will use.
+serves that one invocation. Import `OtelPlugin` to choose a view:
+
+```python
+from aws_durable_execution_sdk_python_otel import OtelPlugin
+
+execution = OtelPlugin.factory()  # Default: operations parented to Workflow
+invocation = OtelPlugin.factory(mode="invocation")  # Operations parented to Invocation
+```
+
+Register one of these factories in `plugins`. Explicit `mode="execution"` also
+selects the execution view. Pass existing configuration with
+`OtelPlugin.factory(config, mode="invocation")`. Unsupported modes raise
+`ValueError` when the factory is selected.
+
+The selector returns the existing `ExecutionOtelPluginFactory` or
+`InvocationOtelPluginFactory` directly. Both existing factory classes remain
+supported, with unchanged configuration and behavior.
 
 Alternatively, install this package in the function artifact or a Lambda layer
 and select either OTel plugin by entry-point name:
 
 ```text
+DURABLE_EXECUTION_PLUGINS=otel
 DURABLE_EXECUTION_PLUGINS=otel-invocation
 DURABLE_EXECUTION_PLUGINS=otel-execution
 ```
 
 `otel-invocation` names a default-configured `InvocationOtelPluginFactory`;
-`otel-execution` names a default-configured `ExecutionOtelPluginFactory`. The SDK
+`otel` and `otel-execution` name the same default-configured
+`ExecutionOtelPluginFactory`. Set one of these values. The SDK
 discovers the selected package entry point at cold start and calls its
 `create_plugin` once per invocation, so the handler does not need to import or
-explicitly register the plugin.
+explicitly register the plugin. This still requires the plugin package and a
+configured OpenTelemetry provider and exporter, usually supplied by the ADOT
+layer. Installing or importing the package alone does not enable instrumentation.
 
 OTel 2.0 requires core SDK 3.x and the per-invocation factory contract. Publish
 the coordinated core release before the plugin. Core 2.x plugin instances and
@@ -221,10 +239,10 @@ rejected clearly by core 3.
 ```python
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_otel import InvocationOtelPluginFactory
+from aws_durable_execution_sdk_python_otel import OtelPlugin
 
 
-@durable_execution(plugins=[InvocationOtelPluginFactory()])
+@durable_execution(plugins=[OtelPlugin.factory()])
 def handler(event: dict, context: DurableContext) -> dict:
     result = context.step(lambda _: fetch_data(event["id"]), name="fetch-data")
 
@@ -546,6 +564,23 @@ After deploying your function with the plugin configured:
 
 ## API Reference
 
+### `OtelPlugin.factory`
+
+```python
+OtelPlugin.factory(config=None, *, mode="execution")
+```
+
+Returns an `ExecutionOtelPluginFactory` by default, or an
+`InvocationOtelPluginFactory` for `mode="invocation"`. The optional `config` is
+an existing `OtelPluginConfig`, passed unchanged to the selected factory. For
+example, an application-owned provider can be supplied with
+`OtelPlugin.factory(OtelPluginConfig(tracer_provider=provider))`.
+
+The return value belongs in the handler's `plugins` list. Each invocation gets
+its own plugin instance. Selecting a factory does not resolve a provider or
+construct an invocation plugin. Mode is selected once; invalid values,
+including `None`, raise `ValueError`.
+
 ### `InvocationOtelPluginFactory`
 
 Factory for the invocation-rooted plugin, and what belongs in the SDK's `plugins`
@@ -577,7 +612,7 @@ picked up.
 
 Factory for the execution-rooted plugin, with the same construction and config as
 `InvocationOtelPluginFactory`. `EXECUTION_OTEL_PLUGIN_FACTORY` is the
-default-configured instance the `otel-execution` entry point names.
+default-configured instance both the `otel` and `otel-execution` entry points name.
 
 ### `InvocationOtelPlugin`
 

@@ -20,6 +20,7 @@ from aws_durable_execution_sdk_python_otel.execution_plugin import (
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
 )
+from aws_durable_execution_sdk_python_otel.otel_plugin import OtelPlugin
 from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
@@ -49,6 +50,7 @@ __all__ = [
     "ExecutionOtelPluginFactory",
     "ExtractedContext",
     "OtelPluginConfig",
+    "OtelPlugin",
     "InvocationOtelPlugin",
     "InvocationOtelPluginFactory",
     "OtelContextLogFilter",
