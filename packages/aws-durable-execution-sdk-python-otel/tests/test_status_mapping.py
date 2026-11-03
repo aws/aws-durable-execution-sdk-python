@@ -468,6 +468,49 @@ PARTIAL_CASES = [
 ]
 
 
+@pytest.mark.parametrize("is_replayed", [False, True])
+@pytest.mark.parametrize("event_kind", ["operation", "attempt"])
+@pytest.mark.parametrize(
+    "stack_trace", [None, [], [""], ["", ""], [" "], ["frame\n", "error"]]
+)
+def test_exception_stacktrace_requires_nonempty_joined_stack(
+    instrumented_view: InstrumentedView,
+    stack_trace: list[str] | None,
+    event_kind: str,
+    is_replayed: bool,
+) -> None:
+    """Only a nonempty stored stack string belongs in the exception event."""
+    plugin, exporter = instrumented_view
+    _start_invocation(plugin)
+    error = ErrorObject.from_dict(
+        ErrorObject("boom", "RuntimeError", None, stack_trace).to_dict()
+    )
+    if event_kind == "operation":
+        plugin.on_operation_end(_operation_end_info(error, is_replayed=is_replayed))
+        span_name = "wait"
+    else:
+        _run_failed_step_attempt(plugin, error, is_replayed=is_replayed)
+        span_name = "step-1 attempt 1"
+    _end_invocation(plugin)
+    if (
+        is_replayed
+        and event_kind == "operation"
+        and isinstance(plugin, ExecutionOtelPlugin)
+    ):
+        assert all(s.name != span_name for s in exporter.get_finished_spans())
+        return
+    span = next(s for s in exporter.get_finished_spans() if s.name == span_name)
+    expected = {"exception.type": "RuntimeError", "exception.message": "boom"}
+    joined_stack = "\n".join(stack_trace or [])
+    if joined_stack:
+        expected["exception.stacktrace"] = joined_stack
+    assert dict(_exception_attributes(span)) == expected
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.start_time is not None
+    assert span.end_time is not None
+    assert span.start_time <= span.events[0].timestamp <= span.end_time
+
+
 @pytest.mark.parametrize(("message", "error_type", "expected"), PARTIAL_CASES)
 def test_failed_operation_omits_absent_error_fields(
     instrumented_view: InstrumentedView,
