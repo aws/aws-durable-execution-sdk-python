@@ -19,13 +19,7 @@ This package holds the SDK-specific part: the handler and the SAM template that 
 | Suite       | Requirements  | What it pins down                                                                                                                              |
 | ----------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `telemetry` | `telemetry-1` | One successful single-step execution emits one `SUCCEEDED` record with `input`, `output`, ARN-derived identity fields, and `operationsByName`. |
-| `telemetry` | `telemetry-2` | One failed execution emits one `FAILED` record. The execution `error` and `operationsByName.charge.error` carry a cause chain. See note below. |
-
-`telemetry-2` fails for this SDK today.
-The requirement asserts a `cause` chain on both errors.
-The plugin hooks pass the exporter an `ErrorObject` with type, message, data and stack trace, and no cause.
-So [`plugin.py`](../aws-durable-execution-sdk-python-telemetry-exporter/src/aws_durable_execution_sdk_python_telemetry_exporter/plugin.py) writes every error as `{name, message}`.
-The handler is correct and stays in place, so the suite reports the gap until the exporter writes the chain.
+| `telemetry` | `telemetry-2` | One failed execution emits one `FAILED` record. The execution `error` and `operationsByName.charge.error` carry a cause chain.                 |
 
 ## Layout
 
