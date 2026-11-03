@@ -46,3 +46,17 @@ Resources:
       Handler: telemetry_1_success.handler
       FunctionName: !Sub "${AWS::StackName}-telemetry-1"
       Role: !Ref LambdaExecutionRoleArn
+
+  Telemetry2Failure:
+    Type: AWS::Serverless::Function
+    DependsOn: TelemetryLogGroup
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - telemetry-2
+    Properties:
+      CodeUri: src/
+      Handler: telemetry_2_failure.handler
+      FunctionName: !Sub "${AWS::StackName}-telemetry-2"
+      Role: !Ref LambdaExecutionRoleArn

@@ -25,8 +25,15 @@ SRC_DIR = PKG_DIR / "src"
 TEMPLATE_PATH = PKG_DIR / "template.yaml"
 
 SDK_REPOSITORY_URL = "git+https://github.com/aws/aws-durable-execution-sdk-python.git"
-EXPECTED_COVERAGE: list[str] = ["telemetry-1"]
-EXPECTED_MODULES: frozenset[str] = frozenset({"telemetry_1_success"})
+EXPECTED_MODULES: frozenset[str] = frozenset(
+    {"telemetry_1_success", "telemetry_2_failure"}
+)
+# Logical ID -> requirement ID. The function name suffix must equal the
+# requirement ID, so the runner can match the deployed function to its test.
+EXPECTED_FUNCTIONS: dict[str, str] = {
+    "Telemetry1Success": "telemetry-1",
+    "Telemetry2Failure": "telemetry-2",
+}
 
 
 class CfnLoader(yaml.SafeLoader):
@@ -76,16 +83,6 @@ def template() -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def makefile() -> str:
     return (SRC_DIR / "Makefile").read_text(encoding="utf-8")
-
-
-def test_coverage_is_exactly_telemetry_1(template: dict[str, Any]) -> None:
-    coverage: list[str] = [
-        description
-        for resource in functions(template).values()
-        for description in resource["TestingMetadata"]["TestDescription"]
-    ]
-
-    assert coverage == EXPECTED_COVERAGE
 
 
 def test_every_function_points_at_an_existing_handler_module(
@@ -165,14 +162,36 @@ def test_log_group_name_reaches_the_handler_environment(
     assert variables["TELEMETRY_LOG_GROUP_NAME"] == ("!Ref", "TelemetryLogGroupName")
 
 
-def test_function_settings_match_the_contract(template: dict[str, Any]) -> None:
-    function: dict[str, Any] = functions(template)["Telemetry1Success"]
+def test_template_functions_are_exactly_the_expected_set(
+    template: dict[str, Any],
+) -> None:
+    assert {
+        logical_id: resource["TestingMetadata"]["TestDescription"]
+        for logical_id, resource in functions(template).items()
+    } == {
+        logical_id: [requirement_id]
+        for logical_id, requirement_id in EXPECTED_FUNCTIONS.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("logical_id", "requirement_id"), sorted(EXPECTED_FUNCTIONS.items())
+)
+def test_function_settings_match_the_contract(
+    template: dict[str, Any], logical_id: str, requirement_id: str
+) -> None:
+    function: dict[str, Any] = functions(template)[logical_id]
 
     assert function["Properties"]["FunctionName"] == (
         "!Sub",
-        "${AWS::StackName}-telemetry-1",
+        f"${{AWS::StackName}}-{requirement_id}",
     )
     assert function["Properties"]["Role"] == ("!Ref", "LambdaExecutionRoleArn")
+
+
+def test_global_function_settings_match_the_contract(
+    template: dict[str, Any],
+) -> None:
     assert template["Globals"]["Function"]["Runtime"] == "python3.13"
     assert template["Globals"]["Function"]["DurableConfig"] == {
         "ExecutionTimeout": 300,
@@ -180,9 +199,19 @@ def test_function_settings_match_the_contract(template: dict[str, Any]) -> None:
     }
 
 
-def test_handler_reads_the_log_group_from_the_environment() -> None:
-    source: str = (SRC_DIR / "telemetry_1_success.py").read_text(encoding="utf-8")
+@pytest.mark.parametrize("module", sorted(EXPECTED_MODULES))
+def test_handler_reads_the_log_group_from_the_environment(module: str) -> None:
+    source: str = (SRC_DIR / f"{module}.py").read_text(encoding="utf-8")
 
     assert 'os.environ.get("TELEMETRY_LOG_GROUP_NAME")' in source
     assert "raise RuntimeError" in source
     assert "CloudWatchLogsExporter(log_group_name=log_group_name)" in source
+
+
+def test_telemetry_2_handler_raises_the_pinned_messages() -> None:
+    """telemetry-2 asserts both messages exactly, at every level of the chain."""
+    source: str = (SRC_DIR / "telemetry_2_failure.py").read_text(encoding="utf-8")
+
+    assert 'raise RuntimeError("card declined")' in source
+    assert 'raise RuntimeError("payment failed") from error' in source
+    assert "RetryPresets.none()" in source
