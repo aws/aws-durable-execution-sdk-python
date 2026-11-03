@@ -36,9 +36,8 @@ MAX_JOB_INPUT_BYTES = 6 * 1024 * 1024 - 8 * 1024
 1. The worker accepts a job request body of at most 6 MiB.
 2. The body holds the input as the same JSON that :func:`dumps` writes.
 3. The body also holds fixed fields: the version, the Region, the MicroVM
-   ID, the suspend-after flag, the callback ID, and the heartbeat timeout.
-   Their names and the JSON punctuation take 112 bytes. The suspend-after
-   flag, ``,"suspendAfter":true``, takes 20 of them.
+   ID, the callback ID, and the heartbeat timeout. Their names and the JSON
+   punctuation take 92 bytes.
 4. The botocore ``lambda-microvms`` model allows a MicroVM ID of 1 to 256
    characters, with no pattern. JSON writes a character in at most 6 bytes,
    as a ``\\u00XX`` escape. So the MicroVM ID takes at most 1,536 bytes.
@@ -62,9 +61,6 @@ class RunHookPayload:
     A job that goes over HTTP needs a ``runHookPayload`` too, because the
     worker rejects a payload without ``version`` and ``region``. See
     :func:`run_hook_payload_without_job`.
-
-    The payload never carries ``suspendAfter``. Only a session job can set
-    it, and every session job goes over HTTP.
     """
 
     region: str
@@ -103,7 +99,7 @@ class RunHookPayload:
 class JobRequest:
     """The body of the HTTP request that delivers one job to a route.
 
-    Wire names: ``version``, ``region``, ``microvmId``, ``suspendAfter``,
+    Wire names: ``version``, ``region``, ``microvmId``,
     ``callbackId``, ``heartbeatTimeoutSeconds``, and ``input``. The job
     fields sit at the top level, next to ``version``, ``region``, and
     ``microvmId``.
@@ -111,11 +107,6 @@ class JobRequest:
     The endpoint can accept a request before Lambda has sent the ``run``
     hook. The worker learns the MicroVM ID from the ``run`` hook. So the
     request carries the MicroVM ID too.
-
-    ``suspendAfter`` is ``true`` only for a session job that asks the worker
-    to suspend the MicroVM after the job. The field is omitted otherwise. An
-    older worker ignores a field that it does not know. So the version stays
-    1, because a new version would make every older worker fail the job.
     """
 
     region: str
@@ -128,8 +119,6 @@ class JobRequest:
     """The caller's input. It must be JSON-serializable."""
     heartbeat_timeout_seconds: int | None = None
     """The heartbeat timeout, when the caller set one."""
-    suspend_after: bool = False
-    """Whether the worker suspends the MicroVM after the job."""
 
     def to_json(self) -> str:
         """Serialize the request as compact JSON, as :meth:`RunHookPayload.to_json` does.
@@ -143,8 +132,6 @@ class JobRequest:
             "region": self.region,
             "microvmId": self.microvm_id,
         }
-        if self.suspend_after:
-            document["suspendAfter"] = True
         document.update(
             _job_fields(
                 self.callback_id, self.job_input, self.heartbeat_timeout_seconds

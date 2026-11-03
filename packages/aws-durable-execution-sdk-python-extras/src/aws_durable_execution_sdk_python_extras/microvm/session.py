@@ -6,9 +6,7 @@ MicroVM."""
 
 from __future__ import annotations
 
-import threading
 import uuid
-from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -62,16 +60,6 @@ session whose ``timeout`` is shorter uses its ``timeout``. A session whose
 ``timeout`` is under 10 seconds does not suspend by default.
 """
 
-_WARNED_SESSIONS: OrderedDict[str, None] = OrderedDict()
-"""The IDs of the sessions that warned about a worker that ignores
-``suspend_after``, oldest first."""
-
-_MAX_WARNED_SESSIONS = 1_000
-"""How many session IDs :data:`_WARNED_SESSIONS` keeps. A session ID is a
-short string, so 1,000 of them use well under 1 MB."""
-
-_WARNED_LOCK = threading.Lock()
-
 _MIN_AUTO_SUSPEND_IDLE_SECONDS = 10
 """The shortest idle time a session accepts.
 
@@ -121,9 +109,9 @@ def microvm_session(
     records whether the MicroVM can be suspended. Replay follows that record,
     not the current config.
 
-    A job with ``suspend_after`` asks the worker to suspend the MicroVM after
-    the job. Each later job of the handle then checks the state before
-    delivery, as with ``auto_suspend_on_idle``. That record is kept in
+    A job with ``suspend_after`` makes the session call ``SuspendMicrovm``
+    after the job's result arrives. Each later job of the handle then checks
+    the state before delivery, as with ``auto_suspend_on_idle``. That record is kept in
     memory only. So every job of every session also checks the state after
     a sign of a suspended MicroVM: no answer, or an HTTP 502 with
     ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A boot gives no such
@@ -226,7 +214,6 @@ class MicrovmSession:
         launched: LaunchResult,
         *,
         resume_before_delivery: bool,
-        session_id: str,
     ) -> None:
         self._scope = scope
         self._launched = launched
@@ -237,7 +224,6 @@ class MicrovmSession:
         # its invoke() again, so it does not set the flag. The check after a
         # sign of a suspended MicroVM covers that case.
         self._may_be_suspended = False
-        self._session_id = session_id
 
     @property
     def microvm_id(self) -> str:
@@ -253,22 +239,6 @@ class MicrovmSession:
         ``True``.
         """
         return self._resume_before_delivery or self._may_be_suspended
-
-    def _claim_suspend_after_warning(self) -> bool:
-        """Return ``True`` the first time, so the session warns once about a
-        worker that does not support ``suspend_after``.
-
-        Each invocation creates a new handle. So the record is kept per
-        process, by session ID. A later invocation in the same execution
-        environment then logs no second warning.
-        """
-        with _WARNED_LOCK:
-            if self._session_id in _WARNED_SESSIONS:
-                return False
-            _WARNED_SESSIONS[self._session_id] = None
-            if len(_WARNED_SESSIONS) > _MAX_WARNED_SESSIONS:
-                _WARNED_SESSIONS.popitem(last=False)
-            return True
 
     def invoke(
         self,
@@ -371,21 +341,22 @@ class MicrovmSession:
                 retry_window_seconds=retry_window_seconds,
                 resume=self._resume_mode,
                 suspend_check=True,
-                suspend_after=suspend_after,
-                claim_suspend_after_warning=(
-                    self._claim_suspend_after_warning if suspend_after else None
-                ),
             )
             try:
-                return callback.result()
+                result = callback.result()
             except (ExecutionError, InvocationError):
                 # An SDK execution or invocation error is not a job outcome.
                 # The core SDK records neither as the child context's failure.
                 raise
             except Exception as error:
                 # SuspendExecution is a BaseException, so a wait for the
-                # callback passes through here.
+                # callback passes through here, and no suspend runs.
+                if suspend_after:
+                    scope.suspend(job_context, launched.microvm_id)
                 raise job_error(name, callback, error) from error
+            if suspend_after:
+                scope.suspend(job_context, launched.microvm_id)
+            return result
 
         try:
             return context.run_in_child_context(run, name=name)
@@ -485,7 +456,6 @@ class _SessionScope(_MicrovmScope):
                     self,
                     launched,
                     resume_before_delivery=launched.resume_before_delivery is True,
-                    session_id=session_id,
                 ),
                 child,
             )

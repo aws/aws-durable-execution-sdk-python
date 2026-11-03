@@ -499,8 +499,6 @@ class _MicrovmScope:
         retry_window_seconds: int,
         resume: bool | Callable[[], bool] = False,
         suspend_check: bool = False,
-        suspend_after: bool = False,
-        claim_suspend_after_warning: Callable[[], bool] | None = None,
     ) -> None:
         """Run the request step, ``<job_name>.request``: POST the job to the
         MicroVM's endpoint.
@@ -518,10 +516,6 @@ class _MicrovmScope:
         sets it for every job. A failed ``GetMicrovm`` call in that check
         logs one warning per job, and the attempt keeps sending the job.
 
-        ``suspend_after`` adds ``"suspendAfter": true`` to the job request.
-        When the answer lacks the worker's acknowledgement, the attempt
-        logs a warning if ``claim_suspend_after_warning`` returns ``True``.
-
         ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
         answer ``ResourceNotFoundException`` for a removed MicroVM. An
         attempt raises ``MicrovmStateError`` for that answer of any of the
@@ -538,7 +532,6 @@ class _MicrovmScope:
                 callback_id=callback_id,
                 job_input=job_input,
                 heartbeat_timeout_seconds=heartbeat_timeout_seconds,
-                suspend_after=suspend_after,
             )
             .to_json()
             .encode()
@@ -601,17 +594,6 @@ class _MicrovmScope:
 
                 check = check_state
 
-            def ignored() -> None:
-                if (
-                    claim_suspend_after_warning is not None
-                    and claim_suspend_after_warning()
-                ):
-                    logger.warning(
-                        f"the worker in MicroVM {microvm_id} does not support "
-                        "suspendAfter. The MicroVM keeps running after the job.",
-                        extra={"microvmId": microvm_id},
-                    )
-
             # Only CreateMicrovmAuthToken can raise ResourceNotFoundException
             # here:
             #
@@ -644,7 +626,6 @@ class _MicrovmScope:
                         unavailable_note=lambda: (
                             _GET_DENIED_NOTE if get_denied else None
                         ),
-                        on_suspend_after_ignored=ignored if suspend_after else None,
                     )
                 )
             except ClientError as error:
@@ -766,6 +747,27 @@ class _MicrovmScope:
             endpoint=endpoint if over_http else None,
             resume_before_delivery=resume_before_delivery,
         )
+
+    def suspend(self, child: DurableContext, microvm_id: str) -> None:
+        """Call ``SuspendMicrovm``, and log a failure as a warning instead of
+        raising.
+
+        It runs inside a job's child context, after the job's outcome is
+        known, and it is not a durable operation. A failed call must not
+        fail the job. The next job of the session checks the MicroVM state
+        and resumes it when needed, and suspending a suspended MicroVM
+        succeeds.
+        """
+        try:
+            self._client().suspend_microvm(microvmIdentifier=microvm_id)
+        except Exception as error:  # noqa: BLE001
+            child.logger.warning(
+                f'MicroVM "{self.name}": SuspendMicrovm failed for {microvm_id}. '
+                "The MicroVM keeps running, and the next job checks its state. "
+                "A missing permission needs lambda:SuspendMicrovm in the "
+                "function's execution role.",
+                extra={"microvmId": microvm_id, "error": str(error)},
+            )
 
     def _terminate_call(self, microvm_id: str) -> None:
         try:

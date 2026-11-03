@@ -9,7 +9,6 @@ import datetime
 import hashlib
 import json
 import logging
-from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -50,7 +49,6 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     microvm_session,
     operation,
 )
-from aws_durable_execution_sdk_python_extras.microvm import session as session_module
 
 
 WAIT = 30
@@ -1531,9 +1529,10 @@ def test_makes_no_state_check_for_a_launch_checkpoint_without_a_bool_resume_mode
 # suspend_after, and the check after a sign of a suspended MicroVM
 # ---------------------------------------------------------------------------
 
-IGNORED_WARNING = (
-    "the worker in MicroVM mvm-1 does not support suspendAfter. The MicroVM "
-    "keeps running after the job."
+SUSPEND_WARNING = (
+    'MicroVM "pipeline": SuspendMicrovm failed for mvm-1. The MicroVM keeps '
+    "running, and the next job checks its state. A missing permission needs "
+    "lambda:SuspendMicrovm in the function's execution role."
 )
 STATE_CHECK_WARNING = (
     "GetMicrovm failed, so the operation could not check whether the MicroVM "
@@ -1561,10 +1560,10 @@ def suspend_then_wait_then_job(
     return [build, vm.invoke(ctx, "test", job_input=2, options=job())]
 
 
-def test_asks_the_worker_to_suspend_after_the_job_only_when_it_is_set(
-    run: Any, fake_client: Any, fake_endpoint: Any, suspend_after_ack: Any
+def test_suspends_the_microvm_after_the_job_only_when_it_is_set(
+    run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
-    endpoint = fake_endpoint(accept_headers=suspend_after_ack)
+    endpoint = fake_endpoint()
     client = fake_client(endpoint=endpoint.url)
 
     result = run(
@@ -1574,10 +1573,11 @@ def test_asks_the_worker_to_suspend_after_the_job_only_when_it_is_set(
     )
 
     assert outcome(result) == {"result": [1, 2]}
-    first, second = (request["body"] for request in endpoint.requests)
-    assert first["suspendAfter"] is True
-    assert "suspendAfter" not in second
-    # The run hook payload never carries it.
+    # The session calls SuspendMicrovm once, for the first job only, and not
+    # in the invocation in which the job still waits for its callback.
+    assert client.requests("suspend_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    # The job request does not ask the worker to suspend.
+    assert all("suspendAfter" not in request["body"] for request in endpoint.requests)
     [launch] = client.requests("run_microvm")
     assert json.loads(launch["runHookPayload"]) == {"version": 1, "region": "us-west-2"}
     # suspend_after is not a session setting. So the launch records no
@@ -1585,10 +1585,101 @@ def test_asks_the_worker_to_suspend_after_the_job_only_when_it_is_set(
     assert launch_checkpoint(result)["resumeBeforeDelivery"] is False
 
 
-def test_checks_the_state_before_the_jobs_after_a_suspend_after_job(
-    run: Any, fake_client: Any, fake_endpoint: Any, suspend_after_ack: Any
+def test_suspends_the_microvm_after_the_job_inside_its_child_context(
+    run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
-    endpoint = fake_endpoint(accept_headers=suspend_after_ack)
+    # No step and no checkpoint of its own: the job's operations are the
+    # child context, the callback, and the request step.
+    client = fake_client(endpoint=fake_endpoint().url)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
+
+    result = run(
+        session_handler(session_config(client), body),
+        None,
+        [("build", succeed_with(1))],
+    )
+
+    assert outcome(result) == {"result": 1}
+    assert client.requests("suspend_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    names = sorted(operation.name for operation in result.operations if operation.name)
+    assert not any("suspend" in name for name in names)
+
+
+def test_suspends_the_microvm_after_a_failed_job_too(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    client = fake_client(endpoint=fake_endpoint().url)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        try:
+            vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
+        except MicrovmJobFailedError as error:
+            return str(error)
+        return None
+
+    result = run(
+        session_handler(session_config(client), body),
+        None,
+        [("build", fail_with("BuildError", "no compiler"))],
+    )
+
+    assert "no compiler" in outcome(result)["result"]
+    assert client.requests("suspend_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_logs_a_warning_and_returns_the_result_when_the_suspend_fails(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    make_error: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(
+        endpoint=endpoint.url,
+        suspends=[make_error("AccessDeniedException", 403)],
+        states=["RUNNING", "RUNNING"],
+    )
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        build = vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
+        return [build, vm.invoke(ctx, "test", job_input=2, options=job())]
+
+    with caplog.at_level(logging.WARNING):
+        result = run(
+            session_handler(session_config(client), body),
+            None,
+            [("build", succeed_with(1)), ("test", succeed_with(2))],
+        )
+
+    assert outcome(result) == {"result": [1, 2]}
+    assert warnings(caplog, SUSPEND_WARNING) == 1
+    # The next job checks the state, as after a suspend that worked.
+    assert len(client.requests("get_microvm")) == 2
+    assert len(endpoint.requests) == 2
+
+
+def test_does_not_suspend_a_job_that_did_not_ask_for_it(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    client = fake_client(endpoint=fake_endpoint().url)
+
+    result = run(
+        session_handler(session_config(client), two_jobs),
+        None,
+        [("build", succeed_with(1)), ("test", succeed_with(2))],
+    )
+
+    assert outcome(result)["result"]["test"] == 2
+    assert client.requests("suspend_microvm") == []
+
+
+def test_checks_the_state_before_the_jobs_after_a_suspend_after_job(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
     client = fake_client(
         endpoint=endpoint.url, states=["RUNNING", "SUSPENDED", "RUNNING"]
     )
@@ -1613,13 +1704,13 @@ def test_checks_the_state_before_the_jobs_after_a_suspend_after_job(
 
 
 def test_sets_the_flag_again_when_a_completed_suspend_after_job_replays(
-    run: Any, fake_client: Any, fake_endpoint: Any, suspend_after_ack: Any
+    run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
     # The second job runs in a later invocation. The first job's child
     # context is complete then, so its function does not run again. invoke()
     # sets the flag before the child context, so the second job still
     # checks the state before delivery.
-    endpoint = fake_endpoint(accept_headers=suspend_after_ack)
+    endpoint = fake_endpoint()
     client = fake_client(
         endpoint=endpoint.url, states=["RUNNING", "SUSPENDED", "RUNNING"]
     )
@@ -1635,13 +1726,15 @@ def test_sets_the_flag_again_when_a_completed_suspend_after_job_replays(
     assert len(client.requests("get_microvm")) == 3
     assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
     assert len(endpoint.requests) == 2
+    # The completed job does not run again on replay. So the session does
+    # not send a second SuspendMicrovm.
+    assert client.requests("suspend_microvm") == [{"microvmIdentifier": "mvm-1"}]
 
 
 def test_resumes_through_the_fallback_after_a_map_item_lost_the_flag(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
-    suspend_after_ack: Any,
     connect_failed: Any,
 ) -> None:
     # 1. Item a asks for a suspend after its job.
@@ -1651,7 +1744,7 @@ def test_resumes_through_the_fallback_after_a_map_item_lost_the_flag(
     # 4. So the job goes to the endpoint of a suspended MicroVM, which
     #    answers 502 MICROVM_CONNECT_FAILED. The step checks the state,
     #    resumes the MicroVM, and sends the job again.
-    endpoint = fake_endpoint([(202, suspend_after_ack), 202, connect_failed])
+    endpoint = fake_endpoint([202, 202, connect_failed])
     client = fake_client(
         endpoint=endpoint.url,
         states=["RUNNING", "RUNNING", "SUSPENDED", "RUNNING"],
@@ -1889,79 +1982,3 @@ def test_a_flagged_session_keeps_the_strict_state_check(
     assert error["error"] == "MicrovmDeliveryError"
     assert "AccessDeniedException message" in error["message"]
     assert len(endpoint.requests) == 1
-
-
-@pytest.mark.parametrize(
-    ("acknowledged", "expected"), [(False, 1), (True, 0)], ids=["old", "new"]
-)
-def test_warns_once_per_session_when_the_worker_ignores_suspend_after(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    suspend_after_ack: Any,
-    caplog: pytest.LogCaptureFixture,
-    acknowledged: bool,  # noqa: FBT001 - a pytest parameter
-    expected: int,
-) -> None:
-    endpoint = fake_endpoint(accept_headers=suspend_after_ack if acknowledged else {})
-    client = fake_client(endpoint=endpoint.url)
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        options = job(suspend_after=True)
-        return [
-            vm.invoke(ctx, "build", job_input=1, options=options),
-            vm.invoke(ctx, "test", job_input=2, options=options),
-        ]
-
-    with caplog.at_level(logging.WARNING):
-        result = run(
-            session_handler(session_config(client), body),
-            None,
-            [("build", succeed_with(1)), ("test", succeed_with(2))],
-        )
-
-    assert outcome(result) == {"result": [1, 2]}
-    assert len(endpoint.requests) == 2
-    assert warnings(caplog, IGNORED_WARNING) == expected
-
-
-def test_reads_no_acknowledgement_for_a_job_without_suspend_after(
-    run: Any, fake_client: Any, fake_endpoint: Any, caplog: pytest.LogCaptureFixture
-) -> None:
-    client = fake_client(endpoint=fake_endpoint().url)
-
-    with caplog.at_level(logging.WARNING):
-        result = run(
-            session_handler(session_config(client), two_jobs),
-            None,
-            [("build", succeed_with(1)), ("test", succeed_with(2))],
-        )
-
-    assert outcome(result)["result"]["test"] == 2
-    assert warnings(caplog, IGNORED_WARNING) == 0
-
-
-def test_remembers_the_warning_of_the_latest_sessions_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(session_module, "_WARNED_SESSIONS", OrderedDict())
-    monkeypatch.setattr(session_module, "_MAX_WARNED_SESSIONS", 2)
-    a, b, c = (
-        MicrovmSession(
-            None,  # type: ignore[arg-type]
-            None,  # type: ignore[arg-type]
-            resume_before_delivery=False,
-            session_id=session_id,
-        )
-        for session_id in ["a", "b", "c"]
-    )
-
-    assert [handle._claim_suspend_after_warning() for handle in (a, b, c)] == [  # noqa: SLF001
-        True,
-        True,
-        True,
-    ]
-    # Each session warns once.
-    assert c._claim_suspend_after_warning() is False  # noqa: SLF001
-    # The oldest session was forgotten.
-    assert a._claim_suspend_after_warning() is True  # noqa: SLF001

@@ -360,38 +360,46 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     """
 
     suspend_after: bool = False
-    """Whether the worker suspends the MicroVM after this job. Defaults to
-    ``False``.
+    """Whether the durable function suspends the MicroVM after this job.
+    Defaults to ``False``.
 
-    The worker suspends the MicroVM when the job has ended and its outcome is
-    reported, and no other job runs. A job that ends while another job runs
-    leaves the request pending. The worker then suspends the MicroVM when
-    the last running job ends. The next job of the session resumes the
-    MicroVM before it is delivered. The ``suspend_after`` job itself checks
-    the state too, because the record is set before the job starts. The
-    setting works with or without
-    :attr:`MicrovmSessionConfig.auto_suspend_on_idle`.
+    The session calls ``SuspendMicrovm`` for the session's MicroVM when the
+    job's result arrives, whether the job succeeded or failed. The call runs
+    inside the job's child context, before the child context returns. It is
+    not a durable operation of its own. The next job of the session checks
+    the MicroVM state before delivery, and resumes a suspended MicroVM.
+
+    Read these rules before you set it:
+
+    1. The durable function suspends the MicroVM after this job's result
+       arrives.
+    2. Do not use it on a job that runs next to other jobs of the session
+       (``map``, ``parallel``, promise combinators). Those jobs freeze until
+       the next job resumes the MicroVM, and can hit their heartbeat
+       timeout.
+    3. The suspend runs inside the job's child context, so it follows the
+       child context replay rules. A result larger than the child context
+       checkpoint limit makes the child context run again on replay, and
+       each run suspends again.
+    4. A retry after the Lambda invocation fails can send the suspend again.
+       Suspending a suspended MicroVM succeeds.
+    5. The function's execution role needs ``lambda:SuspendMicrovm`` on the
+       MicroVM image.
+    6. Adding or removing ``suspend_after`` changes what the session does on
+       replay. Change it only through a new function version.
+
+    A failed ``SuspendMicrovm`` call logs a warning and does not fail the
+    job. The MicroVM then keeps running until the next job or the end of
+    the session.
 
     Set it on the job before a long wait, such as a durable wait or a
-    callback. Do not set it on back-to-back jobs, on ``map`` items, or on
-    the last job of the session. Each suspend and resume costs a snapshot
-    and about 1 second of latency for the next job. The session terminates
-    the MicroVM after its last job anyway.
+    callback. Do not set it on back-to-back jobs or on the last job of the
+    session. Each suspend and resume costs a snapshot and about 1 second of
+    latency for the next job. The session terminates the MicroVM after its
+    last job anyway. The image must enable the ``resume`` hook, and the
+    function's role needs ``lambda:GetMicrovm`` and ``lambda:ResumeMicrovm``.
 
-    It needs more than a session without suspending:
-
-    1. The image enables the ``resume`` hook. Without it, the next job waits
-       up to 30 seconds of HTTP 503 answers.
-    2. The function's role has ``lambda:GetMicrovm`` and
-       ``lambda:ResumeMicrovm``.
-    3. The MicroVM's role has ``lambda:SuspendMicrovm`` on the image.
-    4. The worker supports the setting. An older worker ignores it, and the
-       MicroVM keeps running. Each execution environment then logs one
-       warning per session.
-
-    A suspend that the service refuses for now is not retried, unless
-    :attr:`MicrovmSessionConfig.auto_suspend_on_idle` is ``True``. Only
-    :meth:`MicrovmSession.invoke` accepts it. :func:`microvm` raises
+    Only :meth:`MicrovmSession.invoke` accepts it. :func:`microvm` raises
     ``ValidationError`` for it. A value that is not a ``bool`` raises
     ``ValidationError`` too.
     """

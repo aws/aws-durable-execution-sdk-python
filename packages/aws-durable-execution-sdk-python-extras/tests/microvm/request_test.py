@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 from aws_durable_execution_sdk_python_microvm_worker import MICROVM_JOB_PATH
-from aws_durable_execution_sdk_python_microvm_worker import worker
 
 from aws_durable_execution_sdk_python_extras.microvm import (
     DEFAULT_MICROVM_JOB_PATH,
@@ -56,11 +55,6 @@ def options(
 
 def test_matches_the_job_path_of_the_worker() -> None:
     assert DEFAULT_MICROVM_JOB_PATH == MICROVM_JOB_PATH
-
-
-def test_matches_the_suspend_after_header_of_the_worker() -> None:
-    assert request.SUSPEND_AFTER_HEADER == worker.SUSPEND_AFTER_HEADER
-    assert request.SUSPEND_AFTER_ACCEPTED == "accepted"
 
 
 def test_posts_the_job_with_an_auth_token(fake_client: Any, fake_endpoint: Any) -> None:
@@ -646,7 +640,7 @@ def test_sends_no_auth_token_on_a_redirect_that_the_callers_opener_follows(
 
 
 # ---------------------------------------------------------------------------
-# The check for a suspended MicroVM, and the suspendAfter acknowledgement
+# The check for a suspended MicroVM
 # ---------------------------------------------------------------------------
 
 
@@ -814,50 +808,3 @@ def test_adds_no_note_when_the_note_is_none(
         )
 
     assert str(raised.value).endswith("Last failure: HTTP 503.")
-
-
-@pytest.mark.parametrize(
-    ("headers", "ignored"),
-    [
-        ({"X-Microvm-Suspend-After": "accepted"}, 0),
-        ({}, 1),
-        ({"X-Microvm-Suspend-After": "yes"}, 1),
-    ],
-    ids=["acknowledged", "no-header", "other-value"],
-)
-def test_reports_a_suspend_after_job_that_the_worker_did_not_acknowledge(
-    fake_client: Any, fake_endpoint: Any, headers: dict[str, str], ignored: int
-) -> None:
-    endpoint = fake_endpoint(accept_headers=headers)
-    calls: list[None] = []
-
-    status = send_job(
-        options(
-            fake_client(),
-            endpoint.url,
-            [],
-            on_suspend_after_ignored=lambda: calls.append(None),
-        )
-    )
-
-    assert status == 202
-    assert len(calls) == ignored
-
-
-def test_reads_the_acknowledgement_of_the_answer_that_accepted_the_job(
-    fake_client: Any, fake_endpoint: Any, suspend_after_ack: dict[str, str]
-) -> None:
-    # A refused answer that carries the header does not count.
-    endpoint = fake_endpoint([(503, suspend_after_ack)])
-    calls: list[None] = []
-
-    send_job(
-        options(
-            fake_client(),
-            endpoint.url,
-            [],
-            on_suspend_after_ignored=lambda: calls.append(None),
-        )
-    )
-
-    assert calls == [None]

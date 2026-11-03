@@ -73,13 +73,6 @@ _REQUEST_TIMEOUT_SECONDS = 10.0
 _AUTH_TOKEN_MINUTES = 5
 _PORT_HEADER = "X-aws-proxy-port"
 
-SUSPEND_AFTER_HEADER = "X-Microvm-Suspend-After"
-"""The header with which a worker acknowledges ``suspendAfter`` in its 202
-answer. Its value is :data:`SUSPEND_AFTER_ACCEPTED`. The JavaScript SDK
-uses the same header."""
-
-SUSPEND_AFTER_ACCEPTED = "accepted"
-
 _PROXY_ERROR_HEADER = "x-aws-proxy-error"
 _CONNECT_FAILED = "MICROVM_CONNECT_FAILED"
 """The endpoint answers HTTP 502 with ``x-aws-proxy-error:
@@ -259,9 +252,9 @@ class SendJobOptions:
     """Resume the MicroVM if it is suspended, and return its current
     endpoint.
 
-    A session job without :attr:`recheck` sets it. A worker can suspend the
-    MicroVM after a ``suspend_after`` job, and the session can lose the
-    record of that job on replay. A suspended or suspending MicroVM gets no
+    A session job without :attr:`recheck` sets it. A session can suspend the
+    MicroVM after a ``suspend_after`` job, and can lose the record of that
+    job on replay. A suspended or suspending MicroVM gets no
     answer to a request, or its endpoint answers HTTP 502 with
     ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. So the next attempt calls
     it after either sign, at most once per 2 seconds. A booting MicroVM's
@@ -274,13 +267,6 @@ class SendJobOptions:
     unavailable_note: Callable[[], str | None] | None = None
     """A sentence to add to the message of
     :class:`MicrovmEndpointUnavailableError`, or ``None``."""
-    on_suspend_after_ignored: Callable[[], None] | None = None
-    """Called when the answer that accepted the job lacks the header
-    ``X-Microvm-Suspend-After: accepted``.
-
-    A ``suspend_after`` job sets it. A worker that supports the field sends
-    the header. An older worker ignores the field, and the MicroVM keeps
-    running after the job."""
 
 
 def require_time_for_call(remaining_seconds: Callable[[], float | None]) -> None:
@@ -363,11 +349,6 @@ def send_job(options: SendJobOptions) -> int:
     ``x-aws-proxy-error: MICROVM_CONNECT_FAILED`` or a request without an
     answer, at most once per 2 seconds. The function then sends the job
     again to the endpoint that the check reports.
-
-    A ``suspend_after`` job also reads the answer that accepted it. A worker
-    that supports the field answers with ``X-Microvm-Suspend-After:
-    accepted``. Without that header, the function calls
-    ``on_suspend_after_ignored``.
 
     The same job can reach the route more than once:
 
@@ -469,11 +450,6 @@ def send_job(options: SendJobOptions) -> int:
             options.logger.info(
                 "MicroVM job accepted", extra={"attempt": attempt, "status": status}
             )
-            if (
-                options.on_suspend_after_ignored is not None
-                and answer.suspend_after != SUSPEND_AFTER_ACCEPTED
-            ):
-                options.on_suspend_after_ignored()
             return status
         if status is None:
             last_failure = answer.failure
@@ -632,8 +608,6 @@ class _Answer:
     """Whether the endpoint answered 502 with ``x-aws-proxy-error:
     MICROVM_CONNECT_FAILED``. It answers so for a suspending or suspended
     MicroVM."""
-    suspend_after: str | None = None
-    """The value of the ``X-Microvm-Suspend-After`` header of a 2xx answer."""
 
 
 def _post_within(
@@ -684,7 +658,6 @@ def _post(
                 return _Answer(response.status, followed_redirect=True)
             return _Answer(
                 response.status,
-                suspend_after=response.headers.get(SUSPEND_AFTER_HEADER),
             )
     except urllib.error.HTTPError as error:
         has_location = bool(error.headers and error.headers.get("Location"))

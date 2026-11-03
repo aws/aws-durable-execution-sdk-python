@@ -1,4 +1,4 @@
-"""Run two jobs in one Lambda MicroVM that the worker suspends after the first.
+"""Run two jobs in one Lambda MicroVM that the function suspends after the first.
 
 The MicroVM runs the image that scripts/ensure_microvm_image.py builds from
 microvm-image/. The image's routes /write and /read write and read a file in
@@ -6,7 +6,8 @@ the MicroVM. The image enables the resume hook. So the worker accepts the
 next job as soon as the MicroVM resumes.
 
 The session does not suspend when idle. The first job sets suspend_after, so
-the worker suspends the MicroVM after that job. A callback named gate holds
+the durable function calls SuspendMicrovm after that job's result arrives.
+The function's role needs lambda:SuspendMicrovm on the image. A callback named gate holds
 the second job. The caller completes the callback with
 SendDurableExecutionCallbackSuccess to start the second job.
 """
@@ -64,8 +65,7 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
     key: str = event["key"]
 
     def write_gate_read(vm: MicrovmSession, session_context: DurableContext) -> Any:
-        # The worker suspends the MicroVM when this job has ended and its
-        # result is reported.
+        # The session suspends the MicroVM when this job's result arrives.
         written = vm.invoke(
             session_context,
             "write",
@@ -83,7 +83,7 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
         # 1. The first job has ended before the gate starts.
         # 2. The second job starts only after the caller completes the gate.
         # 3. So no job runs while the gate is pending.
-        # 4. So the worker suspends the MicroVM after the first job.
+        # 4. So the session suspends the MicroVM after the first job.
         # 5. So a caller that sees the MicroVM SUSPENDED while the gate is
         #    pending sees a suspend between the two jobs.
         # The callback result carries no data. So the handler ignores it.
