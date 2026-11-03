@@ -892,16 +892,25 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span_id_override=span_id_override,
         )
 
+        end_timestamp = to_otel_timestamp(
+            end_time or datetime.datetime.now(datetime.UTC)
+        )
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
-            record_error_object_exception(span, info.error)
+            record_error_object_exception(span, info.error, timestamp=end_timestamp)
+        elif info.status in {
+            OperationStatus.FAILED,
+            OperationStatus.TIMED_OUT,
+            OperationStatus.STOPPED,
+        }:
+            span.set_status(StatusCode.ERROR)
         elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
         self._note_parent_end(info.parent_id, end_time)
         popped = self._pop_span(info.operation_id)
         if popped is not None:
-            popped.end(end_time=_to_otel_timestamp(end_time))
+            popped.end(end_time=end_timestamp)
 
     def _start_span(
         self,
@@ -1024,18 +1033,20 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             and info.outcome is not UserFunctionOutcome.INCOMPLETE
         ):
             span.set_attributes(self._operation_attributes(info))
+            end_timestamp = to_otel_timestamp(
+                end_time or datetime.datetime.now(datetime.UTC)
+            )
             if info.outcome is UserFunctionOutcome.FAILED:
                 span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
-                record_error_object_exception(span, info.error)
+                record_error_object_exception(span, info.error, timestamp=end_timestamp)
             else:
                 span.set_status(StatusCode.OK)
 
-            end_time = ensure_end_after_start(info.start_time, info.end_time)
             popped = self._pop_span(key)
             if popped is not None:
-                popped.end(end_time=_to_otel_timestamp(end_time))
+                popped.end(end_time=end_timestamp)
 
         # Restore the enclosing context by releasing the scope this user
         # function attached, so the parent operation (or, at the top level, the
