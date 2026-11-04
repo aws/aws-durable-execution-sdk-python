@@ -13,15 +13,16 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import re
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import boto3
 import pytest
 import yaml
 from aws_durable_execution_sdk_python.execution import InvocationStatus
-from aws_durable_execution_sdk_python_telemetry_exporter import CloudWatchLogsExporter
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
 
@@ -217,25 +218,44 @@ def load_handler_module(module: str) -> ModuleType:
     return loaded
 
 
+LOG_GROUP_NAME = "/aws/lambda/telemetry-test"
+
+
+class FakeLogsClient:
+    """Stands in for the boto3 ``logs`` client and records each PutLogEvents call."""
+
+    def __init__(self) -> None:
+        self.put_log_events_calls: list[dict[str, Any]] = []
+
+    def create_log_stream(self, **_kwargs: Any) -> None:
+        return None
+
+    def put_log_events(self, **kwargs: Any) -> None:
+        self.put_log_events_calls.append(kwargs)
+
+    def records(self) -> list[dict[str, Any]]:
+        """Return the JSON record of every log event, in send order."""
+        return [
+            json.loads(event["message"])
+            for call in self.put_log_events_calls
+            for event in call["logEvents"]
+        ]
+
+
 @pytest.fixture
-def exported_records(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Capture what the handler's exporter would write to CloudWatch Logs.
+def logs_client(monkeypatch: pytest.MonkeyPatch) -> FakeLogsClient:
+    """Give the handler's exporter a fake ``logs`` client.
 
-    The handler constructs ``CloudWatchLogsExporter`` itself, so the capture
-    replaces ``export`` on the class. The captured value is the rendered
-    record with ``operationsByName``, which is the shape the suite asserts.
+    The handler constructs ``CloudWatchLogsExporter`` at import, and the
+    exporter calls ``boto3.client("logs")`` in its constructor. botocore
+    resolves credentials when it creates a client, so a real client would
+    touch the credential chain and IMDS. The fake keeps the test on the real
+    ``export`` and ``render`` path and stops at the AWS API boundary.
     """
-    records: list[dict[str, Any]] = []
-
-    def capture(self: CloudWatchLogsExporter, record: dict[str, Any]) -> None:
-        records.append(self.render(record))
-
-    monkeypatch.setenv("TELEMETRY_LOG_GROUP_NAME", "/aws/lambda/telemetry-test")
-    # The exporter builds a boto3 client at construction. Client construction
-    # needs a region and no credentials.
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    monkeypatch.setattr(CloudWatchLogsExporter, "export", capture)
-    return records
+    client = FakeLogsClient()
+    monkeypatch.setenv("TELEMETRY_LOG_GROUP_NAME", LOG_GROUP_NAME)
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+    return client
 
 
 @pytest.mark.parametrize("module", sorted(EXPECTED_MODULES))
@@ -249,7 +269,7 @@ def test_handler_module_fails_fast_without_log_group(
 
 
 def test_telemetry_1_handler_succeeds_and_records_the_step(
-    exported_records: list[dict[str, Any]],
+    logs_client: FakeLogsClient,
 ) -> None:
     module = load_handler_module("telemetry_1_success")
 
@@ -259,8 +279,9 @@ def test_telemetry_1_handler_succeeds_and_records_the_step(
         result = runner.run(input='{"value": 1}')
 
     assert result.status is InvocationStatus.SUCCEEDED
-    assert len(exported_records) == 1
-    record = exported_records[0]
+    assert len(logs_client.put_log_events_calls) == 1
+    assert logs_client.put_log_events_calls[0]["logGroupName"] == LOG_GROUP_NAME
+    record = logs_client.records()[0]
     assert record["status"] == "SUCCEEDED"
     increment = record["operationsByName"]["increment"]
     assert increment["type"] == "STEP"
@@ -269,7 +290,7 @@ def test_telemetry_1_handler_succeeds_and_records_the_step(
 
 
 def test_telemetry_2_handler_fails_with_payment_failed_after_one_attempt(
-    exported_records: list[dict[str, Any]],
+    logs_client: FakeLogsClient,
 ) -> None:
     """telemetry-2 pins both messages through ExpectedResult and ExpectedExecutionHistory."""
     module = load_handler_module("telemetry_2_failure")
@@ -282,8 +303,9 @@ def test_telemetry_2_handler_fails_with_payment_failed_after_one_attempt(
     assert result.status is InvocationStatus.FAILED
     assert result.error is not None
     assert result.error.message == "payment failed"
-    assert len(exported_records) == 1
-    record = exported_records[0]
+    assert len(logs_client.put_log_events_calls) == 1
+    assert logs_client.put_log_events_calls[0]["logGroupName"] == LOG_GROUP_NAME
+    record = logs_client.records()[0]
     assert record["status"] == "FAILED"
     assert "output" not in record
     assert record["error"]["message"] == "payment failed"
