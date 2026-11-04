@@ -110,17 +110,32 @@ def create_otel_plugin_factory(
 ) -> InvocationOtelPluginFactory: ...
 
 
+# A mode read from configuration at runtime is a plain ``str``, which neither
+# literal overload accepts. This last overload keeps that call type-checkable;
+# the union it returns is what a caller can know without a literal, and an
+# unsupported value still raises ``ValueError`` below.
+@overload
 def create_otel_plugin_factory(
     config: OtelPluginConfig | None = None,
     *,
-    mode: Literal["execution", "invocation"] = "execution",
-) -> ExecutionOtelPluginFactory | InvocationOtelPluginFactory:
-    """Return the selected factory, defaulting to the execution view.
+    mode: str,
+) -> ExecutionOtelPluginFactory | InvocationOtelPluginFactory: ...
 
-    The SDK calls this factory for each invocation, creating an isolated
-    plugin while preserving the selected view's registration metadata.
-    Configuration is passed unchanged to the existing factory. Omitted
-    configuration uses the globally configured OpenTelemetry provider.
+
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: str = "execution",
+) -> ExecutionOtelPluginFactory | InvocationOtelPluginFactory:
+    """Return a new factory for the selected view, defaulting to execution.
+
+    Each call constructs a factory of the selected view's class, carrying that
+    view's ``exclusive_group`` and registration metadata. Calls are not
+    memoized, so register exactly one: two factories of the same view in
+    ``plugins`` are rejected at registration as a duplicate in the
+    ``durable-otel-view`` exclusive group. Configuration is passed unchanged to
+    that class. Omitted configuration uses the globally configured OpenTelemetry
+    provider, resolved per invocation rather than here.
 
     Args:
         config: Existing OTel plugin configuration.
@@ -141,4 +156,9 @@ INVOCATION_OTEL_PLUGIN_FACTORY = InvocationOtelPluginFactory()
 """Default-configured factory named by the ``otel-invocation`` entry point."""
 
 EXECUTION_OTEL_PLUGIN_FACTORY = ExecutionOtelPluginFactory()
-"""Default-configured factory named by the ``otel-execution`` entry point."""
+"""Default-configured factory named by the ``otel`` and ``otel-execution`` entry points.
+
+Both names resolve to this one object, so ``DURABLE_EXECUTION_PLUGINS=otel,otel-execution``
+loads a single factory: the loader skips the second by identity and logs a warning.
+``otel`` with ``otel-invocation`` names two different views and is rejected.
+"""

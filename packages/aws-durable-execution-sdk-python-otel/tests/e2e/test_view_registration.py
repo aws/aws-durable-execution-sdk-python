@@ -419,12 +419,39 @@ def test_default_alias_conflicts_with_explicit_invocation_view(
     assert not exporter.get_finished_spans()
 
 
+@pytest.mark.parametrize(
+    "entry_names", ["otel,otel-invocation", "otel-invocation,otel"]
+)
+def test_default_alias_conflicts_with_environment_invocation_view(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    entry_names: str,
+) -> None:
+    """Two different views are rejected whichever order they are listed in.
+
+    The same pair is rejected by the Java SDK's exclusive-group validation, so
+    the one-view contract holds across both regardless of alias ordering.
+    """
+    _, exporter = telemetry
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", entry_names)
+    with pytest.raises(PluginLoadError, match="Keep only one"):
+        durable_execution(_handler)
+    assert not exporter.get_finished_spans()
+
+
 @pytest.mark.parametrize("entry_names", ["otel", "otel,otel-execution"])
 def test_default_alias_loads_one_execution_view(
     telemetry: tuple[TracerProvider, InMemorySpanExporter],
     monkeypatch: pytest.MonkeyPatch,
     entry_names: str,
 ) -> None:
+    """Aliases of the same view dedup by factory identity rather than failing.
+
+    ``otel`` and ``otel-execution`` name one object, so the loader skips the
+    second and a single execution view is instrumented. The Java SDK builds a
+    separate factory per provider and rejects this pair instead; the READMEs
+    tell operators to set exactly one name in both languages.
+    """
     _, exporter = telemetry
     monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", entry_names)
 
