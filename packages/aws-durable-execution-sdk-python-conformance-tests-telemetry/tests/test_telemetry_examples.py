@@ -12,12 +12,17 @@ cloud deployment runs. So these tests pin that wiring locally.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 import yaml
+from aws_durable_execution_sdk_python.execution import InvocationStatus
+from aws_durable_execution_sdk_python_telemetry_exporter import CloudWatchLogsExporter
+from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
 
 PKG_DIR = Path(__file__).resolve().parents[1]
@@ -199,19 +204,93 @@ def test_global_function_settings_match_the_contract(
     }
 
 
+def load_handler_module(module: str) -> ModuleType:
+    """Execute ``src/<module>.py`` from its file, as the Lambda runtime does.
+
+    ``src/`` is not a package, so the module is loaded by path. Executing the
+    module runs the import-time environment guard and constructs the plugin.
+    """
+    spec = importlib.util.spec_from_file_location(module, SRC_DIR / f"{module}.py")
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+@pytest.fixture
+def exported_records(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture what the handler's exporter would write to CloudWatch Logs.
+
+    The handler constructs ``CloudWatchLogsExporter`` itself, so the capture
+    replaces ``export`` on the class. The captured value is the rendered
+    record with ``operationsByName``, which is the shape the suite asserts.
+    """
+    records: list[dict[str, Any]] = []
+
+    def capture(self: CloudWatchLogsExporter, record: dict[str, Any]) -> None:
+        records.append(self.render(record))
+
+    monkeypatch.setenv("TELEMETRY_LOG_GROUP_NAME", "/aws/lambda/telemetry-test")
+    # The exporter builds a boto3 client at construction. Client construction
+    # needs a region and no credentials.
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setattr(CloudWatchLogsExporter, "export", capture)
+    return records
+
+
 @pytest.mark.parametrize("module", sorted(EXPECTED_MODULES))
-def test_handler_reads_the_log_group_from_the_environment(module: str) -> None:
-    source: str = (SRC_DIR / f"{module}.py").read_text(encoding="utf-8")
+def test_handler_module_fails_fast_without_log_group(
+    monkeypatch: pytest.MonkeyPatch, module: str
+) -> None:
+    monkeypatch.delenv("TELEMETRY_LOG_GROUP_NAME", raising=False)
 
-    assert 'os.environ.get("TELEMETRY_LOG_GROUP_NAME")' in source
-    assert "raise RuntimeError" in source
-    assert "CloudWatchLogsExporter(log_group_name=log_group_name)" in source
+    with pytest.raises(RuntimeError, match="TELEMETRY_LOG_GROUP_NAME must be set"):
+        load_handler_module(module)
 
 
-def test_telemetry_2_handler_raises_the_pinned_messages() -> None:
+def test_telemetry_1_handler_succeeds_and_records_the_step(
+    exported_records: list[dict[str, Any]],
+) -> None:
+    module = load_handler_module("telemetry_1_success")
+
+    with DurableFunctionTestRunner(
+        handler=module.handler, execution_timeout=15
+    ) as runner:
+        result = runner.run(input='{"value": 1}')
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert len(exported_records) == 1
+    record = exported_records[0]
+    assert record["status"] == "SUCCEEDED"
+    increment = record["operationsByName"]["increment"]
+    assert increment["type"] == "STEP"
+    assert increment["status"] == "SUCCEEDED"
+    assert increment["count"] == 1
+
+
+def test_telemetry_2_handler_fails_with_payment_failed_after_one_attempt(
+    exported_records: list[dict[str, Any]],
+) -> None:
     """telemetry-2 pins both messages through ExpectedResult and ExpectedExecutionHistory."""
-    source: str = (SRC_DIR / "telemetry_2_failure.py").read_text(encoding="utf-8")
+    module = load_handler_module("telemetry_2_failure")
 
-    assert 'raise RuntimeError("card declined")' in source
-    assert 'raise RuntimeError("payment failed") from error' in source
-    assert "RetryPresets.none()" in source
+    with DurableFunctionTestRunner(
+        handler=module.handler, execution_timeout=15
+    ) as runner:
+        result = runner.run(input="{}")
+
+    assert result.status is InvocationStatus.FAILED
+    assert result.error is not None
+    assert result.error.message == "payment failed"
+    assert len(exported_records) == 1
+    record = exported_records[0]
+    assert record["status"] == "FAILED"
+    assert "output" not in record
+    assert record["error"]["message"] == "payment failed"
+    charge = record["operationsByName"]["charge"]
+    assert charge["type"] == "STEP"
+    assert charge["status"] == "FAILED"
+    assert charge["count"] == 1
+    assert charge["failedCount"] == 1
+    assert charge["maxAttempt"] == 1
+    assert charge["error"]["message"] == "card declined"

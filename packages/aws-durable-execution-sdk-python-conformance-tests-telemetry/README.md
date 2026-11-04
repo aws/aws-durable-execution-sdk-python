@@ -31,7 +31,7 @@ src/
   requirements.txt           # core SDK + telemetry exporter, pinned to ${PYTHON_SDK_REF}
 template.yaml                # declares TelemetryLogGroupName and creates the group
 tests/
-  test_telemetry_examples.py # guards template -> handler wiring and the parameter contract
+  test_telemetry_examples.py # guards template -> handler wiring; runs each handler locally
 ```
 
 The handler uses the real SDK API only.
@@ -61,7 +61,10 @@ export PYTHON_SDK_REF=$(git rev-parse HEAD)   # must already be pushed
 sam build --template packages/aws-durable-execution-sdk-python-conformance-tests-telemetry/template.yaml
 ```
 
-Run the wiring tests from the repository root:
+Run the package tests from the repository root. They check the template wiring, and
+they run each handler through `DurableFunctionTestRunner` with the exporter's `export`
+captured, so a handler that stops producing its requirement's record fails here before
+a cloud run:
 
 ```bash
 hatch run test:all packages/aws-durable-execution-sdk-python-conformance-tests-telemetry/tests
