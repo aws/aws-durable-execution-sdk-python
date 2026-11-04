@@ -126,7 +126,7 @@ The worker creates a `lambda-microvms` client for each suspend, and closes it af
 
 ## Suspending after a job
 
-The durable function suspends a session's MicroVM after a job. `vm.invoke` with `suspend_after=True` calls `SuspendMicrovm` itself, from the durable function, after the job's result arrives. The job request carries no field for it, and the worker does nothing for it. A request from an older durable function can still carry `"suspendAfter": true`. The worker ignores the field, sends no `X-Microvm-Suspend-After` header, and does not suspend.
+The durable function suspends a session's MicroVM after a job. `vm.invoke` with `suspend_after=True` calls `SuspendMicrovm` itself, from the durable function, after the job's result arrives. The job request carries no field for it, and the worker does nothing for it.
 
 So the MicroVM's execution role needs no `lambda:SuspendMicrovm` for this case. The durable function's role needs it. See the [extras README](../aws-durable-execution-sdk-python-extras/README.md#suspending-after-a-job).
 
@@ -181,7 +181,7 @@ The `runHookPayload` string holds:
 }
 ```
 
-`job` is absent when the job arrives over HTTP. An HTTP job request body has the job fields at the top level, with `version`, `region`, and an optional `microvmId`. `MicrovmJobRequest` holds those job fields in its `job` attribute. The worker ignores a `suspendAfter` field.
+`job` is absent when the job arrives over HTTP. An HTTP job request body has the job fields at the top level, with `version`, `region`, and an optional `microvmId`. `MicrovmJobRequest` holds those job fields in its `job` attribute.
 
 A document that does not match raises `InvalidRunHookPayloadError`. When the document named a non-empty callback ID, the error carries `callback_id` and `region`, so the worker can fail that callback at once.
 
