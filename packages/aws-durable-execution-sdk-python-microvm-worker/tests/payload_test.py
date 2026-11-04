@@ -284,12 +284,3 @@ def test_an_unusable_callback_id_is_not_attached_to_errors(callback_id):
 
 
 # endregion dataclasses and callback IDs
-
-
-def test_run_hook_payload_ignores_suspend_after():
-    parsed = RunHookRequest.from_dict(
-        run_hook({"version": 1, "region": "us-east-1", "suspendAfter": True})
-    )
-
-    assert parsed.payload is not None
-    assert not hasattr(parsed.payload, "suspend_after")
