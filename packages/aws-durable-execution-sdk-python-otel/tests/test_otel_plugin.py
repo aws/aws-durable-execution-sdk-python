@@ -60,7 +60,11 @@ def test_factory_preserves_configuration_and_registration(
         assert type(factory) is expected
         assert factory.config is config
         assert factory.__durable_registration_api__ == 1
-        assert factory.exclusive_group == expected.exclusive_group
+        # Assert the literal. Comparing the instance attribute to its own
+        # class attribute holds for any value, so it would not catch a wrong
+        # group name. Both views share one group, which is what makes them
+        # mutually exclusive.
+        assert factory.exclusive_group == "aws-durable-execution-otel-view"
     finally:
         if provider is not None:
             provider.shutdown()
