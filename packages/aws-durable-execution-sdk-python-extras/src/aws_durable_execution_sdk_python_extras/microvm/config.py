@@ -391,8 +391,8 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
        replay. Change it only through a new function version.
 
     A failed ``SuspendMicrovm`` call logs a warning and does not fail the
-    job. The MicroVM then keeps running until the next job or the end of
-    the session. The call ends at the invocation reserve, like the other
+    job. The MicroVM may then still be running until the next job or the
+    end of the session. The call ends at the invocation reserve, like the other
     calls of the session, and that counts as a failed call.
 
     Set it on the job before a long wait, such as a durable wait or a

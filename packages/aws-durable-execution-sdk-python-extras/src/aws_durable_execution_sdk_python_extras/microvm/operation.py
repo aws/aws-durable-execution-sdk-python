@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -114,6 +115,20 @@ timeout records no outcome for its step attempt. These limits keep one step
 attempt to about 2 minutes. The launch is idempotent through its client token,
 so an attempt that ran out of time is repeated, not doubled.
 """
+
+_SUSPEND_BEFORE_SEND = "before-send.lambda-microvms.SuspendMicrovm"
+"""botocore emits this event before each attempt of a ``SuspendMicrovm``
+call."""
+
+
+class _SuspendStoppedError(Exception):
+    """The session's ``SuspendMicrovm`` call stopped an attempt before it was
+    sent.
+
+    botocore retries only its own connection and HTTP client errors. So it
+    does not retry this one.
+    """
+
 
 RUN_HOOK_DELIVERY = "run-hook"
 """The delivery in which the job goes in the ``runHookPayload`` of the launch."""
@@ -759,19 +774,83 @@ class _MicrovmScope:
         fail the job. The next job of the session checks the MicroVM state
         and resumes it when needed, and suspending a suspended MicroVM
         succeeds.
+
+        The call makes one attempt, and it sends no attempt after the
+        invocation reserve:
+
+        1. The wait for the call ends at the reserve, and the call goes on
+           in its thread. Lambda freezes that thread after the invocation
+           returns.
+        2. A later invocation can find the MicroVM ``RUNNING`` and deliver
+           the next job.
+        3. The old thread then resumes. An attempt that it sent then, or a
+           botocore retry of an attempt that lost its answer, would suspend
+           the MicroVM with the next job inside.
+
+        So a ``before-send`` handler on the client stops each attempt after
+        the first one, and any attempt after the reserve. botocore does not
+        retry that error. The handler also covers a caller's client that
+        retries. It acts only on attempts of the thread that runs this call,
+        so other calls of a shared client are not affected. The handler is
+        removed when the call ends. A client without ``meta.events``, such
+        as a test double, gets no handler.
+
+        botocore cannot cancel an attempt in flight. So an attempt sent
+        before the reserve can still reach the service after it, and after
+        the next job started. This method cannot prevent that. Such an
+        attempt can then freeze the next job, which waits until a later job
+        resumes the MicroVM or its heartbeat timeout ends it. The client's
+        connect and read timeouts bound how long the attempt can take: 5
+        and 30 seconds for the default client.
         """
+        deadline = reserve_starts_at(_remaining_seconds(child))
+        abandoned = threading.Event()
 
         def expired() -> Exception:
+            abandoned.set()
             return TimeoutError(
                 "SuspendMicrovm did not end before the invocation reserve"
             )
 
-        try:
-            call_before_deadline(
-                lambda: self._client().suspend_microvm(microvmIdentifier=microvm_id),
-                reserve_starts_at(_remaining_seconds(child)),
-                expired,
+        def call() -> None:
+            client = self._client()
+            caller = threading.get_ident()
+            attempts = 0
+
+            def stop_attempt(**_: object) -> None:
+                nonlocal attempts
+                if threading.get_ident() != caller:
+                    return
+                attempts += 1
+                if attempts > 1:
+                    msg = (
+                        "SuspendMicrovm makes one attempt. A retry could "
+                        "suspend the MicroVM after the next job started."
+                    )
+                    raise _SuspendStoppedError(msg)
+                if abandoned.is_set() or (
+                    deadline is not None and time.monotonic() >= deadline
+                ):
+                    msg = "SuspendMicrovm did not start before the invocation reserve"
+                    raise _SuspendStoppedError(msg)
+
+            events = getattr(getattr(client, "meta", None), "events", None)
+            if events is None:
+                client.suspend_microvm(microvmIdentifier=microvm_id)
+                return
+            # A fresh ID per call. botocore ignores a second registration
+            # with an ID it already has.
+            unique_id = f"aws-durable-execution-microvm-suspend-{uuid.uuid4().hex}"
+            events.register_first(
+                _SUSPEND_BEFORE_SEND, stop_attempt, unique_id=unique_id
             )
+            try:
+                client.suspend_microvm(microvmIdentifier=microvm_id)
+            finally:
+                events.unregister(_SUSPEND_BEFORE_SEND, unique_id=unique_id)
+
+        try:
+            call_before_deadline(call, deadline, expired)
         except Exception as error:  # noqa: BLE001
             detail = (
                 str(add_request_id("SuspendMicrovm", error))
@@ -780,9 +859,9 @@ class _MicrovmScope:
             )
             child.logger.warning(
                 f'MicroVM "{self.name}": SuspendMicrovm failed for {microvm_id}. '
-                "The MicroVM keeps running and is billed until the idle suspend "
-                "or the end of the session. The next job checks its state. A "
-                "missing permission needs lambda:SuspendMicrovm in the "
+                "The MicroVM may still be running and billed until the idle "
+                "suspend or the end of the session. The next job checks its "
+                "state. A missing permission needs lambda:SuspendMicrovm in the "
                 f"function's execution role. Error: {detail}",
                 extra={"microvmId": microvm_id, "error": detail},
             )

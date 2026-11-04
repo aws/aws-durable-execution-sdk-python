@@ -37,7 +37,10 @@ from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
 )
-from botocore.exceptions import ClientError
+from botocore.awsrequest import AWSResponse, HTTPHeaders
+from botocore.config import Config
+from botocore.exceptions import ClientError, ConnectionClosedError
+from botocore.retries.standard import ExponentialBackoff
 from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
@@ -1536,8 +1539,8 @@ def test_makes_no_state_check_for_a_launch_checkpoint_without_a_bool_resume_mode
 # ---------------------------------------------------------------------------
 
 SUSPEND_WARNING_START = (
-    'MicroVM "pipeline": SuspendMicrovm failed for mvm-1. The MicroVM keeps '
-    "running and is billed until the idle suspend or the end of the session. "
+    'MicroVM "pipeline": SuspendMicrovm failed for mvm-1. The MicroVM may still '
+    "be running and billed until the idle suspend or the end of the session. "
     "The next job checks its state. A missing permission needs "
     "lambda:SuspendMicrovm in the function's execution role. Error: "
 )
@@ -1852,6 +1855,248 @@ def test_ends_the_suspend_at_the_invocation_reserve_and_returns_the_result(
     [warning] = suspend_warnings(caplog)
     assert warning.startswith(SUSPEND_WARNING_START)
     assert "did not end before the invocation reserve" in warning
+
+
+class _Body:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def stream(self, **_: Any) -> Any:
+        yield self._data
+
+
+def _botocore_suspends(
+    fake_client: Any, monkeypatch: pytest.MonkeyPatch, **fields: Any
+) -> tuple[Any, Any]:
+    """A fake client whose ``suspend_microvm`` is a real botocore call.
+
+    The botocore client has the default client's three attempts and no
+    retry delay. Returns the fake client and the botocore client. The fake
+    client's ``suspend_done`` is set when a call ends.
+    """
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    botocore_client = boto3.session.Session().client(
+        "lambda-microvms",
+        region_name="us-west-2",
+        config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
+    )
+
+    class Client(fake_client):  # type: ignore[misc, valid-type]
+        meta = botocore_client.meta
+        suspend_done = threading.Event()
+
+        def suspend_microvm(self, **request: Any) -> Any:
+            try:
+                return botocore_client.suspend_microvm(**request)
+            finally:
+                self.suspend_done.set()
+
+    return Client(**fields), botocore_client
+
+
+def _ok_answer() -> AWSResponse:
+    return AWSResponse(
+        "https://lambda.us-west-2.amazonaws.com", 200, HTTPHeaders(), _Body(b"{}")
+    )
+
+
+def _wait_until(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + WAIT
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+@pytest.mark.parametrize(
+    "answer_lost", [False, True], ids=["held-before-send", "answer-lost"]
+)
+def test_sends_no_suspend_attempt_after_the_reserve_when_the_next_job_runs(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    answer_lost: bool,
+) -> None:
+    # 1. The suspend call is still running at the invocation reserve. The
+    #    session stops waiting for it, and the call goes on in its thread.
+    #    In Lambda, that thread freezes after the invocation returns.
+    # 2. The next job finds the MicroVM RUNNING and is delivered.
+    # 3. The old call then goes on. Held before its first attempt, it would
+    #    send the attempt now. After a first attempt whose answer was lost,
+    #    botocore would retry it now. Either attempt would suspend the
+    #    MicroVM with the next job inside.
+    # So no attempt is sent after the reserve.
+    monkeypatch.setattr(
+        operation,
+        "_remaining_seconds",
+        lambda context: lambda: INVOCATION_RESERVE_SECONDS + 1.5,
+    )
+    endpoint = fake_endpoint()
+    client, botocore_client = _botocore_suspends(
+        fake_client, monkeypatch, endpoint=endpoint.url
+    )
+    release = threading.Event()
+    sent: list[float] = []
+
+    def hold_before_send(**_: Any) -> None:
+        if not answer_lost:
+            release.wait(WAIT)
+
+    def service(**_: Any) -> AWSResponse:
+        sent.append(time.monotonic())
+        if answer_lost and len(sent) == 1:
+            release.wait(WAIT)
+            raise ConnectionClosedError(endpoint_url="https://lambda.example")
+        return _ok_answer()
+
+    events = botocore_client.meta.events
+    events.register("before-sign.lambda-microvms.SuspendMicrovm", hold_before_send)
+    events.register("before-send.lambda-microvms.SuspendMicrovm", service)
+    reserve_passed: list[float] = []
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        build = vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
+        reserve_passed.append(time.monotonic())
+        return [build, vm.invoke(ctx, "test", job_input=2, options=job())]
+
+    def release_the_old_call(
+        runner: DurableFunctionTestRunner, callback_id: str
+    ) -> None:
+        # The next job is in the MicroVM. Now the old call goes on.
+        _wait_until(lambda: len(endpoint.requests) == 2)
+        release.set()
+        assert client.suspend_done.wait(WAIT)
+        succeed_with(2)(runner, callback_id)
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            result = run(
+                session_handler(session_config(client), body),
+                None,
+                [("build", succeed_with(1)), ("test", release_the_old_call)],
+            )
+    finally:
+        release.set()
+        botocore_client.close()
+
+    assert outcome(result) == {"result": [1, 2]}
+    # Only an attempt sent before the reserve reached the service, and
+    # botocore made no retry of it.
+    assert len(sent) == (1 if answer_lost else 0)
+    assert all(at < reserve_passed[0] for at in sent)
+    [warning] = suspend_warnings(caplog)
+    assert "did not end before the invocation reserve" in warning
+
+
+def _suspend_handlers(botocore_client: Any) -> list[str]:
+    handlers = botocore_client.meta.events._emitter._unique_id_handlers  # noqa: SLF001
+    return [key for key in handlers if "microvm-suspend" in key]
+
+
+def test_makes_one_suspend_attempt_before_the_reserve_too(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first attempt can suspend the MicroVM and lose its answer. A retry
+    # can then reach the service after the next job started. So the call
+    # makes no retry, also while time remains before the reserve.
+    client, botocore_client = _botocore_suspends(
+        fake_client, monkeypatch, endpoint=fake_endpoint().url
+    )
+    sent: list[int] = []
+
+    def lose_the_answer(**_: Any) -> None:
+        sent.append(1)
+        raise ConnectionClosedError(endpoint_url="https://lambda.example")
+
+    botocore_client.meta.events.register(
+        "before-send.lambda-microvms.SuspendMicrovm", lose_the_answer
+    )
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            result = run(
+                session_handler(
+                    session_config(client),
+                    lambda vm, ctx, event: vm.invoke(
+                        ctx, "build", job_input=1, options=job(suspend_after=True)
+                    ),
+                ),
+                None,
+                [("build", succeed_with(1))],
+            )
+        # The handler is removed when the call ends, also when it raises.
+        assert _suspend_handlers(botocore_client) == []
+    finally:
+        botocore_client.close()
+
+    assert outcome(result) == {"result": 1}
+    assert sent == [1]
+    [warning] = suspend_warnings(caplog)
+    assert "SuspendMicrovm makes one attempt" in warning
+
+
+def test_stops_only_the_attempts_of_its_own_call_on_a_shared_client(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another call of the same client, such as the suspend of another
+    # session, sends its attempt while the session's call runs. The session's
+    # handler leaves it alone, and the session's own first attempt is sent.
+    client, botocore_client = _botocore_suspends(
+        fake_client, monkeypatch, endpoint=fake_endpoint().url
+    )
+    sent: list[str] = []
+    other: list[threading.Thread] = []
+
+    def other_call_first(**_: Any) -> None:
+        if not other:
+            other.append(
+                threading.Thread(
+                    target=lambda: botocore_client.suspend_microvm(
+                        microvmIdentifier="mvm-other"
+                    )
+                )
+            )
+            other[0].start()
+            other[0].join(WAIT)
+
+    def service(request: Any, **_: Any) -> AWSResponse:
+        sent.append(request.url.rsplit("/microvms/", 1)[1])
+        return _ok_answer()
+
+    events = botocore_client.meta.events
+    events.register("before-sign.lambda-microvms.SuspendMicrovm", other_call_first)
+    events.register("before-send.lambda-microvms.SuspendMicrovm", service)
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            result = run(
+                session_handler(
+                    session_config(client),
+                    lambda vm, ctx, event: vm.invoke(
+                        ctx, "build", job_input=1, options=job(suspend_after=True)
+                    ),
+                ),
+                None,
+                [("build", succeed_with(1))],
+            )
+    finally:
+        botocore_client.close()
+
+    assert outcome(result) == {"result": 1}
+    assert sent == ["mvm-other/suspend", "mvm-1/suspend"]
+    assert suspend_warnings(caplog) == []
 
 
 def test_checks_the_state_before_the_job_after_a_failed_suspend_after_job(

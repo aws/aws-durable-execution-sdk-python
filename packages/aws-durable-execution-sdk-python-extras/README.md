@@ -339,7 +339,7 @@ It needs:
 
 The suspend runs after a job timeout or a heartbeat timeout too, so a job that still runs in the MicroVM is frozen, not stopped.
 
-The call ends at the invocation reserve, like the other calls of the session. A failed suspend, or a call that does not end in time, is not retried. The MicroVM then keeps running until the next job, the idle suspend, or the end of the session. The warning names `lambda:SuspendMicrovm` for a missing permission.
+The call ends at the invocation reserve, like the other calls of the session. A failed suspend, or a call that does not end in time, is not retried. The MicroVM may then still be running until the next job, the idle suspend, or the end of the session. The warning names `lambda:SuspendMicrovm` for a missing permission.
 
 ### Session permissions
 
