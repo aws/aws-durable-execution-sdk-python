@@ -133,9 +133,9 @@ def create_otel_plugin_factory(
     view's ``exclusive_group`` and registration metadata. Calls are not
     memoized, so register exactly one: two factories of the same view in
     ``plugins`` are rejected at registration as a duplicate in the
-    ``durable-otel-view`` exclusive group. Configuration is passed unchanged to
-    that class. Omitted configuration uses the globally configured OpenTelemetry
-    provider, resolved per invocation rather than here.
+    ``aws-durable-execution-otel-view`` exclusive group. Configuration is passed
+    unchanged to that class. Omitted configuration uses the globally configured
+    OpenTelemetry provider, resolved per invocation rather than here.
 
     Args:
         config: Existing OTel plugin configuration.

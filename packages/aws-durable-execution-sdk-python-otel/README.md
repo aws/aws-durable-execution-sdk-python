@@ -71,7 +71,7 @@ Each call constructs a new `ExecutionOtelPluginFactory` or
 `InvocationOtelPluginFactory` of the selected view, carrying that class's
 `exclusive_group`. Calls are not memoized, so register exactly one: two
 factories of the same view in `plugins` are rejected at registration as a
-duplicate in the `durable-otel-view` exclusive group. Both existing factory
+duplicate in the `aws-durable-execution-otel-view` exclusive group. Both existing factory
 classes remain supported, with unchanged configuration and behavior.
 
 Alternatively, install this package in the function artifact or a Lambda layer
@@ -610,7 +610,7 @@ including `None`, raise `ValueError`.
 Calls are not memoized —
 `create_otel_plugin_factory() is create_otel_plugin_factory()` is `False` — so
 register exactly one. Two factories of the same view in `plugins` raise
-`PluginLoadError` as a duplicate in the `durable-otel-view` exclusive group. A
+`PluginLoadError` as a duplicate in the `aws-durable-execution-otel-view` exclusive group. A
 `mode` read from configuration at runtime is accepted and type-checks as the
 union of both return types.
 
