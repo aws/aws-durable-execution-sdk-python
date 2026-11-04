@@ -7,10 +7,13 @@ The step ``charge`` raises ``card declined``. The retry strategy declines, so
 the step fails on its first attempt. The handler catches the ``StepError`` and
 raises ``payment failed`` from it. So the execution fails, and the live
 exception chain has three levels: the handler error, the ``StepError``, and the
-``DurableOperationError`` the SDK rebuilt from the checkpointed step error.
+``DurableOperationError`` the SDK rebuilt from the checkpointed step error. The
+exporter writes each error as ``{name, message}`` with no ``cause``. Error names
+and cause depth differ per SDK by design, so telemetry-2 asserts only that each
+error is an object.
 
-telemetry-2 pins the messages ``card declined`` and ``payment failed``. Do not
-change them.
+telemetry-2 pins the messages ``card declined`` and ``payment failed`` through
+the core execution-result and history sections. Do not change them.
 
 The handler uses the real SDK API only. It builds no record and calls no
 exporter method. A missing or wrong record is the plugin's defect, and that

@@ -209,7 +209,7 @@ def test_handler_reads_the_log_group_from_the_environment(module: str) -> None:
 
 
 def test_telemetry_2_handler_raises_the_pinned_messages() -> None:
-    """telemetry-2 asserts both messages exactly, at every level of the chain."""
+    """telemetry-2 pins both messages through ExpectedResult and ExpectedExecutionHistory."""
     source: str = (SRC_DIR / "telemetry_2_failure.py").read_text(encoding="utf-8")
 
     assert 'raise RuntimeError("card declined")' in source
