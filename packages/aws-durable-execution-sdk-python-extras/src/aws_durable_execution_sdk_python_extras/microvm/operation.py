@@ -787,21 +787,28 @@ class _MicrovmScope:
            botocore retry of an attempt that lost its answer, would suspend
            the MicroVM with the next job inside.
 
-        So a ``before-send`` handler on the client stops each attempt after
-        the first one, and any attempt after the reserve. botocore does not
-        retry that error. The handler also covers a caller's client that
-        retries. It acts only on attempts of the thread that runs this call,
-        so other calls of a shared client are not affected. The handler is
-        removed when the call ends. A client without ``meta.events``, such
-        as a test double, gets no handler.
+        So a ``before-send`` handler on the client stops any attempt after
+        the wait gave up at the reserve. botocore does not retry that error.
+        The handler also stops each attempt after the first one. An attempt
+        sent before the reserve can still be in flight at the reserve, and
+        a retry adds one more such attempt. So one attempt narrows that
+        window, as in the worker. The handler also covers a caller's client
+        that retries.
 
-        botocore cannot cancel an attempt in flight. So an attempt sent
-        before the reserve can still reach the service after it, and after
-        the next job started. This method cannot prevent that. Such an
-        attempt can then freeze the next job, which waits until a later job
-        resumes the MicroVM or its heartbeat timeout ends it. The client's
-        connect and read timeouts bound how long the attempt can take: 5
-        and 30 seconds for the default client.
+        The handler acts only on attempts of the thread that runs this call.
+        The default client is cached per Lambda environment. An abandoned
+        call's handler stays registered on it until the call's thread ends.
+        Without the thread check, that handler would stop the call of a
+        later invocation. The check also leaves other calls of a shared
+        client alone. The handler is removed when the call ends. A client
+        without ``meta.events``, such as a test double, gets no handler.
+
+        botocore cannot cancel an attempt in flight. An attempt that passed
+        the check before the reserve can still reach the service after it.
+        It can reach the service after the next job started. This method
+        cannot prevent that. Such an attempt can then freeze the next job,
+        which waits until a later job resumes the MicroVM or its heartbeat
+        timeout ends it.
         """
         deadline = reserve_starts_at(_remaining_seconds(child))
         abandoned = threading.Event()
@@ -828,9 +835,7 @@ class _MicrovmScope:
                         "suspend the MicroVM after the next job started."
                     )
                     raise _SuspendStoppedError(msg)
-                if abandoned.is_set() or (
-                    deadline is not None and time.monotonic() >= deadline
-                ):
+                if abandoned.is_set():
                     msg = "SuspendMicrovm did not start before the invocation reserve"
                     raise _SuspendStoppedError(msg)
 
