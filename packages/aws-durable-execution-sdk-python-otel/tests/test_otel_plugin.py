@@ -75,16 +75,18 @@ def test_invalid_modes_are_rejected(mode: object) -> None:
 def test_repeated_calls_are_not_memoized() -> None:
     """Two selector calls are two objects, which is why only one may be registered."""
     assert create_otel_plugin_factory() is not create_otel_plugin_factory()
-    assert create_otel_plugin_factory(mode="invocation") is not create_otel_plugin_factory(
+    assert create_otel_plugin_factory(
         mode="invocation"
-    )
+    ) is not create_otel_plugin_factory(mode="invocation")
     assert create_otel_plugin_factory() is not EXECUTION_OTEL_PLUGIN_FACTORY
 
 
 def test_runtime_mode_string_selects_a_view() -> None:
     """A mode read from configuration is a plain str, not a Literal."""
     configured: str = "invocation"
-    assert type(create_otel_plugin_factory(mode=configured)) is InvocationOtelPluginFactory
+    assert (
+        type(create_otel_plugin_factory(mode=configured)) is InvocationOtelPluginFactory
+    )
 
 
 def test_installed_entry_points_preserve_alias_identity() -> None:
