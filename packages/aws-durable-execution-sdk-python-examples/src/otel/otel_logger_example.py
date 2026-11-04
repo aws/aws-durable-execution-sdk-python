@@ -1,6 +1,6 @@
 """Demonstrates OTel-enriched logging in a durable execution.
 
-OtelPlugin.factory(mode="invocation") selects the factory the SDK registers; it
+create_otel_plugin_factory(mode="invocation") selects the factory the SDK registers; it
 builds one InvocationOtelPlugin per invocation. Each plugin installs a logging filter
 on the root logger (enrich_logger=True by default) when it is constructed. The
 filter stamps the active OpenTelemetry trace context (traceId, spanId,
@@ -17,7 +17,7 @@ Logs emitted:
 
 from typing import Any
 
-from aws_durable_execution_sdk_python_otel import OtelPlugin
+from aws_durable_execution_sdk_python_otel import create_otel_plugin_factory
 
 from aws_durable_execution_sdk_python import StepContext
 from aws_durable_execution_sdk_python.context import (
@@ -45,7 +45,7 @@ def greet_in_child(child_context: DurableContext, name: str) -> str:
     return result
 
 
-@durable_execution(plugins=[OtelPlugin.factory(mode="invocation")])
+@durable_execution(plugins=[create_otel_plugin_factory(mode="invocation")])
 def handler(_event: Any, context: DurableContext) -> str:
     # Logged at the top level: enriched with the invocation span_id.
     context.logger.info("Workflow started")

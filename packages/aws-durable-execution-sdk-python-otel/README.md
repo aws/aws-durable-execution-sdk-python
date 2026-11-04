@@ -42,23 +42,23 @@ processors, and exporter.
 
 1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
 2. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
-3. Pass `OtelPlugin.factory()` to your handler's `plugins` list
+3. Pass `create_otel_plugin_factory()` to your handler's `plugins` list
 4. Add X-Ray write permissions
 
 The SDK's `plugins` list takes plugin *factories*, not plugin instances: it calls
 each factory's `create_plugin` once per invocation and the plugin it returns
-serves that one invocation. Import `OtelPlugin` to choose a view:
+serves that one invocation. Import `create_otel_plugin_factory` to choose a view:
 
 ```python
-from aws_durable_execution_sdk_python_otel import OtelPlugin
+from aws_durable_execution_sdk_python_otel import create_otel_plugin_factory
 
-execution = OtelPlugin.factory()  # Default: operations parented to Workflow
-invocation = OtelPlugin.factory(mode="invocation")  # Operations parented to Invocation
+execution = create_otel_plugin_factory()  # Default: operations parented to Workflow
+invocation = create_otel_plugin_factory(mode="invocation")  # Operations parented to Invocation
 ```
 
 Register one of these factories in `plugins`. Explicit `mode="execution"` also
 selects the execution view. Pass existing configuration with
-`OtelPlugin.factory(config, mode="invocation")`. Unsupported modes raise
+`create_otel_plugin_factory(config, mode="invocation")`. Unsupported modes raise
 `ValueError` when the factory is selected.
 
 The selector returns the existing `ExecutionOtelPluginFactory` or
@@ -239,10 +239,10 @@ rejected clearly by core 3.
 ```python
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_otel import OtelPlugin
+from aws_durable_execution_sdk_python_otel import create_otel_plugin_factory
 
 
-@durable_execution(plugins=[OtelPlugin.factory()])
+@durable_execution(plugins=[create_otel_plugin_factory()])
 def handler(event: dict, context: DurableContext) -> dict:
     result = context.step(lambda _: fetch_data(event["id"]), name="fetch-data")
 
@@ -564,17 +564,17 @@ After deploying your function with the plugin configured:
 
 ## API Reference
 
-### `OtelPlugin.factory`
+### `create_otel_plugin_factory`
 
 ```python
-OtelPlugin.factory(config=None, *, mode="execution")
+create_otel_plugin_factory(config=None, *, mode="execution")
 ```
 
 Returns an `ExecutionOtelPluginFactory` by default, or an
 `InvocationOtelPluginFactory` for `mode="invocation"`. The optional `config` is
 an existing `OtelPluginConfig`, passed unchanged to the selected factory. For
 example, an application-owned provider can be supplied with
-`OtelPlugin.factory(OtelPluginConfig(tracer_provider=provider))`.
+`create_otel_plugin_factory(OtelPluginConfig(tracer_provider=provider))`.
 
 The return value belongs in the handler's `plugins` list. Each invocation gets
 its own plugin instance. Selecting a factory does not resolve a provider or

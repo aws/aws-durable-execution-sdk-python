@@ -25,7 +25,7 @@ one of its own that the tracer would never consult.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal, overload
 
 from aws_durable_execution_sdk_python_otel.execution_plugin import (
     ExecutionOtelPlugin,
@@ -92,6 +92,49 @@ class ExecutionOtelPluginFactory:
     def create_plugin(self, info: InvocationStartInfo) -> ExecutionOtelPlugin:
         """Return this invocation's plugin. ``info`` is unused; see above."""
         return ExecutionOtelPlugin(self.config)
+
+
+@overload
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: Literal["execution"] = "execution",
+) -> ExecutionOtelPluginFactory: ...
+
+
+@overload
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: Literal["invocation"],
+) -> InvocationOtelPluginFactory: ...
+
+
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: Literal["execution", "invocation"] = "execution",
+) -> ExecutionOtelPluginFactory | InvocationOtelPluginFactory:
+    """Return the selected factory, defaulting to the execution view.
+
+    The SDK calls this factory for each invocation, creating an isolated
+    plugin while preserving the selected view's registration metadata.
+    Configuration is passed unchanged to the existing factory. Omitted
+    configuration uses the globally configured OpenTelemetry provider.
+
+    Args:
+        config: Existing OTel plugin configuration.
+        mode: ``"execution"`` for Workflow-parented operations, or
+            ``"invocation"`` for Invocation-parented operations.
+
+    Raises:
+        ValueError: If mode is neither ``"execution"`` nor ``"invocation"``.
+    """
+    if mode == "execution":
+        return ExecutionOtelPluginFactory(config)
+    if mode == "invocation":
+        return InvocationOtelPluginFactory(config)
+    raise ValueError("mode must be 'execution' or 'invocation'")
 
 
 INVOCATION_OTEL_PLUGIN_FACTORY = InvocationOtelPluginFactory()

@@ -25,7 +25,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPluginFactory
-from aws_durable_execution_sdk_python_otel import OtelPlugin
+from aws_durable_execution_sdk_python_otel import create_otel_plugin_factory
 from aws_durable_execution_sdk_python.context import DurableContext, durable_step
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
@@ -43,9 +43,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python_otel.log_filter import OtelContextLogFilter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
-from aws_durable_execution_sdk_python_otel.plugin_factory import (
-    InvocationOtelPluginFactory,
-)
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -189,9 +186,8 @@ def _remove_otel_filters(handler: logging.Handler) -> None:
 @pytest.mark.parametrize(
     ("create_factory", "parent_name"),
     [
-        (InvocationOtelPluginFactory, "Invocation"),
-        (OtelPlugin.factory, "Workflow"),
-        (partial(OtelPlugin.factory, mode="invocation"), "Invocation"),
+        (create_otel_plugin_factory, "Workflow"),
+        (partial(create_otel_plugin_factory, mode="invocation"), "Invocation"),
     ],
 )
 def test_overlapping_invocations_stamp_top_level_logs_with_their_own_span(

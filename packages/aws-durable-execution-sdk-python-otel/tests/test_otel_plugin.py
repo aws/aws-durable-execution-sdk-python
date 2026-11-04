@@ -10,24 +10,24 @@ from aws_durable_execution_sdk_python_otel import (
     INVOCATION_OTEL_PLUGIN_FACTORY,
     ExecutionOtelPluginFactory,
     InvocationOtelPluginFactory,
-    OtelPlugin,
+    create_otel_plugin_factory,
     OtelPluginConfig,
 )
 from opentelemetry.sdk.trace import TracerProvider
 
 
 def test_default_factory_type_is_execution() -> None:
-    factory = assert_type(OtelPlugin.factory(), ExecutionOtelPluginFactory)
+    factory = assert_type(create_otel_plugin_factory(), ExecutionOtelPluginFactory)
     assert type(factory) is ExecutionOtelPluginFactory
     assert factory.config is None
 
 
 def test_explicit_mode_return_types() -> None:
     execution = assert_type(
-        OtelPlugin.factory(mode="execution"), ExecutionOtelPluginFactory
+        create_otel_plugin_factory(mode="execution"), ExecutionOtelPluginFactory
     )
     invocation = assert_type(
-        OtelPlugin.factory(mode="invocation"), InvocationOtelPluginFactory
+        create_otel_plugin_factory(mode="invocation"), InvocationOtelPluginFactory
     )
     assert type(execution) is ExecutionOtelPluginFactory
     assert type(invocation) is InvocationOtelPluginFactory
@@ -51,7 +51,7 @@ def test_factory_preserves_configuration_and_registration(
             "opentelemetry.trace.get_tracer_provider",
             side_effect=AssertionError("factory selection must not resolve a provider"),
         ):
-            factory = OtelPlugin.factory(config, mode=mode)
+            factory = create_otel_plugin_factory(config, mode=mode)
         expected = (
             ExecutionOtelPluginFactory
             if mode == "execution"
@@ -69,7 +69,7 @@ def test_factory_preserves_configuration_and_registration(
 @pytest.mark.parametrize("mode", [None, "", "EXECUTION", "unknown", 0, False])
 def test_invalid_modes_are_rejected(mode: object) -> None:
     with pytest.raises(ValueError, match="mode must be 'execution' or 'invocation'"):
-        OtelPlugin.factory(mode=cast(Literal["execution", "invocation"], mode))
+        create_otel_plugin_factory(mode=cast(Literal["execution", "invocation"], mode))
 
 
 def test_installed_entry_points_preserve_alias_identity() -> None:

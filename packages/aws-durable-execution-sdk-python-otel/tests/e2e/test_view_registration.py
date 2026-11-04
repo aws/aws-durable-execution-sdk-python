@@ -3,7 +3,7 @@
 import logging
 from types import SimpleNamespace
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from aws_durable_execution_sdk_python import DurableContext
@@ -28,7 +28,7 @@ from aws_durable_execution_sdk_python_otel import (
     ExecutionOtelPluginFactory,
     InvocationOtelPlugin,
     InvocationOtelPluginFactory,
-    OtelPlugin,
+    create_otel_plugin_factory,
     OtelPluginConfig,
 )
 
@@ -238,7 +238,6 @@ def test_single_wrapped_view_with_unrelated_plugin_is_accepted(
     )
 
 
-@pytest.mark.parametrize("unified", [False, True])
 @pytest.mark.parametrize("registration", ["explicit", "environment", "mixed"])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_competing_views_rejected_before_hooks(
@@ -246,30 +245,23 @@ def test_competing_views_rejected_before_hooks(
     monkeypatch: pytest.MonkeyPatch,
     registration: str,
     reverse: bool,
-    unified: bool,
 ) -> None:
     provider, exporter = telemetry
     classes: list[
         type[ExecutionOtelPluginFactory] | type[InvocationOtelPluginFactory]
     ] = [ExecutionOtelPluginFactory, InvocationOtelPluginFactory]
-    names = ["otel" if unified else "otel-execution", "otel-invocation"]
+    names = ["otel-execution", "otel-invocation"]
     if reverse:
         classes.reverse()
         names.reverse()
     config = OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
-    factories: list[DurableInstrumentationPluginFactory] = [
-        cls(config) for cls in classes
-    ]
-    if unified:
-        execution_index = classes.index(ExecutionOtelPluginFactory)
-        factories[execution_index] = OtelPlugin.factory(config)
     explicit: list[DurableInstrumentationPluginFactory] = []
     if registration == "explicit":
-        explicit = factories
+        explicit = [cls(config) for cls in classes]
     elif registration == "environment":
         monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", ",".join(names))
     else:
-        explicit = [factories[0]]
+        explicit = [classes[0](config)]
         monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", names[1])
     before = context.get_current()
     with pytest.raises(PluginLoadError) as error:
@@ -300,7 +292,6 @@ class _ObserverFactory:
         return plugin
 
 
-@pytest.mark.parametrize("unified", [False, True])
 @pytest.mark.parametrize(
     "plugin_type", [ExecutionOtelPluginFactory, InvocationOtelPluginFactory]
 )
@@ -312,7 +303,6 @@ def test_one_view_and_unrelated_plugin_suspend_resume(
     plugin_type: type[ExecutionOtelPluginFactory] | type[InvocationOtelPluginFactory],
     registration: str,
     fail: bool,
-    unified: bool,
 ) -> None:
     provider, exporter = telemetry
     observer = _ObserverFactory()
@@ -322,19 +312,9 @@ def test_one_view_and_unrelated_plugin_suspend_resume(
         if plugin_type is ExecutionOtelPluginFactory
         else "otel-invocation"
     )
-    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
-    factory = (
-        OtelPlugin.factory(
-            config,
-            mode="execution"
-            if plugin_type is ExecutionOtelPluginFactory
-            else "invocation",
-        )
-        if unified
-        else plugin_type(config)
+    factory = plugin_type(
+        OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
     )
-    if unified and plugin_type is ExecutionOtelPluginFactory:
-        name = "otel"
     if registration != "explicit":
         # The v2 factory API deduplicates the same factory object. Its result
         # type cannot be inspected without constructing an invocation plugin.
@@ -384,6 +364,59 @@ def test_one_view_and_unrelated_plugin_suspend_resume(
         span.context is not None and span.context.span_id == customer.parent.span_id
         for span in spans
     )
+
+
+@pytest.mark.parametrize("mode", ["execution", "invocation"])
+def test_unified_factory_preserves_view_across_resume(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    mode: Literal["execution", "invocation"],
+) -> None:
+    provider, exporter = telemetry
+    calls: list[str] = []
+
+    def work(_step_context: Any) -> str:
+        calls.append("work")
+        return "saved"
+
+    def handler(_event: Any, durable: DurableContext) -> str:
+        result = durable.step(work, name="work")
+        durable.wait(Duration.from_seconds(1), name="pause")
+        return result
+
+    configured = durable_execution(
+        handler,
+        plugins=[
+            create_otel_plugin_factory(
+                OtelPluginConfig(tracer_provider=provider, enrich_logger=False),
+                mode=mode,
+            )
+        ],
+    )
+    with DurableFunctionTestRunner(handler=configured) as runner:
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    assert calls == ["work"]
+    spans = exporter.get_finished_spans()
+    workflows = [span for span in spans if span.name == "Workflow"]
+    invocations = [span for span in spans if span.name == "Invocation"]
+    assert len(workflows) == 1
+    assert len(invocations) == 2
+    operation = next(span for span in spans if span.name == "work")
+    expected_parents = workflows if mode == "execution" else invocations
+    assert any(operation.parent == parent.context for parent in expected_parents)
+
+
+def test_default_alias_conflicts_with_explicit_invocation_view(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, exporter = telemetry
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "otel")
+    invocation = InvocationOtelPluginFactory(
+        OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    )
+    with pytest.raises(PluginLoadError, match="Keep only one"):
+        durable_execution(_handler, plugins=[invocation])
+    assert not exporter.get_finished_spans()
 
 
 @pytest.mark.parametrize("entry_names", ["otel", "otel,otel-execution"])
