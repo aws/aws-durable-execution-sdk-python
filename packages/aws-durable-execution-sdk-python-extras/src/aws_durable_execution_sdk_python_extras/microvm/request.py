@@ -233,8 +233,9 @@ class SendJobOptions:
     window_started_at: float | None = None
     """When the retry window started, as a ``time.monotonic()`` time.
 
-    ``None`` means the moment :func:`send_job` is called. A session job sets
-    it to the start of the state check that runs before delivery. So the
+    ``None`` means the moment :func:`send_job` is called. ``deliver()`` sets
+    it for every job, of :func:`microvm` and of a session, to the start of
+    the attempt, before any state check that runs before delivery. So the
     wait for a resume and the request's own retries share one window.
     """
     recheck: Callable[[float], str | None] | None = None

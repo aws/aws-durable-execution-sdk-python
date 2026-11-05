@@ -68,9 +68,10 @@ class MicrovmStateCheckError(Exception):
 
     The request step of a job without the resume mode runs that check only
     after a sign that the MicroVM does not run. The job may never have
-    needed the check, and :func:`microvm` did not need ``lambda:GetMicrovm``
-    before it ran the check. So the step logs one warning per job, and
-    keeps sending the job. ``__cause__`` is the error of the call.
+    needed the check. Roles of :func:`microvm` from before this check may
+    not have ``lambda:GetMicrovm``. So the step logs one warning per step
+    attempt, and keeps sending the job. With the default retry strategy,
+    that is up to 5 warnings. ``__cause__`` is the error of the call.
     """
 
     def __init__(self, message: str, *, denied: bool) -> None:
@@ -280,6 +281,11 @@ def _raise_if_ended(microvm_id: str, current: Any) -> None:
     state = current.get("state")
     if state in {"TERMINATING", "TERMINATED"}:
         reason = current.get("stateReason")
+        # The service's stateReason can end with a period, such as
+        # "Success.". The message adds its own period, so one trailing
+        # period of stateReason is removed.
+        if reason and reason.endswith("."):
+            reason = reason[:-1]
         # The GetMicrovm output carries the request ID. The state fails
         # the step, so the message names that request ID.
         msg = f"MicroVM {microvm_id} is {state}{f': {reason}' if reason else ''}."

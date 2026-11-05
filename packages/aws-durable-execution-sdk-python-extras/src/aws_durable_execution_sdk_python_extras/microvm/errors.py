@@ -131,9 +131,10 @@ class MicrovmNotRunningError(MicrovmDeliveryError):
     2. Every job over HTTP, of a session or of :func:`microvm`, after a
        request without an answer, or after an HTTP 502 with
        ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. The request step then
-       calls ``GetMicrovm`` once. The endpoint of a terminated MicroVM
-       answers that 502, measured in us-east-1. So a MicroVM that ends
-       before its job arrives fails the job after one request.
+       calls ``GetMicrovm`` after each such answer, at most once per 2
+       seconds. The endpoint of a terminated MicroVM answers that 502,
+       measured in us-east-1. So a MicroVM that ends before its job arrives
+       fails the job after one request.
     3. Every job over HTTP. The request step calls
        ``CreateMicrovmAuthToken`` before the first request, and again after
        a 401 or 403. That call can answer ``ResourceNotFoundException``. For
@@ -146,7 +147,8 @@ class MicrovmNotRunningError(MicrovmDeliveryError):
     the request ID from the message, on the first run and on replay.
 
     A ``GetMicrovm`` call that is denied or fails does not report the
-    state. The request step then logs one warning and keeps retrying. So
+    state. The request step then logs one warning per step attempt, so up
+    to 5 with the default retry strategy, and keeps retrying. So
     the job fails with a plain :class:`MicrovmDeliveryError`, after the
     retries of both tiers.
 

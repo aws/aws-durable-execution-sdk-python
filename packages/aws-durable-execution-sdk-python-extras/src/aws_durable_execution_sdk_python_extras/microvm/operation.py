@@ -340,10 +340,11 @@ def microvm(
             rejects the config, for example an empty ``image_identifier``.
         MicrovmNotRunningError: When the MicroVM of an HTTP delivery is
             terminating, terminated, or removed. The request step calls
-            ``GetMicrovm`` once after an HTTP 502 with
-            ``x-aws-proxy-error: MICROVM_CONNECT_FAILED`` or a request
-            without an answer, and ``CreateMicrovmAuthToken`` can report a
-            removed MicroVM. It is a ``MicrovmDeliveryError``.
+            ``GetMicrovm`` after each HTTP 502 with
+            ``x-aws-proxy-error: MICROVM_CONNECT_FAILED`` or request
+            without an answer, at most once per 2 seconds, and
+            ``CreateMicrovmAuthToken`` can report a removed MicroVM. It is
+            a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
             or the route answers a 4xx status such as 404, or a redirect.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
@@ -372,8 +373,9 @@ _STATE_CHECK_WARNING = (
     "GetMicrovm failed, so the operation could not check whether the MicroVM "
     "is suspended. The request step keeps sending the job."
 )
-"""The warning, once per job, after a failed state check of an attempt
-without the resume mode."""
+"""The warning, once per step attempt, so up to 5 with the default retry
+strategy, after a failed state check of an attempt without the resume
+mode."""
 
 _GET_DENIED_NOTE = (
     "GetMicrovm was denied, so the operation could not check whether the "
@@ -584,9 +586,10 @@ class _MicrovmScope:
         ``GetMicrovm`` reports. A session sets it when its MicroVM can be
         suspended. A callable is read at the start of each attempt.
 
-        An attempt without ``resume`` checks the MicroVM state once after a
-        sign that the MicroVM does not run: an HTTP 502 with
-        ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. See
+        An attempt without ``resume`` calls ``GetMicrovm`` after each sign
+        that the MicroVM does not run, at most once per 2 seconds: an HTTP
+        502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no
+        answer. See
         :func:`resume_if_suspended`. Every job over HTTP runs this check,
         from :func:`microvm` and from a session:
 
@@ -598,8 +601,9 @@ class _MicrovmScope:
         2. A session MicroVM can also give that sign while it is suspended.
            The check then resumes it.
 
-        A failed ``GetMicrovm`` call in the check logs one warning per job,
-        and the attempt keeps sending the job.
+        A failed ``GetMicrovm`` call in the check logs one warning per step
+        attempt, so up to 5 with the default retry strategy, and the
+        attempt keeps sending the job.
 
         ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
         answer ``ResourceNotFoundException`` for a removed MicroVM. An
@@ -625,8 +629,9 @@ class _MicrovmScope:
         path = DEFAULT_MICROVM_JOB_PATH if request.path is None else request.path
         port = DEFAULT_MICROVM_PORT if request.port is None else request.port
         microvm_id = launched.microvm_id
-        # One warning per job for a failed state check. The attempts of the
-        # step in this invocation share it.
+        # One warning per step attempt for a failed state check. The core
+        # SDK runs each retry of the step in a new invocation, which calls
+        # deliver() again. So each attempt gets a new Event.
         check_warned = threading.Event()
 
         def attempt(step_context: StepContext) -> None:
