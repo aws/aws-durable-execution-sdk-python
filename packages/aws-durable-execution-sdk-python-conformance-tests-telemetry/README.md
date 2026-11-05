@@ -62,9 +62,9 @@ sam build --template packages/aws-durable-execution-sdk-python-conformance-tests
 ```
 
 Run the package tests from the repository root. They check the template wiring, and
-they run each handler through `DurableFunctionTestRunner` with the exporter's `export`
-captured, so a handler that stops producing its requirement's record fails here before
-a cloud run:
+they run each handler through `DurableFunctionTestRunner` with `boto3.client` replaced
+by a fake `logs` client that records `PutLogEvents` calls, so a handler that stops
+producing its requirement's record fails here before a cloud run:
 
 ```bash
 hatch run test:all packages/aws-durable-execution-sdk-python-conformance-tests-telemetry/tests

@@ -7,6 +7,8 @@ The conformance runner reads requirement mappings from
 ``TestingMetadata.TestDescription``. SAM builds each function through
 ``src/Makefile``. A renamed handler or a missing build target fails only when a
 cloud deployment runs. So these tests pin that wiring locally.
+The module also runs both handlers through ``DurableFunctionTestRunner`` and checks
+the exported record.
 """
 
 from __future__ import annotations
