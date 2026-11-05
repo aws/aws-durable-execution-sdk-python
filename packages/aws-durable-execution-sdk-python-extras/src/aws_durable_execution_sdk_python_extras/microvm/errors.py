@@ -128,28 +128,31 @@ class MicrovmNotRunningError(MicrovmDeliveryError):
        when ``auto_suspend_on_idle`` is ``True``, when an ``idle_policy``
        is set, and after a job with ``suspend_after``. ``GetMicrovm`` or
        ``ResumeMicrovm`` then reports the state.
-    2. Every session job, after a request without an answer, or after an
-       HTTP 502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. The
-       request step then calls ``GetMicrovm`` once.
-    3. Every job over HTTP, of a session or of :func:`microvm`. The request
-       step calls ``CreateMicrovmAuthToken`` before the first request, and
-       again after a 401 or 403. That call can answer
-       ``ResourceNotFoundException``.
+    2. Every job over HTTP, of a session or of :func:`microvm`, after a
+       request without an answer, or after an HTTP 502 with
+       ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. The request step then
+       calls ``GetMicrovm`` once. The endpoint of a terminated MicroVM
+       answers that 502, measured in us-east-1. So a MicroVM that ends
+       before its job arrives fails the job after one request.
+    3. Every job over HTTP. The request step calls
+       ``CreateMicrovmAuthToken`` before the first request, and again after
+       a 401 or 403. That call can answer ``ResourceNotFoundException``. For
+       a terminated MicroVM whose record still exists, the call issues a
+       token, measured in us-east-1.
 
     The message ends with the request ID of the call that reported the
     state, for example ``GetMicrovm request ID: <id>.``. The core SDK
     records only the message of the failure. So a support case can quote
     the request ID from the message, on the first run and on replay.
 
-    Without the state check before delivery, the request step still calls
-    ``CreateMicrovmAuthToken`` first. When that call answers
-    ``ResourceNotFoundException``, the job fails with this error. When it
-    returns a token, the request goes to the endpoint. The endpoint of a
-    terminated MicroVM answers 502. Whether that 502 carries
-    ``MICROVM_CONNECT_FAILED`` is not verified. Without it, the request
-    step retries the 502 as a MicroVM that is still starting. So the job
-    then fails with a plain :class:`MicrovmDeliveryError`, after the
+    A ``GetMicrovm`` call that is denied or fails does not report the
+    state. The request step then logs one warning and keeps retrying. So
+    the job fails with a plain :class:`MicrovmDeliveryError`, after the
     retries of both tiers.
+
+    A job in the ``run`` hook has no request step. So a MicroVM that ends
+    before it runs that job fails it with :class:`MicrovmTimeoutError`, at
+    the ``heartbeat_timeout`` or the ``timeout``.
 
     The live service's answer of ``CreateMicrovmAuthToken`` for a removed
     MicroVM is not verified. The API model lists

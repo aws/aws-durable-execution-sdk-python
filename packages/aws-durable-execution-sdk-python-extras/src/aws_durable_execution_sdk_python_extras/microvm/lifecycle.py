@@ -66,10 +66,11 @@ class MicrovmStateError(Exception):
 class MicrovmStateCheckError(Exception):
     """``GetMicrovm`` failed in the check of :func:`resume_if_suspended`.
 
-    The request step of a session without the resume mode runs that check
-    only after a sign of a suspended MicroVM. The session may never have
-    asked to suspend. So the step logs one warning per job, and keeps
-    sending the job. ``__cause__`` is the error of the call.
+    The request step of a job without the resume mode runs that check only
+    after a sign that the MicroVM does not run. The job may never have
+    needed the check, and :func:`microvm` did not need ``lambda:GetMicrovm``
+    before it ran the check. So the step logs one warning per job, and
+    keeps sending the job. ``__cause__`` is the error of the call.
     """
 
     def __init__(self, message: str, *, denied: bool) -> None:
@@ -158,12 +159,18 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
     """Check the MicroVM state once, resume a suspended MicroVM, and return
     its current endpoint.
 
-    The request step of a session without the resume mode calls it after a
-    sign that the MicroVM may be suspended: an HTTP 502 from the endpoint
-    with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. A
-    session can suspend its MicroVM after a ``suspend_after`` job, and can
-    lose the record of that job on replay. So this check runs
-    for every session job.
+    The request step of a job without the resume mode calls it after a sign
+    that the MicroVM does not run: an HTTP 502 from the endpoint with
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. The check
+    runs for every job over HTTP, from :func:`microvm` and from a session:
+
+    - The endpoint of a terminated MicroVM answers that 502, measured in
+      us-east-1. So the check ends the job of a dead MicroVM at once,
+      instead of after both retry tiers.
+    - A session can suspend its MicroVM after a ``suspend_after`` job, and
+      can lose the record of that job on replay. The endpoint of a
+      suspended MicroVM answers the same 502. So the check also resumes a
+      suspended MicroVM.
 
     1. ``GetMicrovm`` runs once. A failure other than
        ``ResourceNotFoundException`` raises :class:`MicrovmStateCheckError`.
