@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -77,7 +78,9 @@ from aws_durable_execution_sdk_python_extras.microvm.request import (
     DEFAULT_REQUEST_RETRY_WINDOW_SECONDS,
     MAX_REQUEST_RETRY_WINDOW_SECONDS,
     SendJobOptions,
+    call_before_deadline,
     require_time_for_call,
+    reserve_starts_at,
     send_job,
 )
 from aws_durable_execution_sdk_python_extras.microvm.retry import (
@@ -112,6 +115,73 @@ timeout records no outcome for its step attempt. These limits keep one step
 attempt to about 2 minutes. The launch is idempotent through its client token,
 so an attempt that ran out of time is repeated, not doubled.
 """
+
+_SUSPEND_BEFORE_SEND = "before-send.lambda-microvms.SuspendMicrovm"
+"""botocore emits this event before each attempt of a ``SuspendMicrovm``
+call."""
+
+
+class _SuspendStoppedError(Exception):
+    """The session's ``SuspendMicrovm`` call stopped an attempt before it was
+    sent.
+
+    botocore retries only its own connection and HTTP client errors. So it
+    does not retry this one.
+    """
+
+
+@dataclass
+class _SuspendCall:
+    """The state of one session ``SuspendMicrovm`` call."""
+
+    attempts: int = 0
+    abandoned: bool = False
+    """The wait for the call gave up at the invocation reserve."""
+
+
+_SUSPEND_CALL = threading.local()
+"""The ``_SuspendCall`` of the call that runs on this thread, if any."""
+
+_HOOKED_EVENTS: weakref.WeakSet[Any] = weakref.WeakSet()
+"""The ``meta.events`` of each client that has ``_stop_suspend_attempt``.
+
+A weak set, so a client that the caller drops is not kept alive."""
+
+_HOOK_LOCK = threading.Lock()
+
+
+def _stop_suspend_attempt(**_: object) -> None:
+    """Stop an attempt of the session ``SuspendMicrovm`` call on this
+    thread: each attempt after the first one, and any attempt after the wait
+    for the call gave up.
+
+    It does nothing on a thread without a session call.
+    """
+    call: _SuspendCall | None = getattr(_SUSPEND_CALL, "call", None)
+    if call is None:
+        return
+    call.attempts += 1
+    if call.attempts > 1:
+        msg = (
+            "SuspendMicrovm makes one attempt. A retry could suspend the "
+            "MicroVM after the next job started."
+        )
+        raise _SuspendStoppedError(msg)
+    if call.abandoned:
+        msg = "SuspendMicrovm did not start before the invocation reserve"
+        raise _SuspendStoppedError(msg)
+
+
+def _hook_suspend(events: Any) -> None:
+    """Register ``_stop_suspend_attempt`` on a client's events, once.
+
+    The lock makes two first suspends on one client register it once.
+    """
+    with _HOOK_LOCK:
+        if events not in _HOOKED_EVENTS:
+            events.register_first(_SUSPEND_BEFORE_SEND, _stop_suspend_attempt)
+            _HOOKED_EVENTS.add(events)
+
 
 RUN_HOOK_DELIVERY = "run-hook"
 """The delivery in which the job goes in the ``runHookPayload`` of the launch."""
@@ -499,8 +569,6 @@ class _MicrovmScope:
         retry_window_seconds: int,
         resume: bool | Callable[[], bool] = False,
         suspend_check: bool = False,
-        suspend_after: bool = False,
-        claim_suspend_after_warning: Callable[[], bool] | None = None,
     ) -> None:
         """Run the request step, ``<job_name>.request``: POST the job to the
         MicroVM's endpoint.
@@ -518,10 +586,6 @@ class _MicrovmScope:
         sets it for every job. A failed ``GetMicrovm`` call in that check
         logs one warning per job, and the attempt keeps sending the job.
 
-        ``suspend_after`` adds ``"suspendAfter": true`` to the job request.
-        When the answer lacks the worker's acknowledgement, the attempt
-        logs a warning if ``claim_suspend_after_warning`` returns ``True``.
-
         ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
         answer ``ResourceNotFoundException`` for a removed MicroVM. An
         attempt raises ``MicrovmStateError`` for that answer of any of the
@@ -538,7 +602,6 @@ class _MicrovmScope:
                 callback_id=callback_id,
                 job_input=job_input,
                 heartbeat_timeout_seconds=heartbeat_timeout_seconds,
-                suspend_after=suspend_after,
             )
             .to_json()
             .encode()
@@ -601,17 +664,6 @@ class _MicrovmScope:
 
                 check = check_state
 
-            def ignored() -> None:
-                if (
-                    claim_suspend_after_warning is not None
-                    and claim_suspend_after_warning()
-                ):
-                    logger.warning(
-                        f"the worker in MicroVM {microvm_id} does not support "
-                        "suspendAfter. The MicroVM keeps running after the job.",
-                        extra={"microvmId": microvm_id},
-                    )
-
             # Only CreateMicrovmAuthToken can raise ResourceNotFoundException
             # here:
             #
@@ -644,7 +696,6 @@ class _MicrovmScope:
                         unavailable_note=lambda: (
                             _GET_DENIED_NOTE if get_denied else None
                         ),
-                        on_suspend_after_ignored=ignored if suspend_after else None,
                     )
                 )
             except ClientError as error:
@@ -766,6 +817,94 @@ class _MicrovmScope:
             endpoint=endpoint if over_http else None,
             resume_before_delivery=resume_before_delivery,
         )
+
+    def suspend(self, child: DurableContext, microvm_id: str) -> None:
+        """Call ``SuspendMicrovm``, and log a failure as a warning instead of
+        raising.
+
+        It runs inside a job's child context, after the job's outcome is
+        known, and it is not a durable operation. A failed call must not
+        fail the job. The next job of the session checks the MicroVM state
+        and resumes it when needed, and suspending a suspended MicroVM
+        succeeds.
+
+        The call makes one attempt, and it sends no attempt after the
+        invocation reserve:
+
+        1. The wait for the call ends at the reserve, and the call goes on
+           in its thread. Lambda freezes that thread after the invocation
+           returns.
+        2. A later invocation can find the MicroVM ``RUNNING`` and deliver
+           the next job.
+        3. The old thread then resumes. An attempt that it sent then, or a
+           botocore retry of an attempt that lost its answer, would suspend
+           the MicroVM with the next job inside.
+
+        So a ``before-send`` handler on the client stops any attempt after
+        the wait gave up at the reserve. botocore does not retry that error.
+        The handler also stops each attempt after the first one. An attempt
+        sent before the reserve can still be in flight at the reserve, and
+        a retry adds one more such attempt. So one attempt narrows that
+        window, as in the worker. The handler also covers a caller's client
+        that retries.
+
+        Each client gets the handler once, before its first suspend, and
+        keeps it. botocore's emitter stores the handler list of an event
+        without a lock. A handler that is added or removed while another
+        thread emits the event can be missing from the stored list. Two
+        sessions of a ``map`` share the default client. So no suspend
+        changes the handlers of a client that already has the handler.
+
+        Each call keeps its attempt count and its abandoned flag in a
+        thread-local state, on the thread that runs the call. The handler
+        acts only on a thread with such a state. So it leaves the other
+        calls of a shared client alone, and an abandoned call does not stop
+        a later call. A client without ``meta.events``, such as a test
+        double, gets no handler.
+
+        botocore cannot cancel an attempt in flight. An attempt that passed
+        the check before the reserve can still reach the service after it.
+        It can reach the service after the next job started. This method
+        cannot prevent that. Such an attempt can then freeze the next job,
+        which waits until a later job resumes the MicroVM or its heartbeat
+        timeout ends it.
+        """
+        deadline = reserve_starts_at(_remaining_seconds(child))
+        state = _SuspendCall()
+
+        def expired() -> Exception:
+            state.abandoned = True
+            return TimeoutError(
+                "SuspendMicrovm did not end before the invocation reserve"
+            )
+
+        def call() -> None:
+            client = self._client()
+            events = getattr(getattr(client, "meta", None), "events", None)
+            if events is not None:
+                _hook_suspend(events)
+            _SUSPEND_CALL.call = state
+            try:
+                client.suspend_microvm(microvmIdentifier=microvm_id)
+            finally:
+                _SUSPEND_CALL.call = None
+
+        try:
+            call_before_deadline(call, deadline, expired)
+        except Exception as error:  # noqa: BLE001
+            detail = (
+                str(add_request_id("SuspendMicrovm", error))
+                if isinstance(error, ClientError)
+                else str(error)
+            )
+            child.logger.warning(
+                f'MicroVM "{self.name}": SuspendMicrovm failed for {microvm_id}. '
+                "The MicroVM may still be running and billed until the idle "
+                "suspend or the end of the session. The next job checks its "
+                "state. A missing permission needs lambda:SuspendMicrovm in the "
+                f"function's execution role. Error: {detail}",
+                extra={"microvmId": microvm_id, "error": detail},
+            )
 
     def _terminate_call(self, microvm_id: str) -> None:
         try:

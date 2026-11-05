@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
 
 import pytest
 from aws_durable_execution_sdk_python_microvm_worker import (
@@ -154,37 +153,24 @@ def test_the_worker_reads_the_idle_time_of_a_session() -> None:
     assert request.payload.auto_suspend_idle_seconds == 60
 
 
-def test_writes_suspend_after_only_when_it_is_set() -> None:
-    fields: dict[str, Any] = {
-        "region": "us-east-1",
-        "microvm_id": "mvm-1",
-        "callback_id": "cb-1",
-        "job_input": 1,
-    }
-
-    assert JobRequest(**fields, suspend_after=True).to_json() == (
-        '{"version":1,"region":"us-east-1","microvmId":"mvm-1",'
-        '"suspendAfter":true,"callbackId":"cb-1","input":1}'
+def test_the_job_request_has_no_suspend_after_field() -> None:
+    # The durable function suspends the MicroVM itself after the job, so the
+    # request carries no field that asks the worker to do it.
+    request = JobRequest(
+        region="us-east-1", microvm_id="mvm-1", callback_id="cb-1", job_input=1
     )
-    assert "suspendAfter" not in JobRequest(**fields).to_json()
 
-
-def test_the_worker_reads_suspend_after() -> None:
-    body = JobRequest(
-        region="us-east-1",
-        microvm_id="mvm-1",
-        callback_id="cb-1",
-        job_input=None,
-        suspend_after=True,
-    ).to_json()
-
-    assert MicrovmJobRequest.from_dict(json.loads(body)).suspend_after is True
+    assert request.to_json() == (
+        '{"version":1,"region":"us-east-1","microvmId":"mvm-1",'
+        '"callbackId":"cb-1","input":1}'
+    )
+    assert not hasattr(request, "suspend_after")
 
 
 def test_the_job_fields_fit_in_the_margin_of_the_input_limit() -> None:
     # 1. The longest MicroVM ID is 256 characters, each escaped in 6 bytes.
     # 2. The longest callback ID is 1,024 characters of 1 byte.
-    # 3. The heartbeat timeout is at most 8 hours, and suspendAfter is set.
+    # 3. The heartbeat timeout is at most 8 hours.
     # So the body of the largest input is at most the 6 MiB that the worker
     # reads.
     body = JobRequest(
@@ -193,10 +179,9 @@ def test_the_job_fields_fit_in_the_margin_of_the_input_limit() -> None:
         callback_id="A" * 1024,
         job_input="x" * (MAX_JOB_INPUT_BYTES - 2),
         heartbeat_timeout_seconds=28_800,
-        suspend_after=True,
     ).to_json()
 
     fixed = len(body.encode()) - MAX_JOB_INPUT_BYTES
-    assert fixed == 112 + len("ap-southeast-5") + 256 * 6 + 1024 + len("28800")
+    assert fixed == 92 + len("ap-southeast-5") + 256 * 6 + 1024 + len("28800")
     assert fixed < 3 * 1024
     assert len(body.encode()) <= 6 * 1024 * 1024

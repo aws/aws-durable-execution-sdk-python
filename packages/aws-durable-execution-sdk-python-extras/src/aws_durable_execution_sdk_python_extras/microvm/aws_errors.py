@@ -26,6 +26,7 @@ MicrovmApiOperation = Literal[
     "ResumeMicrovm",
     "CreateMicrovmAuthToken",
     "TerminateMicrovm",
+    "SuspendMicrovm",
 ]
 """The Lambda MicroVMs API operations that the MicroVM operations call."""
 

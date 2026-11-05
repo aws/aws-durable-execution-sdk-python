@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
-from aws_durable_execution_sdk_python.config import Duration, MapConfig
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
@@ -572,16 +572,11 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
 # suspend_after with the real worker
 # ---------------------------------------------------------------------------
 
-IGNORED_WARNING = (
-    "the worker in MicroVM mvm-1 does not support suspendAfter. The MicroVM "
-    "keeps running after the job."
-)
-
 
 class SimulatedMicrovm:
     """A stand-in for Lambda that keeps the state of one MicroVM.
 
-    1. The worker's SuspendMicrovm sends the ``suspend`` hook, and then sets
+    1. The session's SuspendMicrovm sends the ``suspend`` hook, and then sets
        the state to ``SUSPENDED``. Lambda calls the hook before the freeze.
     2. The session's ResumeMicrovm sends the ``resume`` hook, and then sets
        the state to ``RUNNING``. A probe saw the hook before ``RUNNING``.
@@ -589,18 +584,14 @@ class SimulatedMicrovm:
        job to the worker while the MicroVM runs. While it is suspended, it
        answers HTTP 502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``,
        as the service does.
-
-    ``old_worker`` removes ``suspendAfter`` from each forwarded job. The
-    worker then behaves as a release that does not know the field.
     """
 
-    def __init__(self, *, old_worker: bool = False) -> None:
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._state = "RUNNING"
         self.worker: MicrovmWorker | None = None
         self.suspended: list[str] = []
         self.answers: list[int] = []
-        self._old_worker = old_worker
         simulated = self
 
         class Endpoint(BaseHTTPRequestHandler):
@@ -613,11 +604,9 @@ class SimulatedMicrovm:
                     self.send_header("content-length", "0")
                     self.end_headers()
                     return
-                status, accepted, data = simulated.forward(self.path, body)
+                status, data = simulated.forward(self.path, body)
                 simulated.record(status)
                 self.send_response(status)
-                if accepted:
-                    self.send_header("X-Microvm-Suspend-After", "accepted")
                 self.send_header("content-length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -644,15 +633,11 @@ class SimulatedMicrovm:
         with self._lock:
             self._state = state
 
-    def forward(self, path: str, body: bytes) -> tuple[int, bool, bytes]:
-        """Send the job to the worker. Return the status, whether the worker
-        accepted ``suspendAfter``, and the body of the answer."""
+    def forward(self, path: str, body: bytes) -> tuple[int, bytes]:
+        """Send the job to the worker. Return the status and the body of the
+        answer."""
         worker = self.worker
         assert worker is not None
-        if self._old_worker:
-            document = json.loads(body)
-            document.pop("suspendAfter", None)
-            body = json.dumps(document).encode()
         connection = http.client.HTTPConnection(
             host_of(worker), worker.port, timeout=WAIT
         )
@@ -662,13 +647,7 @@ class SimulatedMicrovm:
             )
             response = connection.getresponse()
             data = response.read()
-            # The endpoint sends one header with a fixed name and a fixed
-            # value. A value from the worker's answer never reaches
-            # send_header. The session accepts only this value. So an answer
-            # with another value reaches the session as an answer without
-            # the header, which the session treats the same way.
-            accepted = response.getheader("X-Microvm-Suspend-After") == "accepted"
-            return response.status, accepted, data
+            return response.status, data
         finally:
             connection.close()
 
@@ -692,8 +671,6 @@ def suspend_after_session(
     fake_client: Any,
     make_pipeline: Callable[[SimulatedMicrovm], Pipeline],
     job: Callable[[Any, MicrovmJobContext], Any],
-    *,
-    old_worker: bool = False,
 ) -> tuple[Any, Any, SimulatedMicrovm, RecordingLogger]:
     """Run a pipeline in a session without auto-suspend, against a real
     worker behind a :class:`SimulatedMicrovm`.
@@ -701,7 +678,7 @@ def suspend_after_session(
     ``make_pipeline`` receives the simulated MicroVM, so the pipeline can
     wait for its state.
     """
-    microvm = SimulatedMicrovm(old_worker=old_worker)
+    microvm = SimulatedMicrovm()
     pipeline = make_pipeline(microvm)
     holder: dict[str, Any] = {}
 
@@ -716,11 +693,9 @@ def suspend_after_session(
             microvm.set_state("RUNNING")
             return {}
 
-    class WorkerMicrovms:
-        """The worker's lambda-microvms client."""
-
-        def suspend_microvm(self, *, microvmIdentifier: str) -> dict[str, Any]:  # noqa: N803
-            microvm.suspended.append(microvmIdentifier)
+        def suspend_microvm(self, **request: Any) -> dict[str, Any]:
+            super().suspend_microvm(**request)
+            microvm.suspended.append(request["microvmIdentifier"])
             post_hook(holder["worker"], "suspend")
             microvm.set_state("SUSPENDED")
             return {}
@@ -738,7 +713,6 @@ def suspend_after_session(
         lambda: start_microvm_worker(
             handler=job,
             create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
-            create_microvms_client=lambda region: WorkerMicrovms(),  # type: ignore[arg-type, return-value]
             logger=logger,
             port=0,
         )
@@ -796,59 +770,16 @@ def test_suspends_after_a_job_and_the_next_job_resumes_the_microvm(
         )
 
     assert outcome == ["build done", "SUSPENDED", "test done"]
-    # The worker acknowledged suspendAfter. So the session logs no warning.
-    assert IGNORED_WARNING not in [record.getMessage() for record in caplog.records]
+    # The session suspended the MicroVM itself, and the worker did not.
+    assert not [record for record in caplog.records if record.levelname == "WARNING"]
     assert microvm.suspended == ["mvm-1"]
-    [line] = logger.extras("suspending the MicroVM after a job")
-    assert list(line) == ["microvmId", "callbackId"]
-    assert line["microvmId"] == "mvm-1"
+    assert logger.extras("suspending the MicroVM after a job") == []
     # The flag makes the second job check the state before delivery. So it
     # resumes the MicroVM before it sends the job, and gets no 502.
     assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
     assert 502 not in microvm.answers
     assert microvm.state() == "RUNNING"
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
-
-
-def test_suspends_after_a_map_with_one_suspend_after_item(fake_client: Any) -> None:
-    def slow_echo(job_input: Any, context: MicrovmJobContext) -> Any:
-        # The items run at once. So the worker suspends only when the last
-        # of them ends. The sleep keeps each job running until every item
-        # has delivered its job.
-        time.sleep(1)
-        return f"{job_input} done"
-
-    def make_pipeline(microvm: SimulatedMicrovm) -> Pipeline:
-        def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
-            shards: list[Any] = ctx.map(
-                ["a", "b", "c"],
-                lambda item_context, item, index, items: vm.invoke(
-                    item_context,
-                    f"shard-{item}",
-                    job_input=item,
-                    options=options(suspend_after=item == "a"),
-                ),
-                name="shards",
-                config=MapConfig(max_concurrency=3),
-            ).get_results()
-            between = ctx.step(lambda _: microvm.wait_for("SUSPENDED"), name="pause")
-            after = vm.invoke(ctx, "after", job_input="after", options=options())
-            return [shards, between, after]
-
-        return pipeline
-
-    outcome, client, microvm, logger = suspend_after_session(
-        fake_client, make_pipeline, slow_echo
-    )
-
-    assert outcome == [["a done", "b done", "c done"], "SUSPENDED", "after done"]
-    # One request from item a, and one suspend.
-    assert microvm.suspended == ["mvm-1"]
-    assert len(logger.extras("suspending the MicroVM after a job")) == 1
-    # The job after the map resumed the MicroVM, with the flag or after a
-    # 502, depending on which invocation ran item a.
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert microvm.state() == "RUNNING"
 
 
 def test_a_replay_that_lost_the_flag_resumes_through_the_check_after_a_502(
@@ -892,38 +823,6 @@ def test_a_replay_that_lost_the_flag_resumes_through_the_check_after_a_502(
     assert microvm.answers[-2:] == [502, 202]
     assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
     assert microvm.state() == "RUNNING"
-
-
-def test_an_old_worker_ignores_suspend_after_and_the_session_warns_once(
-    fake_client: Any, caplog: pytest.LogCaptureFixture
-) -> None:
-    def make_pipeline(microvm: SimulatedMicrovm) -> Pipeline:
-        def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
-            return [
-                vm.invoke(
-                    ctx, name, job_input=name, options=options(suspend_after=True)
-                )
-                for name in ["build", "test"]
-            ]
-
-        return pipeline
-
-    with caplog.at_level(logging.WARNING):
-        outcome, client, microvm, logger = suspend_after_session(
-            fake_client, make_pipeline, echo, old_worker=True
-        )
-
-    assert outcome == ["build done", "test done"]
-    # The worker sent no acknowledgement and never suspended the MicroVM.
-    assert microvm.suspended == []
-    assert logger.extras("suspending the MicroVM after a job") == []
-    warnings = [
-        record
-        for record in caplog.records
-        if record.levelname == "WARNING" and record.getMessage() == IGNORED_WARNING
-    ]
-    assert len(warnings) == 1
-    assert client.requests("resume_microvm") == []
 
 
 class LosingProxy:

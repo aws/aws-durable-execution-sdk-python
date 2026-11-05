@@ -31,9 +31,10 @@ Answer = BaseException | Callable[[dict[str, Any]], Any] | None
 class FakeMicrovmsClient:
     """Records Lambda MicroVMs API calls, and answers from scripted lists.
 
-    ``launches``, ``tokens``, ``terminates``, and ``resumes`` hold the
-    answers of ``run_microvm``, ``create_microvm_auth_token``,
-    ``terminate_microvm``, and ``resume_microvm``, in order. Each answer is an
+    ``launches``, ``tokens``, ``terminates``, ``resumes``, and ``suspends``
+    hold the answers of ``run_microvm``, ``create_microvm_auth_token``,
+    ``terminate_microvm``, ``resume_microvm``, and ``suspend_microvm``, in
+    order. Each answer is an
     exception to raise, a function that receives the request, or ``None`` for
     success. After a list ends, every call succeeds.
 
@@ -54,6 +55,7 @@ class FakeMicrovmsClient:
         tokens: list[Answer] | None = None,
         terminates: list[Answer] | None = None,
         resumes: list[Answer] | None = None,
+        suspends: list[Answer] | None = None,
         states: list[str | BaseException] | None = None,
         endpoint: str | None = "mvm-1.microvm.example",
         suspended_until_resumed: bool = False,
@@ -66,6 +68,7 @@ class FakeMicrovmsClient:
             "create_microvm_auth_token": list(tokens or []),
             "terminate_microvm": list(terminates or []),
             "resume_microvm": list(resumes or []),
+            "suspend_microvm": list(suspends or []),
         }
         self._states = list(states or [])
         self._lock = threading.Lock()
@@ -99,6 +102,10 @@ class FakeMicrovmsClient:
 
     def terminate_microvm(self, **request: Any) -> dict[str, Any]:
         self._answer("terminate_microvm", request)
+        return {}
+
+    def suspend_microvm(self, **request: Any) -> dict[str, Any]:
+        self._answer("suspend_microvm", request)
         return {}
 
     def resume_microvm(self, **request: Any) -> dict[str, Any]:
@@ -150,19 +157,10 @@ def connect_failed() -> Status:
     return CONNECT_FAILED
 
 
-@pytest.fixture
-def suspend_after_ack() -> dict[str, str]:
-    """The header of a worker that supports ``suspendAfter``."""
-    return dict(SUSPEND_AFTER_ACK)
-
-
 Status = int | tuple[int, dict[str, str]] | None
 
 CONNECT_FAILED: Status = (502, {"x-aws-proxy-error": "MICROVM_CONNECT_FAILED"})
 """The answer of the endpoint of a suspending or suspended MicroVM."""
-
-SUSPEND_AFTER_ACK = {"X-Microvm-Suspend-After": "accepted"}
-"""The header with which a worker acknowledges ``suspendAfter``."""
 
 
 class FakeEndpoint:

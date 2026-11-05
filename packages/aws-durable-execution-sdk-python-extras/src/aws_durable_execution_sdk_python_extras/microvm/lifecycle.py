@@ -161,8 +161,8 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
     The request step of a session without the resume mode calls it after a
     sign that the MicroVM may be suspended: an HTTP 502 from the endpoint
     with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. A
-    worker can suspend its MicroVM after a ``suspend_after`` job. The
-    session can lose the record of that job on replay. So this check runs
+    session can suspend its MicroVM after a ``suspend_after`` job, and can
+    lose the record of that job on replay. So this check runs
     for every session job.
 
     1. ``GetMicrovm`` runs once. A failure other than
