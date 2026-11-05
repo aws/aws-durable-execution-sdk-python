@@ -10,7 +10,7 @@ import os
 import re
 import threading
 import time
-import uuid
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -128,6 +128,59 @@ class _SuspendStoppedError(Exception):
     botocore retries only its own connection and HTTP client errors. So it
     does not retry this one.
     """
+
+
+@dataclass
+class _SuspendCall:
+    """The state of one session ``SuspendMicrovm`` call."""
+
+    attempts: int = 0
+    abandoned: bool = False
+    """The wait for the call gave up at the invocation reserve."""
+
+
+_SUSPEND_CALL = threading.local()
+"""The ``_SuspendCall`` of the call that runs on this thread, if any."""
+
+_HOOKED_EVENTS: weakref.WeakSet[Any] = weakref.WeakSet()
+"""The ``meta.events`` of each client that has ``_stop_suspend_attempt``.
+
+A weak set, so a client that the caller drops is not kept alive."""
+
+_HOOK_LOCK = threading.Lock()
+
+
+def _stop_suspend_attempt(**_: object) -> None:
+    """Stop an attempt of the session ``SuspendMicrovm`` call on this
+    thread: each attempt after the first one, and any attempt after the wait
+    for the call gave up.
+
+    It does nothing on a thread without a session call.
+    """
+    call: _SuspendCall | None = getattr(_SUSPEND_CALL, "call", None)
+    if call is None:
+        return
+    call.attempts += 1
+    if call.attempts > 1:
+        msg = (
+            "SuspendMicrovm makes one attempt. A retry could suspend the "
+            "MicroVM after the next job started."
+        )
+        raise _SuspendStoppedError(msg)
+    if call.abandoned:
+        msg = "SuspendMicrovm did not start before the invocation reserve"
+        raise _SuspendStoppedError(msg)
+
+
+def _hook_suspend(events: Any) -> None:
+    """Register ``_stop_suspend_attempt`` on a client's events, once.
+
+    The lock makes two first suspends on one client register it once.
+    """
+    with _HOOK_LOCK:
+        if events not in _HOOKED_EVENTS:
+            events.register_first(_SUSPEND_BEFORE_SEND, _stop_suspend_attempt)
+            _HOOKED_EVENTS.add(events)
 
 
 RUN_HOOK_DELIVERY = "run-hook"
@@ -795,13 +848,19 @@ class _MicrovmScope:
         window, as in the worker. The handler also covers a caller's client
         that retries.
 
-        The handler acts only on attempts of the thread that runs this call.
-        The default client is cached per Lambda environment. An abandoned
-        call's handler stays registered on it until the call's thread ends.
-        Without the thread check, that handler would stop the call of a
-        later invocation. The check also leaves other calls of a shared
-        client alone. The handler is removed when the call ends. A client
-        without ``meta.events``, such as a test double, gets no handler.
+        Each client gets the handler once, before its first suspend, and
+        keeps it. botocore's emitter stores the handler list of an event
+        without a lock. A handler that is added or removed while another
+        thread emits the event can be missing from the stored list. Two
+        sessions of a ``map`` share the default client. So no suspend
+        changes the handlers of a client that already has the handler.
+
+        Each call keeps its attempt count and its abandoned flag in a
+        thread-local state, on the thread that runs the call. The handler
+        acts only on a thread with such a state. So it leaves the other
+        calls of a shared client alone, and an abandoned call does not stop
+        a later call. A client without ``meta.events``, such as a test
+        double, gets no handler.
 
         botocore cannot cancel an attempt in flight. An attempt that passed
         the check before the reserve can still reach the service after it.
@@ -811,48 +870,24 @@ class _MicrovmScope:
         timeout ends it.
         """
         deadline = reserve_starts_at(_remaining_seconds(child))
-        abandoned = threading.Event()
+        state = _SuspendCall()
 
         def expired() -> Exception:
-            abandoned.set()
+            state.abandoned = True
             return TimeoutError(
                 "SuspendMicrovm did not end before the invocation reserve"
             )
 
         def call() -> None:
             client = self._client()
-            caller = threading.get_ident()
-            attempts = 0
-
-            def stop_attempt(**_: object) -> None:
-                nonlocal attempts
-                if threading.get_ident() != caller:
-                    return
-                attempts += 1
-                if attempts > 1:
-                    msg = (
-                        "SuspendMicrovm makes one attempt. A retry could "
-                        "suspend the MicroVM after the next job started."
-                    )
-                    raise _SuspendStoppedError(msg)
-                if abandoned.is_set():
-                    msg = "SuspendMicrovm did not start before the invocation reserve"
-                    raise _SuspendStoppedError(msg)
-
             events = getattr(getattr(client, "meta", None), "events", None)
-            if events is None:
-                client.suspend_microvm(microvmIdentifier=microvm_id)
-                return
-            # A fresh ID per call. botocore ignores a second registration
-            # with an ID it already has.
-            unique_id = f"aws-durable-execution-microvm-suspend-{uuid.uuid4().hex}"
-            events.register_first(
-                _SUSPEND_BEFORE_SEND, stop_attempt, unique_id=unique_id
-            )
+            if events is not None:
+                _hook_suspend(events)
+            _SUSPEND_CALL.call = state
             try:
                 client.suspend_microvm(microvmIdentifier=microvm_id)
             finally:
-                events.unregister(_SUSPEND_BEFORE_SEND, unique_id=unique_id)
+                _SUSPEND_CALL.call = None
 
         try:
             call_before_deadline(call, deadline, expired)

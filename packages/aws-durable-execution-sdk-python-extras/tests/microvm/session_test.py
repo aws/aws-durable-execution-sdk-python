@@ -1865,6 +1865,20 @@ class _Body:
         yield self._data
 
 
+def _botocore_client(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A real botocore client with the default client's three attempts and
+    no retry delay."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    return boto3.session.Session().client(
+        "lambda-microvms",
+        region_name="us-west-2",
+        config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
+    )
+
+
 def _botocore_suspends(
     fake_client: Any, monkeypatch: pytest.MonkeyPatch, **fields: Any
 ) -> tuple[Any, Any]:
@@ -1874,24 +1888,18 @@ def _botocore_suspends(
     retry delay. Returns the fake client and the botocore client. The fake
     client's ``suspend_done`` is set when a call ends.
     """
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-key")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
-    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
-    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
-    botocore_client = boto3.session.Session().client(
-        "lambda-microvms",
-        region_name="us-west-2",
-        config=Config(retries={"mode": "standard", "total_max_attempts": 3}),
-    )
+    botocore_client = _botocore_client(monkeypatch)
 
     class Client(fake_client):  # type: ignore[misc, valid-type]
         meta = botocore_client.meta
         suspend_done = threading.Event()
+        suspends_ended = 0
 
         def suspend_microvm(self, **request: Any) -> Any:
             try:
                 return botocore_client.suspend_microvm(**request)
             finally:
+                type(self).suspends_ended += 1
                 self.suspend_done.set()
 
     return Client(**fields), botocore_client
@@ -1992,9 +2000,11 @@ def test_sends_no_suspend_attempt_after_the_reserve_when_the_next_job_runs(
     assert "did not end before the invocation reserve" in warning
 
 
-def _suspend_handlers(botocore_client: Any) -> list[str]:
-    handlers = botocore_client.meta.events._emitter._unique_id_handlers  # noqa: SLF001
-    return [key for key in handlers if "microvm-suspend" in key]
+def _suspend_hooks(botocore_client: Any) -> int:
+    """Count the session's suspend handlers on the client."""
+    emitter = botocore_client.meta.events._emitter  # noqa: SLF001
+    handlers = emitter._handlers.prefix_search(operation._SUSPEND_BEFORE_SEND)  # noqa: SLF001
+    return sum(handler is operation._stop_suspend_attempt for handler in handlers)  # noqa: SLF001
 
 
 def test_makes_one_suspend_attempt_before_the_reserve_too(
@@ -2034,8 +2044,6 @@ def test_makes_one_suspend_attempt_before_the_reserve_too(
                 None,
                 [("build", succeed_with(1))],
             )
-        # The handler is removed when the call ends, also when it raises.
-        assert _suspend_handlers(botocore_client) == []
     finally:
         botocore_client.close()
 
@@ -2053,10 +2061,11 @@ def test_an_abandoned_suspend_does_not_stop_the_next_suspend_on_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The default client is cached per Lambda environment. The old suspend
-    # call is held past the reserve, so its handler stays on the client.
+    # call is held past the reserve, so it is abandoned and still runs.
     # The next job also has suspend_after, and its call loses its answer.
-    # The next call makes exactly its one attempt. The old handler does not
-    # stop it, and its own handler stops the retry.
+    # The next call makes exactly its one attempt. The old call's abandoned
+    # state does not stop it, and the handler stops its retry. The second
+    # suspend does not register the handler again.
     monkeypatch.setattr(
         operation,
         "_remaining_seconds",
@@ -2094,10 +2103,10 @@ def test_an_abandoned_suspend_does_not_stop_the_next_suspend_on_the_client(
                 None,
                 [("build", succeed_with(1)), ("test", succeed_with(2))],
             )
-        assert len(_suspend_handlers(botocore_client)) == 1
+        assert _suspend_hooks(botocore_client) == 1
     finally:
         release.set()
-        _wait_until(lambda: _suspend_handlers(botocore_client) == [])
+        _wait_until(lambda: client.suspends_ended == 2)
         botocore_client.close()
 
     assert outcome(result) == {"result": [1, 2]}
@@ -2162,6 +2171,235 @@ def test_stops_only_the_attempts_of_its_own_call_on_a_shared_client(
     assert outcome(result) == {"result": 1}
     assert sent == ["mvm-other/suspend", "mvm-1/suspend"]
     assert suspend_warnings(caplog) == []
+
+
+def _scope(client: Any) -> operation._MicrovmScope:  # noqa: SLF001
+    return operation._MicrovmScope(  # noqa: SLF001
+        name="pipeline",
+        config=session_config(client),
+        partition="aws",
+        region="us-west-2",
+        timeout_seconds=3600,
+        retry_strategy=lambda error, attempt: RetryDecision.no_retry(),
+    )
+
+
+def _suspend(scope: Any, microvm_id: str, remaining: float | None) -> None:
+    """Run the session's suspend call, with ``remaining`` seconds left in
+    the invocation, or without a deadline."""
+    lambda_context = (
+        None
+        if remaining is None
+        else SimpleNamespace(get_remaining_time_in_millis=lambda: remaining * 1000)
+    )
+    child = SimpleNamespace(
+        logger=logging.getLogger(__name__), lambda_context=lambda_context
+    )
+    scope.suspend(child, microvm_id)
+
+
+def _sent_to(sent: list[str]) -> Callable[..., AWSResponse]:
+    def service(request: Any, **_: Any) -> AWSResponse:
+        sent.append(request.url.rsplit("/microvms/", 1)[1])
+        return _ok_answer()
+
+    return service
+
+
+class _EndedCalls:
+    """A client whose ``suspend_microvm`` is the botocore call. ``ended``
+    is set for a MicroVM when its call ends."""
+
+    def __init__(self, botocore_client: Any) -> None:
+        self.meta = botocore_client.meta
+        self._client = botocore_client
+        self.ended = {"mvm-a": threading.Event(), "mvm-b": threading.Event()}
+
+    def suspend_microvm(self, **request: Any) -> Any:
+        try:
+            return self._client.suspend_microvm(**request)
+        finally:
+            self.ended[request["microvmIdentifier"]].set()
+
+
+@pytest.mark.parametrize(
+    "held", [False, True], ids=["answer-lost", "held-past-reserve"]
+)
+def test_keeps_the_cutoff_of_a_suspend_that_starts_while_another_emits(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, held: bool
+) -> None:
+    # botocore's emitter computes and stores the handler list of an event
+    # without a lock.
+    # 1. Suspend A computes the list of its before-send event. It stops
+    #    before it stores the list.
+    # 2. Suspend B starts on the same client.
+    # 3. A stores its list. B's attempts then use the stored list.
+    # A change of the client's handlers in step 2 would leave B's attempts
+    # without the cutoff. Two sessions of a map share the default client.
+    # So B still makes one attempt, and no attempt after its wait gave up.
+    botocore_client = _botocore_client(monkeypatch)
+    client = _EndedCalls(botocore_client)
+    scope = _scope(client)
+    a_computed, a_go, a_sent, b_entered, b_gave_up = (
+        threading.Event() for _ in range(5)
+    )
+    b_sent: list[float] = []
+
+    def b_entered_botocore(params: Any, **_: Any) -> None:
+        if params["microvmIdentifier"] == "mvm-b":
+            b_entered.set()
+
+    def hold_b(request: Any, **_: Any) -> None:
+        if "/mvm-b/" in request.url:
+            a_sent.wait(WAIT)
+            if held:
+                b_gave_up.wait(WAIT)
+
+    def service(request: Any, **_: Any) -> AWSResponse:
+        if "/mvm-a/" in request.url:
+            # A stays in its call until B's call ended.
+            a_sent.set()
+            client.ended["mvm-b"].wait(WAIT)
+            return _ok_answer()
+        b_sent.append(time.monotonic())
+        raise ConnectionClosedError(endpoint_url="https://lambda.example")
+
+    events = botocore_client.meta.events
+    events.register(
+        "before-parameter-build.lambda-microvms.SuspendMicrovm", b_entered_botocore
+    )
+    events.register("before-sign.lambda-microvms.SuspendMicrovm", hold_b)
+    events.register(operation._SUSPEND_BEFORE_SEND, service)  # noqa: SLF001
+    trie = events._emitter._handlers  # noqa: SLF001
+    search = trie.prefix_search
+    computed: list[Any] = []
+
+    def hold_the_first_list(key: str) -> Any:
+        handlers = search(key)
+        if key == operation._SUSPEND_BEFORE_SEND and not computed:  # noqa: SLF001
+            computed.append(handlers)
+            a_computed.set()
+            a_go.wait(WAIT)
+        return handlers
+
+    monkeypatch.setattr(trie, "prefix_search", hold_the_first_list)
+    a = threading.Thread(
+        target=_suspend, args=(scope, "mvm-a", INVOCATION_RESERVE_SECONDS + WAIT)
+    )
+    b = threading.Thread(
+        target=_suspend,
+        args=(scope, "mvm-b", INVOCATION_RESERVE_SECONDS + (1.5 if held else WAIT)),
+    )
+    try:
+        with caplog.at_level(logging.WARNING):
+            a.start()
+            assert a_computed.wait(WAIT)
+            b.start()
+            assert b_entered.wait(WAIT)
+            a_go.set()
+            if held:
+                # B's wait gave up at the reserve. Its call goes on now.
+                b.join(WAIT)
+                b_gave_up.set()
+            assert client.ended["mvm-b"].wait(WAIT)
+            a.join(WAIT)
+            b.join(WAIT)
+    finally:
+        for event in (a_go, a_sent, b_gave_up, client.ended["mvm-b"]):
+            event.set()
+        a.join(WAIT)
+        botocore_client.close()
+
+    assert len(b_sent) == (0 if held else 1)
+    [warning] = suspend_warnings(caplog)
+    assert "for mvm-b" in warning
+    assert (
+        "did not end before the invocation reserve"
+        if held
+        else "SuspendMicrovm makes one attempt"
+    ) in warning
+
+
+def test_two_first_suspends_on_a_client_register_the_handler_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two sessions start their first suspend on a new client at the same
+    # time. The second one waits until the first one registered the
+    # handler, and does not register it again. A second handler would count
+    # each attempt twice and stop the first attempt.
+    botocore_client = _botocore_client(monkeypatch)
+    scope = _scope(botocore_client)
+    events = botocore_client.meta.events
+    sent: list[str] = []
+    events.register(operation._SUSPEND_BEFORE_SEND, _sent_to(sent))  # noqa: SLF001
+    registering, second, release = (threading.Event() for _ in range(3))
+    registrations: list[Any] = []
+    register_first = events.register_first
+
+    def hold_the_first_registration(*args: Any, **kwargs: Any) -> None:
+        registrations.append(args)
+        if len(registrations) == 1:
+            registering.set()
+            release.wait(WAIT)
+        else:
+            second.set()
+        register_first(*args, **kwargs)
+
+    class SignallingLock:
+        """A lock that signals when a second thread asks for it."""
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._entries = 0
+
+        def __enter__(self) -> None:
+            self._entries += 1
+            if self._entries == 2:
+                second.set()
+            self._lock.acquire()
+
+        def __exit__(self, *_: object) -> None:
+            self._lock.release()
+
+    monkeypatch.setattr(events, "register_first", hold_the_first_registration)
+    monkeypatch.setattr(operation, "_HOOK_LOCK", SignallingLock())
+    a = threading.Thread(target=_suspend, args=(scope, "mvm-a", None))
+    b = threading.Thread(target=_suspend, args=(scope, "mvm-b", None))
+    try:
+        a.start()
+        assert registering.wait(WAIT)
+        b.start()
+        assert second.wait(WAIT)
+        release.set()
+        a.join(WAIT)
+        b.join(WAIT)
+    finally:
+        release.set()
+        botocore_client.close()
+
+    assert len(registrations) == 1
+    assert _suspend_hooks(botocore_client) == 1
+    assert sorted(sent) == ["mvm-a/suspend", "mvm-b/suspend"]
+
+
+def test_leaves_a_later_call_of_the_client_on_the_same_thread_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without a deadline, the suspend call runs on the session's thread.
+    # A later call of the client on that thread is not the session's call.
+    botocore_client = _botocore_client(monkeypatch)
+    sent: list[str] = []
+    botocore_client.meta.events.register(
+        operation._SUSPEND_BEFORE_SEND,  # noqa: SLF001
+        _sent_to(sent),
+    )
+    try:
+        _suspend(_scope(botocore_client), "mvm-1", None)
+        botocore_client.suspend_microvm(microvmIdentifier="mvm-2")
+    finally:
+        botocore_client.close()
+
+    assert sent == ["mvm-1/suspend", "mvm-2/suspend"]
 
 
 def test_checks_the_state_before_the_job_after_a_failed_suspend_after_job(
