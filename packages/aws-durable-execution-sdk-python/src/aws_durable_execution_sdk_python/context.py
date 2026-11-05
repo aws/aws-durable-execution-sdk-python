@@ -606,10 +606,17 @@ class DurableContext(DurableContextProtocol):
             was_replaying and next_exists and not next_terminal and not next_is_step
         )
         # Before-the-op flips:
-        # - brand-new next op (no checkpoint): always flip to NEW.
+        # - brand-new next op (no checkpoint): flip to NEW, unless the operation
+        #   is virtual. A virtual container never checkpoints itself, so the
+        #   absence of a checkpoint at its id is by design and is not evidence
+        #   of new work; its inner operations may still have history to replay.
+        #   Keep replay status and let the child refine to NEW via its own
+        #   look-ahead against its inner step ids.
         # - non-terminal STEP-type op (brand-new or retrying): the user function
         #   is about to run real work, so flip to NEW before it.
-        if was_replaying and (not next_exists or (next_is_step and not next_terminal)):
+        if was_replaying and (
+            (not next_exists and not is_virtual) or (next_is_step and not next_terminal)
+        ):
             self._set_replay_status_new()
         try:
             yield

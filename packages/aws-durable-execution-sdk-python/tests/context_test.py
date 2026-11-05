@@ -3303,6 +3303,182 @@ def test_virtual_child_checkpoint_is_rejected_before_replay_hooks(
     assert child_body_calls == []
 
 
+def _named_wait_op(
+    operation_id: str,
+    name: str,
+    parent_id: str | None,
+    status: OperationStatus = OperationStatus.SUCCEEDED,
+) -> Operation:
+    """Build a WAIT checkpoint with the identity fields replay validation checks."""
+    return Operation(
+        operation_id=operation_id,
+        operation_type=OperationType.WAIT,
+        status=status,
+        sub_type=OperationSubType.WAIT,
+        name=name,
+        parent_id=parent_id,
+    )
+
+
+def _install_update_recorder(state: ExecutionState) -> list[str]:
+    """Record operation ids passed to emit_operation_update_hook."""
+    updates: list[str] = []
+    state.emit_operation_update_hook = lambda op: updates.append(op.operation_id)  # type: ignore[method-assign]
+    return updates
+
+
+def test_virtual_child_preserves_replay_and_emits_update_for_inner_wait():
+    """A virtual child with no container checkpoint keeps replay status.
+
+    A virtual container intentionally has no checkpoint, so the absence of one
+    at its id must not flip the creator to NEW before the child is created.
+    Otherwise the inner wait's stored history is bypassed and its update
+    notification is dropped. Regression test for issue #889.
+    """
+    state = _replay_state({})
+    parent = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    context_id = parent._peek_next_operation_id()  # noqa: SLF001
+    child_probe = parent.create_child_context(context_id, is_virtual=True)
+    wait_id = child_probe._peek_next_operation_id()  # noqa: SLF001
+    state._operations[wait_id] = _named_wait_op(  # noqa: SLF001
+        wait_id, "virtual-wait", parent_id=None
+    )
+    state._updated_operation_ids.add(wait_id)  # noqa: SLF001
+
+    child_entered_replay: list[bool] = []
+    emitted_updates: list[str] = _install_update_recorder(state)
+
+    def body(child: DurableContext) -> str:
+        child_entered_replay.append(child.is_replaying())
+        child.wait(Duration.from_seconds(5), name="virtual-wait")
+        return "ok"
+
+    result = parent.run_in_child_context(
+        body, name="virtual-context", config=ChildConfig(is_virtual=True)
+    )
+
+    # The child inherits REPLAY and the updated wait's notification is delivered.
+    assert child_entered_replay == [True]
+    assert emitted_updates == [wait_id]
+    assert result == "ok"
+
+
+def test_replay_aware_brand_new_non_virtual_op_flips_to_new():
+    """A brand-new non-virtual operation is new work and flips to NEW.
+
+    Control for the virtual case: without `is_virtual`, a missing checkpoint at
+    the operation id means the operation is brand-new, so the context flips to
+    NEW before the body runs.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    inside_status: list[bool] = []
+    with ctx._replay_aware(is_virtual=False):  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    assert inside_status == [False]
+
+
+def test_replay_aware_brand_new_virtual_op_keeps_replay():
+    """A brand-new virtual operation keeps replay status.
+
+    A virtual container never checkpoints itself, so the missing checkpoint is
+    by design and must not flip the context to NEW before its child is created.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    inside_status: list[bool] = []
+    with ctx._replay_aware(is_virtual=True):  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    assert inside_status == [True]
+
+
+def test_virtual_child_refines_to_new_at_genuinely_new_inner_operation():
+    """A virtual child keeps replay until its own look-ahead finds new work.
+
+    The virtual container's missing checkpoint preserves the child in REPLAY,
+    but the first inner operation with no checkpoint is genuine new work and
+    must flip the child to NEW before it runs.
+    """
+    state = _replay_state({})
+    parent = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    child_entry_replay: list[bool] = []
+    child_after_new_op: list[bool] = []
+
+    def body(child: DurableContext) -> str:
+        child_entry_replay.append(child.is_replaying())
+        with child._replay_aware():  # noqa: SLF001
+            child._create_step_id()  # noqa: SLF001 - consume the brand-new op id
+            child_after_new_op.append(child.is_replaying())
+        return "ok"
+
+    parent.run_in_child_context(
+        body, name="virtual-context", config=ChildConfig(is_virtual=True)
+    )
+
+    assert child_entry_replay == [True]
+    assert child_after_new_op == [False]
+
+
+def test_nested_virtual_child_preserves_replay_and_emits_update_for_inner_wait():
+    """A virtual child nested in a virtual child still preserves replay status.
+
+    Each virtual layer has no checkpoint by design. The inner wait's history
+    must survive both layers and its update notification delivered once.
+    """
+    state = _replay_state({})
+    parent = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    outer_id = parent._peek_next_operation_id()  # noqa: SLF001
+    outer_probe = parent.create_child_context(outer_id, is_virtual=True)
+    inner_id = outer_probe._peek_next_operation_id()  # noqa: SLF001
+    inner_probe = outer_probe.create_child_context(inner_id, is_virtual=True)
+    wait_id = inner_probe._peek_next_operation_id()  # noqa: SLF001
+    state._operations[wait_id] = _named_wait_op(  # noqa: SLF001
+        wait_id, "nested-wait", parent_id=None
+    )
+    state._updated_operation_ids.add(wait_id)  # noqa: SLF001
+
+    inner_entered_replay: list[bool] = []
+    emitted_updates: list[str] = _install_update_recorder(state)
+
+    def inner_body(inner: DurableContext) -> str:
+        inner_entered_replay.append(inner.is_replaying())
+        inner.wait(Duration.from_seconds(5), name="nested-wait")
+        return "ok"
+
+    def outer_body(outer: DurableContext) -> str:
+        return outer.run_in_child_context(
+            inner_body, name="inner-context", config=ChildConfig(is_virtual=True)
+        )
+
+    result = parent.run_in_child_context(
+        outer_body, name="outer-context", config=ChildConfig(is_virtual=True)
+    )
+
+    assert inner_entered_replay == [True]
+    assert emitted_updates == [wait_id]
+    assert result == "ok"
+
+
 def test_replay_aware_emits_update_hook_for_operation_updated_since_last_invocation():
     """Updated terminal operations emit operation_end, not replay start+end."""
     captured: list[tuple[str, str, bool, OperationStatus]] = []
