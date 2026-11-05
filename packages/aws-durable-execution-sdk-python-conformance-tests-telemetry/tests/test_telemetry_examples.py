@@ -7,17 +7,25 @@ The conformance runner reads requirement mappings from
 ``TestingMetadata.TestDescription``. SAM builds each function through
 ``src/Makefile``. A renamed handler or a missing build target fails only when a
 cloud deployment runs. So these tests pin that wiring locally.
+The module also runs both handlers through ``DurableFunctionTestRunner`` and checks
+the exported record.
 """
 
 from __future__ import annotations
 
 import ast
+import importlib.util
+import json
 import re
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
+import boto3
 import pytest
 import yaml
+from aws_durable_execution_sdk_python.execution import InvocationStatus
+from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
 
 PKG_DIR = Path(__file__).resolve().parents[1]
@@ -25,8 +33,15 @@ SRC_DIR = PKG_DIR / "src"
 TEMPLATE_PATH = PKG_DIR / "template.yaml"
 
 SDK_REPOSITORY_URL = "git+https://github.com/aws/aws-durable-execution-sdk-python.git"
-EXPECTED_COVERAGE: list[str] = ["telemetry-1"]
-EXPECTED_MODULES: frozenset[str] = frozenset({"telemetry_1_success"})
+EXPECTED_MODULES: frozenset[str] = frozenset(
+    {"telemetry_1_success", "telemetry_2_failure"}
+)
+# Logical ID -> requirement ID. The function name suffix must equal the
+# requirement ID, so the runner can match the deployed function to its test.
+EXPECTED_FUNCTIONS: dict[str, str] = {
+    "Telemetry1Success": "telemetry-1",
+    "Telemetry2Failure": "telemetry-2",
+}
 
 
 class CfnLoader(yaml.SafeLoader):
@@ -76,16 +91,6 @@ def template() -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def makefile() -> str:
     return (SRC_DIR / "Makefile").read_text(encoding="utf-8")
-
-
-def test_coverage_is_exactly_telemetry_1(template: dict[str, Any]) -> None:
-    coverage: list[str] = [
-        description
-        for resource in functions(template).values()
-        for description in resource["TestingMetadata"]["TestDescription"]
-    ]
-
-    assert coverage == EXPECTED_COVERAGE
 
 
 def test_every_function_points_at_an_existing_handler_module(
@@ -165,14 +170,36 @@ def test_log_group_name_reaches_the_handler_environment(
     assert variables["TELEMETRY_LOG_GROUP_NAME"] == ("!Ref", "TelemetryLogGroupName")
 
 
-def test_function_settings_match_the_contract(template: dict[str, Any]) -> None:
-    function: dict[str, Any] = functions(template)["Telemetry1Success"]
+def test_template_functions_are_exactly_the_expected_set(
+    template: dict[str, Any],
+) -> None:
+    assert {
+        logical_id: resource["TestingMetadata"]["TestDescription"]
+        for logical_id, resource in functions(template).items()
+    } == {
+        logical_id: [requirement_id]
+        for logical_id, requirement_id in EXPECTED_FUNCTIONS.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("logical_id", "requirement_id"), sorted(EXPECTED_FUNCTIONS.items())
+)
+def test_function_settings_match_the_contract(
+    template: dict[str, Any], logical_id: str, requirement_id: str
+) -> None:
+    function: dict[str, Any] = functions(template)[logical_id]
 
     assert function["Properties"]["FunctionName"] == (
         "!Sub",
-        "${AWS::StackName}-telemetry-1",
+        f"${{AWS::StackName}}-{requirement_id}",
     )
     assert function["Properties"]["Role"] == ("!Ref", "LambdaExecutionRoleArn")
+
+
+def test_global_function_settings_match_the_contract(
+    template: dict[str, Any],
+) -> None:
     assert template["Globals"]["Function"]["Runtime"] == "python3.13"
     assert template["Globals"]["Function"]["DurableConfig"] == {
         "ExecutionTimeout": 300,
@@ -180,9 +207,114 @@ def test_function_settings_match_the_contract(template: dict[str, Any]) -> None:
     }
 
 
-def test_handler_reads_the_log_group_from_the_environment() -> None:
-    source: str = (SRC_DIR / "telemetry_1_success.py").read_text(encoding="utf-8")
+def load_handler_module(module: str) -> ModuleType:
+    """Execute ``src/<module>.py`` from its file, as the Lambda runtime does.
 
-    assert 'os.environ.get("TELEMETRY_LOG_GROUP_NAME")' in source
-    assert "raise RuntimeError" in source
-    assert "CloudWatchLogsExporter(log_group_name=log_group_name)" in source
+    ``src/`` is not a package, so the module is loaded by path. Executing the
+    module runs the import-time environment guard and constructs the plugin.
+    """
+    spec = importlib.util.spec_from_file_location(module, SRC_DIR / f"{module}.py")
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+LOG_GROUP_NAME = "/aws/lambda/telemetry-test"
+
+
+class FakeLogsClient:
+    """Stands in for the boto3 ``logs`` client and records each PutLogEvents call."""
+
+    def __init__(self) -> None:
+        self.put_log_events_calls: list[dict[str, Any]] = []
+
+    def create_log_stream(self, **_kwargs: Any) -> None:
+        return None
+
+    def put_log_events(self, **kwargs: Any) -> None:
+        self.put_log_events_calls.append(kwargs)
+
+    def records(self) -> list[dict[str, Any]]:
+        """Return the JSON record of every log event, in send order."""
+        return [
+            json.loads(event["message"])
+            for call in self.put_log_events_calls
+            for event in call["logEvents"]
+        ]
+
+
+@pytest.fixture
+def logs_client(monkeypatch: pytest.MonkeyPatch) -> FakeLogsClient:
+    """Give the handler's exporter a fake ``logs`` client.
+
+    The handler constructs ``CloudWatchLogsExporter`` at import, and the
+    exporter calls ``boto3.client("logs")`` in its constructor. botocore
+    resolves credentials when it creates a client, so a real client would
+    touch the credential chain and IMDS. The fake keeps the test on the real
+    ``export`` and ``render`` path and stops at the AWS API boundary.
+    """
+    client = FakeLogsClient()
+    monkeypatch.setenv("TELEMETRY_LOG_GROUP_NAME", LOG_GROUP_NAME)
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+    return client
+
+
+@pytest.mark.parametrize("module", sorted(EXPECTED_MODULES))
+def test_handler_module_fails_fast_without_log_group(
+    monkeypatch: pytest.MonkeyPatch, module: str
+) -> None:
+    monkeypatch.delenv("TELEMETRY_LOG_GROUP_NAME", raising=False)
+
+    with pytest.raises(RuntimeError, match="TELEMETRY_LOG_GROUP_NAME must be set"):
+        load_handler_module(module)
+
+
+def test_telemetry_1_handler_succeeds_and_records_the_step(
+    logs_client: FakeLogsClient,
+) -> None:
+    module = load_handler_module("telemetry_1_success")
+
+    with DurableFunctionTestRunner(
+        handler=module.handler, execution_timeout=15
+    ) as runner:
+        result = runner.run(input='{"value": 1}')
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert len(logs_client.put_log_events_calls) == 1
+    assert logs_client.put_log_events_calls[0]["logGroupName"] == LOG_GROUP_NAME
+    record = logs_client.records()[0]
+    assert record["status"] == "SUCCEEDED"
+    increment = record["operationsByName"]["increment"]
+    assert increment["type"] == "STEP"
+    assert increment["status"] == "SUCCEEDED"
+    assert increment["count"] == 1
+
+
+def test_telemetry_2_handler_fails_with_payment_failed_after_one_attempt(
+    logs_client: FakeLogsClient,
+) -> None:
+    """telemetry-2 pins both messages through ExpectedResult and ExpectedExecutionHistory."""
+    module = load_handler_module("telemetry_2_failure")
+
+    with DurableFunctionTestRunner(
+        handler=module.handler, execution_timeout=15
+    ) as runner:
+        result = runner.run(input="{}")
+
+    assert result.status is InvocationStatus.FAILED
+    assert result.error is not None
+    assert result.error.message == "payment failed"
+    assert len(logs_client.put_log_events_calls) == 1
+    assert logs_client.put_log_events_calls[0]["logGroupName"] == LOG_GROUP_NAME
+    record = logs_client.records()[0]
+    assert record["status"] == "FAILED"
+    assert "output" not in record
+    assert record["error"]["message"] == "payment failed"
+    charge = record["operationsByName"]["charge"]
+    assert charge["type"] == "STEP"
+    assert charge["status"] == "FAILED"
+    assert charge["count"] == 1
+    assert charge["failedCount"] == 1
+    assert charge["maxAttempt"] == 1
+    assert charge["error"]["message"] == "card declined"
