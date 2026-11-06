@@ -3,7 +3,7 @@
 import logging
 from types import SimpleNamespace
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from aws_durable_execution_sdk_python import DurableContext
@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python_otel import (
     ExecutionOtelPluginFactory,
     InvocationOtelPlugin,
     InvocationOtelPluginFactory,
+    create_otel_plugin_factory,
     OtelPluginConfig,
 )
 
@@ -363,6 +364,109 @@ def test_one_view_and_unrelated_plugin_suspend_resume(
         span.context is not None and span.context.span_id == customer.parent.span_id
         for span in spans
     )
+
+
+@pytest.mark.parametrize("mode", ["execution", "invocation"])
+def test_unified_factory_preserves_view_across_resume(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    mode: Literal["execution", "invocation"],
+) -> None:
+    provider, exporter = telemetry
+    calls: list[str] = []
+
+    def work(_step_context: Any) -> str:
+        calls.append("work")
+        return "saved"
+
+    def handler(_event: Any, durable: DurableContext) -> str:
+        result = durable.step(work, name="work")
+        durable.wait(Duration.from_seconds(1), name="pause")
+        return result
+
+    configured = durable_execution(
+        handler,
+        plugins=[
+            create_otel_plugin_factory(
+                OtelPluginConfig(tracer_provider=provider, enrich_logger=False),
+                mode=mode,
+            )
+        ],
+    )
+    with DurableFunctionTestRunner(handler=configured) as runner:
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    assert calls == ["work"]
+    spans = exporter.get_finished_spans()
+    workflows = [span for span in spans if span.name == "Workflow"]
+    invocations = [span for span in spans if span.name == "Invocation"]
+    assert len(workflows) == 1
+    assert len(invocations) == 2
+    operation = next(span for span in spans if span.name == "work")
+    expected_parents = workflows if mode == "execution" else invocations
+    assert any(operation.parent == parent.context for parent in expected_parents)
+
+
+def test_default_alias_conflicts_with_explicit_invocation_view(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, exporter = telemetry
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "otel")
+    invocation = InvocationOtelPluginFactory(
+        OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    )
+    with pytest.raises(PluginLoadError, match="Keep only one"):
+        durable_execution(_handler, plugins=[invocation])
+    assert not exporter.get_finished_spans()
+
+
+@pytest.mark.parametrize(
+    "entry_names", ["otel,otel-invocation", "otel-invocation,otel"]
+)
+def test_default_alias_conflicts_with_environment_invocation_view(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    entry_names: str,
+) -> None:
+    """Two different views are rejected whichever order they are listed in.
+
+    The same pair is rejected by the Java SDK's exclusive-group validation, so
+    the one-view contract holds across both regardless of alias ordering.
+    """
+    _, exporter = telemetry
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", entry_names)
+    with pytest.raises(PluginLoadError, match="Keep only one"):
+        durable_execution(_handler)
+    assert not exporter.get_finished_spans()
+
+
+@pytest.mark.parametrize("entry_names", ["otel", "otel,otel-execution"])
+def test_default_alias_loads_one_execution_view(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    entry_names: str,
+) -> None:
+    """Aliases of the same view dedup by factory identity rather than failing.
+
+    ``otel`` and ``otel-execution`` name one object, so the loader skips the
+    second and a single execution view is instrumented. The Java SDK builds a
+    separate factory per provider and rejects this pair instead; the READMEs
+    tell operators to set exactly one name in both languages.
+    """
+    _, exporter = telemetry
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", entry_names)
+
+    def handler(_event: Any, durable: DurableContext) -> str:
+        return durable.step(lambda _: "saved", name="work")
+
+    wrapped = durable_execution(handler)
+    with DurableFunctionTestRunner(handler=wrapped) as runner:
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    spans = exporter.get_finished_spans()
+    workflows = [span for span in spans if span.name == "Workflow"]
+    assert len(workflows) == 1
+    assert sum(span.name == "Invocation" for span in spans) == 1
+    operation = next(span for span in spans if span.name == "work")
+    assert operation.parent == workflows[0].context
 
 
 def test_no_otel_plugin_remains_valid(
