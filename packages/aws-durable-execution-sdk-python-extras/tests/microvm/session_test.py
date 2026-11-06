@@ -2618,21 +2618,70 @@ def test_a_session_that_never_suspends_makes_no_state_check_for_a_boot_answer(
     assert len(endpoint.requests) == 4
 
 
-def test_keeps_sending_after_a_denied_state_check_and_names_it_at_the_end(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    make_error: Any,
-    connect_failed: Any,
-    caplog: pytest.LogCaptureFixture,
+def get_microvm_error(code: str, status: int) -> ClientError:
+    """A ``GetMicrovm`` error that carries a request ID."""
+    response: Any = {
+        "Error": {"Code": code, "Message": f"{code} message"},
+        "ResponseMetadata": {"HTTPStatusCode": status, "RequestId": "req-get"},
+    }
+    return ClientError(response, "GetMicrovm")
+
+
+def test_fails_at_once_when_the_state_check_is_denied(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
-    # The failures end at 0.25, 0.75, 1.75, and 3.75 seconds. The checks run
-    # at 0.25 and 3.75 seconds, and both are denied. The next delay of 4
-    # seconds does not fit in the window.
     endpoint = fake_endpoint([connect_failed] * 10)
     client = fake_client(
         endpoint=endpoint.url,
-        states=[make_error("AccessDeniedException", 403)] * 10,
+        states=[get_microvm_error("AccessDeniedException", 403)] * 10,
+    )
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return vm.invoke(ctx, "build", job_input=1, options=job())
+
+    # The default strategy decides on the error of the step.
+    result = run(session_handler(session_config(client, retry_strategy=None), body))
+
+    assert outcome(result) == {
+        "error": "MicrovmDeliveryError",
+        "message": (
+            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 '
+            "gave a sign that it does not run. GetMicrovm was denied, so the "
+            "operation cannot check its state. The function's execution role "
+            "needs lambda:GetMicrovm. GetMicrovm request ID: req-get."
+        ),
+    }
+    step_error = (
+        result.get_context("pipeline").get_context("build").get_step("build.request")
+    ).error
+    assert step_error is not None
+    assert step_error.type == (
+        "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
+        "MicrovmPermissionDeniedError"
+    )
+    assert len(client.requests("get_microvm")) == 1
+    assert len(endpoint.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [("ThrottlingException", 429), ("ServiceException", 500)],
+)
+def test_keeps_sending_after_a_failed_state_check_with_one_warning(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    connect_failed: Any,
+    caplog: pytest.LogCaptureFixture,
+    code: str,
+    status: int,
+) -> None:
+    # The failures come at 0, 0.25, 0.75, 1.75, and 3.75 seconds. The checks
+    # run at 0 and 3.75 seconds, and both fail. The sixth request succeeds.
+    endpoint = fake_endpoint([connect_failed] * 5)
+    client = fake_client(
+        endpoint=endpoint.url,
+        states=[get_microvm_error(code, status)] * 10,
     )
 
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
@@ -2640,20 +2689,19 @@ def test_keeps_sending_after_a_denied_state_check_and_names_it_at_the_end(
             ctx,
             "build",
             job_input=1,
-            options=job(retry_window=Duration.from_seconds(5)),
+            options=job(retry_window=Duration.from_seconds(10)),
         )
 
     with caplog.at_level(logging.WARNING):
-        result = run(session_handler(session_config(client), body))
+        result = run(
+            session_handler(session_config(client, retry_strategy=None), body),
+            None,
+            [("build", succeed_with("done"))],
+        )
 
-    error = outcome(result)
-    assert error["error"] == "MicrovmDeliveryError"
-    assert error["message"].endswith(
-        "Last failure: HTTP 502. GetMicrovm was denied, so the operation could "
-        "not check whether the MicroVM is suspended."
-    )
+    assert outcome(result) == {"result": "done"}
     assert len(client.requests("get_microvm")) == 2
-    assert len(endpoint.requests) == 5
+    assert len(endpoint.requests) == 6
     assert warnings(caplog, STATE_CHECK_WARNING) == 1
 
 

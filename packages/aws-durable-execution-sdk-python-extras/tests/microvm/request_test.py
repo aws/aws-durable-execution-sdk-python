@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import socket
 import threading
 import time
@@ -679,19 +680,24 @@ def test_checks_for_a_suspend_after_a_connect_failure_or_no_answer(
         windows.append(left)
         return None
 
+    # 4. The reserve starts 90 seconds from the start, after the 60-second
+    #    retry window. The check gets the time until the reserve.
     status = send_job(
         options(
             fake_client(),
             endpoint.url,
             [],
             sleep=clock.sleep,
+            remaining_seconds=lambda: 100 - (clock.now - 1000),
             suspend_check=check,
         )
     )
 
     assert status == 202
     assert clock.sleeps == [0.25, 0.5, 1.0, 2.0, 4.0]
-    assert windows == [60 - 0.25, 60 - 7.75]
+    # The checks run right after the failures at 0 and 3.75 seconds, before
+    # the delay.
+    assert windows == [90, 90 - 3.75]
 
 
 @pytest.mark.parametrize(
@@ -729,9 +735,10 @@ def test_checks_for_a_suspend_at_most_once_per_2_seconds(
         options(fake_client(), endpoint.url, [], sleep=clock.sleep, suspend_check=check)
     )
 
-    # The failures end at 0.25, 0.75, 1.75, 3.75, and 7.75 seconds. A check
-    # that would come less than 2 seconds after the last one is skipped.
-    assert checked_at == [0.25, 3.75, 7.75]
+    # The failures come at 0, 0.25, 0.75, 1.75, and 3.75 seconds, and each
+    # check runs before the delay. A check that would come less than 2
+    # seconds after the last one is skipped.
+    assert checked_at == [0, 3.75]
     assert len(endpoint.requests) == 6
 
 
@@ -750,61 +757,50 @@ def test_sends_the_next_request_to_the_endpoint_that_the_suspend_check_returns(
     assert len(after.requests) == 1
 
 
-def test_ends_the_tier_when_the_suspend_check_has_no_time_left(
+def test_starts_no_suspend_check_within_1_second_of_the_reserve(
     fake_client: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
+    # The time left falls below the minimum after the first request. So the
+    # tier ends as it does at the reserve, without a GetMicrovm call.
     endpoint = fake_endpoint([connect_failed])
     checks: list[float] = []
+    readings = iter([12.0, 12.0, 12.0])
 
-    with pytest.raises(MicrovmEndpointUnavailableError, match="Last failure: HTTP 502"):
+    with pytest.raises(
+        MicrovmEndpointUnavailableError, match="after 1 attempts.*HTTP 502"
+    ):
         send_job(
             options(
                 fake_client(),
                 endpoint.url,
                 [],
-                retry_window_seconds=1,
-                window_started_at=time.monotonic() - 0.2,
-                sleep=lambda seconds: time.sleep(0.9),
+                remaining_seconds=lambda: next(readings, 10.5),
                 suspend_check=checks.append,
             )
         )
 
     assert checks == []
+    assert len(endpoint.requests) == 1
 
 
-def test_adds_the_note_to_the_final_error(
+def test_runs_the_suspend_check_when_the_sign_used_up_the_window(
     fake_client: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
-    endpoint = fake_endpoint([connect_failed] * 10)
+    # The window started 2 seconds ago and lasts 1 second. The check still
+    # runs, and the window then ends the tier.
+    endpoint = fake_endpoint([connect_failed])
+    checks: list[float] = []
 
-    with pytest.raises(MicrovmEndpointUnavailableError) as raised:
+    with pytest.raises(MicrovmEndpointUnavailableError, match="HTTP 502"):
         send_job(
             options(
                 fake_client(),
                 endpoint.url,
                 [],
                 retry_window_seconds=1,
-                unavailable_note=lambda: "GetMicrovm was denied.",
+                window_started_at=time.monotonic() - 2,
+                suspend_check=checks.append,
             )
         )
 
-    assert str(raised.value).endswith("Last failure: HTTP 502. GetMicrovm was denied.")
-
-
-def test_adds_no_note_when_the_note_is_none(
-    fake_client: Any, fake_endpoint: Any
-) -> None:
-    endpoint = fake_endpoint([503] * 10)
-
-    with pytest.raises(MicrovmEndpointUnavailableError) as raised:
-        send_job(
-            options(
-                fake_client(),
-                endpoint.url,
-                [],
-                retry_window_seconds=1,
-                unavailable_note=lambda: None,
-            )
-        )
-
-    assert str(raised.value).endswith("Last failure: HTTP 503.")
+    assert checks == [math.inf]

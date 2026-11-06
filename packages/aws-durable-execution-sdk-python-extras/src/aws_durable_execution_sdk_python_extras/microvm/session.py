@@ -112,8 +112,9 @@ def microvm_session(
     A job with ``suspend_after`` makes the session call ``SuspendMicrovm``
     after the job's result arrives. Each later job of the handle then checks
     the state before delivery, as with ``auto_suspend_on_idle``. That record is kept in
-    memory only. So every job of every session also checks the state after
-    a sign of a suspended MicroVM: no answer, or an HTTP 502 with
+    memory only. So every job over HTTP, of a session or of
+    :func:`microvm`, also checks the state after a sign that the MicroVM
+    does not run: no answer, or an HTTP 502 with
     ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A boot gives no such
     sign, unless the worker takes more than 10 seconds to start listening.
     Then the first delivery gets no answer, and the operation makes one
@@ -292,7 +293,10 @@ class MicrovmSession:
                 suspended MicroVM reports it too.
             MicrovmDeliveryError: When the delivery fails after all retries,
                 or the route rejects the job. A suspended MicroVM whose
-                ``ResumeMicrovm`` is denied fails the delivery at once.
+                ``ResumeMicrovm`` is denied fails the delivery at once. A
+                denied ``GetMicrovm`` in the check after a sign of a
+                suspended MicroVM fails it at once too. The message names
+                the permission.
             MicrovmJobFailedError: When the MicroVM reports a failure, or
                 sends a result that is not valid JSON.
             MicrovmTimeoutError: When no result or heartbeat arrives in time.
@@ -337,7 +341,6 @@ class MicrovmSession:
                 request=options,
                 retry_window_seconds=retry_window_seconds,
                 resume=self._resume_mode,
-                suspend_check=True,
             )
             try:
                 result = callback.result()

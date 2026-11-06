@@ -338,10 +338,17 @@ def microvm(
             starts.
         MicrovmLaunchError: When ``RunMicrovm`` fails after all retries, or
             rejects the config, for example an empty ``image_identifier``.
-        MicrovmNotRunningError: When ``CreateMicrovmAuthToken`` reports that
-            the MicroVM no longer exists. It is a ``MicrovmDeliveryError``.
+        MicrovmNotRunningError: When the MicroVM of an HTTP delivery is
+            terminating, terminated, or removed. The request step calls
+            ``GetMicrovm`` after each HTTP 502 with
+            ``x-aws-proxy-error: MICROVM_CONNECT_FAILED`` or request
+            without an answer, at most once per 2 seconds, and
+            ``CreateMicrovmAuthToken`` can report a removed MicroVM. It is
+            a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
-            or the route answers a 4xx status such as 404, or a redirect.
+            or the route answers a 4xx status such as 404, or a redirect, or
+            ``GetMicrovm`` or ``ResumeMicrovm`` is denied. The message names
+            the permission.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
             result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.
@@ -368,15 +375,9 @@ _STATE_CHECK_WARNING = (
     "GetMicrovm failed, so the operation could not check whether the MicroVM "
     "is suspended. The request step keeps sending the job."
 )
-"""The warning, once per job, after a failed state check of a session
-without the resume mode."""
-
-_GET_DENIED_NOTE = (
-    "GetMicrovm was denied, so the operation could not check whether the "
-    "MicroVM is suspended."
-)
-"""The sentence that the first tier adds to its final error after a denied
-state check. Without it, the message names only the last HTTP failure."""
+"""The warning, once per step attempt, so up to 5 with the default retry
+strategy, after a transient failure of the state check of an attempt
+without the resume mode. A denied check fails the step instead."""
 
 
 def step_retry_strategy(
@@ -568,7 +569,6 @@ class _MicrovmScope:
         request: MicrovmRequestConfig,
         retry_window_seconds: int,
         resume: bool | Callable[[], bool] = False,
-        suspend_check: bool = False,
     ) -> None:
         """Run the request step, ``<job_name>.request``: POST the job to the
         MicroVM's endpoint.
@@ -581,10 +581,33 @@ class _MicrovmScope:
         ``GetMicrovm`` reports. A session sets it when its MicroVM can be
         suspended. A callable is read at the start of each attempt.
 
-        Without ``resume``, ``suspend_check`` turns on the check after a sign
-        of a suspended MicroVM. See :func:`resume_if_suspended`. A session
-        sets it for every job. A failed ``GetMicrovm`` call in that check
-        logs one warning per job, and the attempt keeps sending the job.
+        An attempt without ``resume`` calls ``GetMicrovm`` after each sign
+        that the MicroVM does not run, at most once per 2 seconds: an HTTP
+        502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no
+        answer. See
+        :func:`resume_if_suspended`. The check runs first after the sign,
+        before the retry window and the backoff, and only the invocation
+        reserve limits it. So a sign that uses up the window still gets the
+        check. The resume and the wait for ``RUNNING`` after the check get
+        a new retry window, and end earlier at the reserve. So the wait
+        ends without a Lambda deadline too. Every job over HTTP runs this
+        check, from :func:`microvm` and from a session:
+
+        1. The endpoint of a terminated MicroVM answers that 502, measured
+           in us-east-1. Without the check, the request step retries the
+           502 as a MicroVM that is still starting, in both retry tiers.
+           With the check, a terminating, terminated, or removed MicroVM
+           fails the job at once with ``MicrovmNotRunningError``.
+        2. A session MicroVM can also give that sign while it is suspended.
+           The check then resumes it.
+
+        A denied ``GetMicrovm`` call in the check fails the step at once,
+        with a message that names ``lambda:GetMicrovm``. The default retry
+        strategy does not retry it, and the job fails with
+        ``MicrovmDeliveryError``. Any other failed ``GetMicrovm`` call, such
+        as throttling, a 5xx answer, or a connection error, logs one warning
+        per step attempt, so up to 5 with the default retry strategy, and
+        the attempt keeps sending the job.
 
         ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
         answer ``ResourceNotFoundException`` for a removed MicroVM. An
@@ -610,8 +633,9 @@ class _MicrovmScope:
         path = DEFAULT_MICROVM_JOB_PATH if request.path is None else request.path
         port = DEFAULT_MICROVM_PORT if request.port is None else request.port
         microvm_id = launched.microvm_id
-        # One warning per job for a failed state check. The attempts of the
-        # step in this invocation share it.
+        # One warning per step attempt for a failed state check. The core
+        # SDK runs each retry of the step in a new invocation, which calls
+        # deliver() again. So each attempt gets a new Event.
         check_warned = threading.Event()
 
         def attempt(step_context: StepContext) -> None:
@@ -637,7 +661,6 @@ class _MicrovmScope:
 
             recheck: Callable[[float], str | None] | None = None
             check: Callable[[float], str | None] | None = None
-            get_denied = False
             if strict:
                 require_time_for_call(remaining_seconds)
 
@@ -646,14 +669,18 @@ class _MicrovmScope:
 
                 endpoint = running(retry_window_seconds) or endpoint
                 recheck = running
-            elif suspend_check:
+            else:
 
                 def check_state(max_wait_seconds: float) -> str | None:
-                    nonlocal get_denied
+                    # The check runs before the retry window decides, so
+                    # what remains of the window does not limit it. The wait
+                    # for a resume gets the length of the window, and the
+                    # invocation reserve. So a compute without a deadline
+                    # still ends the wait.
+                    wait = min(max_wait_seconds, retry_window_seconds)
                     try:
-                        return resume_if_suspended(options(max_wait_seconds))
+                        return resume_if_suspended(options(wait))
                     except MicrovmStateCheckError as error:
-                        get_denied = get_denied or error.denied
                         if not check_warned.is_set():
                             check_warned.set()
                             logger.warning(
@@ -693,9 +720,6 @@ class _MicrovmScope:
                         window_started_at=window_started_at,
                         recheck=recheck,
                         suspend_check=check,
-                        unavailable_note=lambda: (
-                            _GET_DENIED_NOTE if get_denied else None
-                        ),
                     )
                 )
             except ClientError as error:

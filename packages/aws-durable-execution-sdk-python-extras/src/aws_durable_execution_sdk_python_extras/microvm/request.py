@@ -233,8 +233,9 @@ class SendJobOptions:
     window_started_at: float | None = None
     """When the retry window started, as a ``time.monotonic()`` time.
 
-    ``None`` means the moment :func:`send_job` is called. A session job sets
-    it to the start of the state check that runs before delivery. So the
+    ``None`` means the moment :func:`send_job` is called. ``deliver()`` sets
+    it for every job, of :func:`microvm` and of a session, to the start of
+    the attempt, before any state check that runs before delivery. So the
     wait for a resume and the request's own retries share one window.
     """
     recheck: Callable[[float], str | None] | None = None
@@ -249,24 +250,26 @@ class SendJobOptions:
     from it keeps the current endpoint.
     """
     suspend_check: Callable[[float], str | None] | None = None
-    """Resume the MicroVM if it is suspended, and return its current
-    endpoint.
+    """Check the MicroVM state once. It raises for a MicroVM that has ended,
+    resumes a suspended MicroVM, and returns the current endpoint.
 
-    A session job without :attr:`recheck` sets it. A session can suspend the
-    MicroVM after a ``suspend_after`` job, and can lose the record of that
-    job on replay. A suspended or suspending MicroVM gets no
+    Every job without :attr:`recheck` sets it, from :func:`microvm` and
+    from a session. A suspended, suspending, or terminated MicroVM gets no
     answer to a request, or its endpoint answers HTTP 502 with
-    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. So the next attempt calls
-    it after either sign, at most once per 2 seconds. A booting MicroVM's
-    endpoint holds the request until the worker listens. A boot gives no
-    such sign, unless the worker takes more than 10 seconds to start
-    listening. Then the first delivery gets no answer, and the operation
-    makes one ``GetMicrovm`` call. It receives what remains of the retry
-    window, in seconds. ``None`` from it keeps the current endpoint.
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. The answer of a
+    terminated MicroVM was measured in us-east-1. A session can suspend
+    the MicroVM after a ``suspend_after`` job, and can lose the record of
+    that job on replay. So the next attempt calls it after either sign, at
+    most once per 2 seconds. A booting MicroVM's endpoint holds the request
+    until the worker listens. A boot gives no such sign, unless the worker
+    takes more than 10 seconds to start listening. Then the first delivery
+    gets no answer, and the operation makes one ``GetMicrovm`` call. So a
+    job whose MicroVM runs makes no extra call, except in that case. It
+    runs before the retry window and the backoff are checked, so the window
+    does not limit it. It receives the time until the invocation reserve,
+    in seconds, or infinity when the compute reports no deadline. ``None``
+    from it keeps the current endpoint.
     """
-    unavailable_note: Callable[[], str | None] | None = None
-    """A sentence to add to the message of
-    :class:`MicrovmEndpointUnavailableError`, or ``None``."""
 
 
 def require_time_for_call(remaining_seconds: Callable[[], float | None]) -> None:
@@ -343,12 +346,20 @@ def send_job(options: SendJobOptions) -> int:
     The endpoint can accept a request before Lambda has sent the ``run``
     hook. So the body carries the MicroVM ID too.
 
-    A session job checks the MicroVM state in one of two ways. With
-    ``recheck``, it checks after any 502, 503, 504, or request without an
-    answer. With ``suspend_check``, it checks only after a 502 with
+    A job checks the MicroVM state in one of two ways. With ``recheck``, it
+    checks after any 502, 503, 504, or request without an answer. With
+    ``suspend_check``, it checks only after a 502 with
     ``x-aws-proxy-error: MICROVM_CONNECT_FAILED`` or a request without an
-    answer, at most once per 2 seconds. The function then sends the job
-    again to the endpoint that the check reports.
+    answer, at most once per 2 seconds. That check runs first after the
+    sign, before the window and backoff rules, and only the invocation
+    reserve limits it. When less than 1 second remains before the reserve,
+    no check starts, and the tier raises
+    :class:`MicrovmEndpointUnavailableError`. A check that finds the
+    MicroVM terminating, terminated, or removed raises
+    ``MicrovmStateError``, and the job fails with
+    ``MicrovmNotRunningError``. Otherwise the function applies the window
+    and backoff rules, and sends the job again to the endpoint that the
+    check reports.
 
     The same job can reach the route more than once:
 
@@ -377,8 +388,9 @@ def send_job(options: SendJobOptions) -> int:
             ``MicrovmStateError``.
         MicrovmStateError: When ``recheck`` or ``suspend_check`` reports
             that the MicroVM can no longer run a job.
-        MicrovmResumeDeniedError: When ``suspend_check`` finds a suspended
-            MicroVM, and ``ResumeMicrovm`` is denied.
+        MicrovmPermissionDeniedError: When ``suspend_check`` is denied
+            ``GetMicrovm``, or finds a suspended MicroVM and is denied
+            ``ResumeMicrovm``.
         Exception: When ``CreateMicrovmAuthToken`` fails otherwise. The
             message of a botocore error ends with the request ID.
     """
@@ -394,11 +406,9 @@ def send_job(options: SendJobOptions) -> int:
 
     def unavailable() -> Exception:
         elapsed_ms = round((time.monotonic() - started) * 1000)
-        note = options.unavailable_note() if options.unavailable_note else None
         return MicrovmEndpointUnavailableError(
             f"The MicroVM did not accept the job at {options.path} after "
             f"{attempt} attempts in {elapsed_ms} ms. Last failure: {last_failure}."
-            + (f" {note}" if note else "")
         )
 
     def deadline() -> float:
@@ -487,6 +497,30 @@ def send_job(options: SendJobOptions) -> int:
                 )
                 raise MicrovmRequestRejectedError(msg, status)
 
+        # A job without the resume mode checks the state only after a sign
+        # that the MicroVM does not run: it is suspended, or it ended. The
+        # check resumes a suspended MicroVM, and raises for one that ended.
+        # A booting MicroVM gives no such sign.
+        # The check runs first, before the window and backoff rules, and
+        # only the invocation reserve limits it. A delayed sign can use up
+        # the whole window, and the check must still find an ended MicroVM.
+        # The check repeats after each such failure, at most once per 2
+        # seconds. The worker can suspend after the job's first state check,
+        # and the last call to the service wins.
+        if options.suspend_check is not None and (
+            status is None or answer.connect_failed
+        ):
+            now = time.monotonic()
+            if (
+                last_suspend_check is None
+                or now - last_suspend_check >= _SUSPEND_CHECK_INTERVAL_SECONDS
+            ):
+                last_suspend_check = now
+                left = _call_budget(
+                    reserve_starts_at(options.remaining_seconds), math.inf, unavailable
+                )
+                endpoint = options.suspend_check(left) or endpoint
+                url = _endpoint_url(endpoint, options.path)
         if time.monotonic() + delay > deadline():
             raise unavailable()
         options.logger.info(
@@ -506,25 +540,6 @@ def send_job(options: SendJobOptions) -> int:
                 raise unavailable()
             endpoint = options.recheck(left) or endpoint
             url = _endpoint_url(endpoint, options.path)
-        # A session without the resume mode checks the state only after a
-        # sign of a suspended MicroVM. A booting MicroVM gives no such sign.
-        # The check repeats after each such failure, at most once per 2
-        # seconds. The worker can suspend after the job's first state check,
-        # and the last call to the service wins.
-        if options.suspend_check is not None and (
-            status is None or answer.connect_failed
-        ):
-            now = time.monotonic()
-            if (
-                last_suspend_check is None
-                or now - last_suspend_check >= _SUSPEND_CHECK_INTERVAL_SECONDS
-            ):
-                last_suspend_check = now
-                left = deadline() - now
-                if left <= 0:
-                    raise unavailable()
-                endpoint = options.suspend_check(left) or endpoint
-                url = _endpoint_url(endpoint, options.path)
 
 
 def _create_auth_token(options: SendJobOptions) -> Mapping[str, str]:

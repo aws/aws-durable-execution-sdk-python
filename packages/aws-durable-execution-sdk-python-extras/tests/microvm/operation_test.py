@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import datetime
+import email.message
 import hashlib
 import json
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +36,7 @@ from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
 )
+from botocore.exceptions import ClientError, EndpointConnectionError
 from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
@@ -1199,3 +1203,430 @@ def test_passes_an_execution_error_of_the_wait_through(
     assert result.error is not None
     assert "history does not match" in (result.error.message or "")
     assert client.requests("terminate_microvm") == []
+
+
+# The state check of microvm() over HTTP.
+#
+# 1. The endpoint of a terminated MicroVM answers HTTP 502 with
+#    x-aws-proxy-error: MICROVM_CONNECT_FAILED. That was measured live.
+# 2. The request step then calls GetMicrovm after each such answer, at
+#    most once per 2 seconds, as in a session job.
+# 3. An ended MicroVM fails the job at once with MicrovmNotRunningError.
+#    A running MicroVM keeps its retries.
+
+STATE_CHECK_WARNING = (
+    "GetMicrovm failed, so the operation could not check whether the MicroVM "
+    "is suspended. The request step keeps sending the job."
+)
+
+
+def ended_client(fake_client: Any, endpoint: str, state: str) -> Any:
+    """A fake client whose GetMicrovm output carries the stateReason and the
+    request ID, as the service's output does. The service's stateReason
+    after TerminateMicrovm is ``Success.``. The message removes its
+    trailing period, so the message has no double period."""
+    client = fake_client(endpoint=endpoint, states=[state])
+    plain = client.get_microvm
+
+    def get_microvm(**request: Any) -> dict[str, Any]:
+        return {
+            **plain(**request),
+            "stateReason": "Success.",
+            "ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "req-1"},
+        }
+
+    client.get_microvm = get_microvm
+    return client
+
+
+@pytest.mark.parametrize("state", ["TERMINATED", "TERMINATING"])
+@pytest.mark.parametrize("answer", ["connect-failed", "no-answer"])
+def test_fails_at_once_when_the_microvm_has_ended(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    connect_failed: Any,
+    state: str,
+    answer: str,
+) -> None:
+    endpoint = fake_endpoint([connect_failed if answer == "connect-failed" else None])
+    client = ended_client(fake_client, endpoint.url, state)
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmNotRunningError",
+        "message": (
+            f'MicroVM "build": the job could not be delivered: MicroVM mvm-1 is '
+            f"{state}: Success. GetMicrovm request ID: req-1."
+        ),
+    }
+    assert len(endpoint.requests) == 1
+    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_fails_at_once_when_get_microvm_finds_no_microvm(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
+) -> None:
+    endpoint = fake_endpoint([connect_failed])
+    response: Any = {
+        "Error": {"Code": "ResourceNotFoundException", "Message": "not found"},
+        "ResponseMetadata": {"HTTPStatusCode": 404, "RequestId": "req-2"},
+    }
+    not_found = ClientError(response, "GetMicrovm")
+    client = fake_client(endpoint=endpoint.url, states=[not_found])
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {})
+
+    error = outcome(result)
+    assert error["error"] == "MicrovmNotRunningError"
+    assert error["message"].startswith(
+        'MicroVM "build": the job could not be delivered: MicroVM mvm-1 no '
+        "longer exists."
+    )
+    assert error["message"].endswith("GetMicrovm request ID: req-2.")
+    assert len(endpoint.requests) == 1
+    assert len(client.requests("get_microvm")) == 1
+
+
+@pytest.mark.parametrize("state", ["RUNNING", "PENDING"])
+def test_keeps_sending_the_job_when_the_microvm_runs(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    connect_failed: Any,
+    state: str,
+) -> None:
+    endpoint = fake_endpoint([connect_failed])
+    client = fake_client(endpoint=endpoint.url, states=[state])
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    assert len(endpoint.requests) == 2
+    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("resume_microvm") == []
+
+
+def get_microvm_error(code: str, status: int) -> ClientError:
+    """A ``GetMicrovm`` error that carries a request ID."""
+    response: Any = {
+        "Error": {"Code": code, "Message": f"{code} message"},
+        "ResponseMetadata": {"HTTPStatusCode": status, "RequestId": "req-get"},
+    }
+    return ClientError(response, "GetMicrovm")
+
+
+def test_fails_at_once_when_get_microvm_is_denied(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
+) -> None:
+    endpoint = fake_endpoint([connect_failed] * 10)
+    client = fake_client(
+        endpoint=endpoint.url,
+        states=[get_microvm_error("AccessDeniedException", 403)] * 10,
+    )
+    # The default retry strategy decides on the error of the step.
+    config = config_with(
+        client, request=MicrovmRequestConfig(path="/job"), retry_strategy=None
+    )
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmDeliveryError",
+        "message": (
+            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 '
+            "gave a sign that it does not run. GetMicrovm was denied, so the "
+            "operation cannot check its state. The function's execution role "
+            "needs lambda:GetMicrovm. GetMicrovm request ID: req-get."
+        ),
+    }
+    step_error = result.get_context("build").get_step("build.request").error
+    assert step_error is not None
+    assert step_error.type == (
+        "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
+        "MicrovmPermissionDeniedError"
+    )
+    assert len(endpoint.requests) == 1
+    assert state_events(client) == ["get", "terminate"]
+
+
+class SlowDeadEndpoint(urllib.request.OpenerDirector):
+    """An opener that stands in for the endpoint of a dead MicroVM.
+
+    Each request takes ``seconds``, then gets a 502 with
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. A dead
+    endpoint was measured to take 3 to 8 seconds for that 502. The tests use
+    a shorter delay that still uses up a 1-second retry window.
+    """
+
+    def __init__(self, seconds: float, *, answer: bool) -> None:
+        super().__init__()
+        self.seconds = seconds
+        self.answer = answer
+        self.requests = 0
+
+    def open(self, fullurl: Any, data: Any = None, timeout: Any = None) -> Any:
+        self.requests += 1
+        time.sleep(self.seconds)
+        if not self.answer:
+            raise urllib.error.URLError("connection reset")
+        headers = email.message.Message()
+        headers["x-aws-proxy-error"] = "MICROVM_CONNECT_FAILED"
+        raise urllib.error.HTTPError(
+            fullurl.full_url, 502, "Bad Gateway", headers, None
+        )
+
+
+@pytest.mark.parametrize("answer", [True, False], ids=["connect-failed", "no-answer"])
+def test_checks_the_state_after_a_sign_that_uses_up_the_retry_window(
+    run: Any, fake_client: Any, answer: bool
+) -> None:
+    # The delayed sign uses up the 1-second window. The state check still
+    # runs, because only the invocation reserve limits it.
+    opener = SlowDeadEndpoint(1.5, answer=answer)
+    client = ended_client(fake_client, "mvm-1.microvm.example", "TERMINATED")
+    config = config_with(
+        client,
+        request=MicrovmRequestConfig(
+            path="/job", retry_window=Duration.from_seconds(1)
+        ),
+        opener=opener,
+    )
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmNotRunningError",
+        "message": (
+            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 is '
+            "TERMINATED: Success. GetMicrovm request ID: req-1."
+        ),
+    }
+    assert opener.requests == 1
+    assert len(client.requests("get_microvm")) == 1
+
+
+def test_the_wait_for_a_resume_gets_a_new_retry_window_without_a_deadline(
+    run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. The compute reports no deadline, so no invocation reserve applies.
+    # 2. The delayed sign uses up the 1-second window before the state check.
+    # 3. The MicroVM stays SUSPENDED after ResumeMicrovm accepts the resume.
+    # The wait for RUNNING then gets a new 1-second window. It polls at 0,
+    # 0.25, and 0.75 seconds, and the next poll would start after the window.
+    # Without that limit, the wait never ends. So GetMicrovm fails 10
+    # seconds after its first call, and the test fails instead of hanging.
+    monkeypatch.setattr(operation, "_remaining_seconds", lambda context: lambda: None)
+    opener = SlowDeadEndpoint(1.5, answer=True)
+    client = fake_client(endpoint="mvm-1.microvm.example", states=["SUSPENDED"] * 100)
+    plain = client.get_microvm
+    first_call: list[float] = []
+
+    def get_microvm(**request: Any) -> Any:
+        if not first_call:
+            first_call.append(time.monotonic())
+        if time.monotonic() - first_call[0] > 10:
+            msg = "the guard ended a wait for RUNNING without a limit"
+            raise RuntimeError(msg)
+        return plain(**request)
+
+    client.get_microvm = get_microvm
+    config = config_with(
+        client,
+        request=MicrovmRequestConfig(
+            path="/job", retry_window=Duration.from_seconds(1)
+        ),
+        opener=opener,
+    )
+
+    result = run(catching(config), {})
+
+    error = outcome(result)
+    assert error["error"] == "MicrovmDeliveryError"
+    assert error["message"].startswith(
+        'MicroVM "build": the job could not be delivered: MicroVM mvm-1 did not '
+        "reach RUNNING in "
+    )
+    assert error["message"].endswith(" ms. Last state: SUSPENDED.")
+    assert opener.requests == 1
+    assert state_events(client) == ["get", "resume", "get", "get", "get", "terminate"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        get_microvm_error("ThrottlingException", 429),
+        get_microvm_error("ServiceException", 500),
+        EndpointConnectionError(endpoint_url="https://lambda.example"),
+    ],
+    ids=["throttled", "5xx", "connection"],
+)
+def test_keeps_sending_the_job_with_one_warning_when_get_microvm_fails(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    connect_failed: Any,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    # The failures come at 0, 0.25, 0.75, 1.75, and 3.75 seconds. The checks
+    # run at 0 and 3.75 seconds, at most once per 2 seconds. Both fail.
+    endpoint = fake_endpoint([connect_failed] * 5)
+    client = fake_client(endpoint=endpoint.url, states=[error] * 10)
+    config = config_with(
+        client,
+        request=MicrovmRequestConfig(
+            path="/job", retry_window=Duration.from_seconds(10)
+        ),
+        retry_strategy=None,
+    )
+
+    with caplog.at_level("WARNING"):
+        result = run(catching(config), {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    assert len(endpoint.requests) == 6
+    assert len(client.requests("get_microvm")) == 2
+    assert (
+        sum(
+            1
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and record.getMessage() == STATE_CHECK_WARNING
+        )
+        == 1
+    )
+
+
+def state_events(client: Any) -> list[str]:
+    """The GetMicrovm, ResumeMicrovm, and TerminateMicrovm calls, in order."""
+    names = {
+        "get_microvm": "get",
+        "resume_microvm": "resume",
+        "terminate_microvm": "terminate",
+    }
+    return [names[call] for call, _ in client.calls if call in names]
+
+
+def test_resumes_a_microvm_suspended_from_outside_and_the_job_succeeds(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
+) -> None:
+    endpoint = fake_endpoint([connect_failed])
+    client = fake_client(endpoint=endpoint.url, states=["SUSPENDED"])
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    assert len(endpoint.requests) == 2
+    assert state_events(client) == ["get", "resume", "get", "terminate"]
+
+
+def test_fails_at_once_when_resume_is_denied_for_a_microvm_suspended_from_outside(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    make_error: Any,
+    connect_failed: Any,
+) -> None:
+    endpoint = fake_endpoint([connect_failed])
+    client = fake_client(
+        endpoint=endpoint.url,
+        states=["SUSPENDED"],
+        resumes=[make_error("AccessDeniedException", 403)],
+    )
+    # The default retry strategy decides on the error of the step.
+    config = config_with(
+        client, request=MicrovmRequestConfig(path="/job"), retry_strategy=None
+    )
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmDeliveryError",
+        "message": (
+            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 is '
+            "SUSPENDED. ResumeMicrovm was denied, so the operation cannot resume "
+            "it. The function's execution role needs lambda:ResumeMicrovm."
+        ),
+    }
+    assert len(endpoint.requests) == 1
+    assert state_events(client) == ["get", "resume", "terminate"]
+
+
+@pytest.mark.parametrize(
+    ("denied", "permission"),
+    [("get", "lambda:GetMicrovm"), ("resume", "lambda:ResumeMicrovm")],
+)
+def test_a_custom_strategy_sees_one_error_type_for_a_denial(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    make_error: Any,
+    connect_failed: Any,
+    denied: str,
+    permission: str,
+) -> None:
+    endpoint = fake_endpoint([connect_failed])
+    error = make_error("AccessDeniedException", 403)
+    client = (
+        fake_client(endpoint=endpoint.url, states=[error])
+        if denied == "get"
+        else fake_client(endpoint=endpoint.url, states=["SUSPENDED"], resumes=[error])
+    )
+    seen: list[tuple[str, str]] = []
+
+    def strategy(error: Exception, attempt: int) -> RetryDecision:
+        seen.append((type(error).__name__, str(error)))
+        return RetryDecision.no_retry()
+
+    config = config_with(
+        client, request=MicrovmRequestConfig(path="/job"), retry_strategy=strategy
+    )
+
+    result = run(catching(config), {})
+
+    assert outcome(result)["error"] == "MicrovmDeliveryError"
+    [(name, message)] = [entry for entry in seen if "denied" in entry[1]]
+    assert name == "MicrovmPermissionDeniedError"
+    assert f"needs {permission}." in message
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_makes_no_state_check_after_a_plain_server_error(
+    run: Any, fake_client: Any, fake_endpoint: Any, status: int
+) -> None:
+    # A plain 5xx comes from a worker that answers. So the MicroVM runs.
+    endpoint = fake_endpoint([status])
+    client = fake_client(endpoint=endpoint.url)
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    assert len(endpoint.requests) == 2
+    assert client.requests("get_microvm") == []
+
+
+@pytest.mark.parametrize("status", [400, 404])
+def test_rejects_the_job_without_a_state_check_for_a_client_error(
+    run: Any, fake_client: Any, fake_endpoint: Any, status: int
+) -> None:
+    endpoint = fake_endpoint([status])
+    client = fake_client(endpoint=endpoint.url)
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmDeliveryError",
+        "message": 'MicroVM "build": the job could not be delivered: The MicroVM '
+        f"rejected the job at /job with HTTP {status}",
+    }
+    assert len(endpoint.requests) == 1
+    assert client.requests("get_microvm") == []
