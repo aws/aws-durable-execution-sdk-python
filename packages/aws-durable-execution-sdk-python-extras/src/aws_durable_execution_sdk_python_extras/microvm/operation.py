@@ -588,8 +588,10 @@ class _MicrovmScope:
         :func:`resume_if_suspended`. The check runs first after the sign,
         before the retry window and the backoff, and only the invocation
         reserve limits it. So a sign that uses up the window still gets the
-        check. Every job over HTTP runs this check, from :func:`microvm` and
-        from a session:
+        check. The resume and the wait for ``RUNNING`` after the check get
+        a new retry window, and end earlier at the reserve. So the wait
+        ends without a Lambda deadline too. Every job over HTTP runs this
+        check, from :func:`microvm` and from a session:
 
         1. The endpoint of a terminated MicroVM answers that 502, measured
            in us-east-1. Without the check, the request step retries the
@@ -670,8 +672,14 @@ class _MicrovmScope:
             else:
 
                 def check_state(max_wait_seconds: float) -> str | None:
+                    # The check runs before the retry window decides, so
+                    # what remains of the window does not limit it. The wait
+                    # for a resume gets the length of the window, and the
+                    # invocation reserve. So a compute without a deadline
+                    # still ends the wait.
+                    wait = min(max_wait_seconds, retry_window_seconds)
                     try:
-                        return resume_if_suspended(options(max_wait_seconds))
+                        return resume_if_suspended(options(wait))
                     except MicrovmStateCheckError as error:
                         if not check_warned.is_set():
                             check_warned.set()
