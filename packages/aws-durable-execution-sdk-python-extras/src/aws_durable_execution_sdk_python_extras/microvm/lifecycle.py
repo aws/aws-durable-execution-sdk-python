@@ -159,7 +159,9 @@ def _denied(microvm_id: str, error: ClientError) -> MicrovmPermissionDeniedError
         "was denied, so the operation cannot check its state. The function's "
         "execution role needs lambda:GetMicrovm."
     )
-    response = error.response if is_microvms_service_error("GetMicrovm", error) else None
+    response = (
+        error.response if is_microvms_service_error("GetMicrovm", error) else None
+    )
     return MicrovmPermissionDeniedError(with_request_id(msg, "GetMicrovm", response))
 
 

@@ -1404,50 +1404,41 @@ def test_checks_the_state_after_a_sign_that_uses_up_the_retry_window(
     assert len(client.requests("get_microvm")) == 1
 
 
-def test_the_wait_for_a_resume_gets_a_new_retry_window_without_a_deadline(
+def test_ends_an_attempt_of_a_suspended_microvm_without_a_deadline(
     run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 1. The compute reports no deadline, so no invocation reserve applies.
     # 2. The delayed sign uses up the 1-second window before the state check.
-    # 3. The MicroVM stays SUSPENDED after ResumeMicrovm accepts the resume.
-    # The wait for RUNNING then gets a new 1-second window. It polls at 0,
-    # 0.25, and 0.75 seconds, and the next poll would start after the window.
-    # Without that limit, the wait never ends. So GetMicrovm fails 10
-    # seconds after its first call, and the test fails instead of hanging.
+    # 3. The MicroVM stays SUSPENDED, and its endpoint keeps answering 502.
+    # The check makes one GetMicrovm call and does not wait. The window then
+    # ends the attempt.
     monkeypatch.setattr(operation, "_remaining_seconds", lambda context: lambda: None)
     opener = SlowDeadEndpoint(1.5, answer=True)
     client = fake_client(endpoint="mvm-1.microvm.example", states=["SUSPENDED"] * 100)
-    plain = client.get_microvm
-    first_call: list[float] = []
+    seen: list[str] = []
 
-    def get_microvm(**request: Any) -> Any:
-        if not first_call:
-            first_call.append(time.monotonic())
-        if time.monotonic() - first_call[0] > 10:
-            msg = "the guard ended a wait for RUNNING without a limit"
-            raise RuntimeError(msg)
-        return plain(**request)
+    def strategy(error: Exception, attempt: int) -> RetryDecision:
+        seen.append(type(error).__name__)
+        return RetryDecision.no_retry()
 
-    client.get_microvm = get_microvm
     config = config_with(
         client,
         request=MicrovmRequestConfig(
             path="/job", retry_window=Duration.from_seconds(1)
         ),
         opener=opener,
+        retry_strategy=strategy,
     )
 
     result = run(catching(config), {})
 
     error = outcome(result)
     assert error["error"] == "MicrovmDeliveryError"
-    assert error["message"].startswith(
-        'MicroVM "build": the job could not be delivered: MicroVM mvm-1 did not '
-        "reach RUNNING in "
-    )
-    assert error["message"].endswith(" ms. Last state: SUSPENDED.")
+    assert "did not accept the job at /job after 1 attempts" in error["message"]
+    assert seen == ["MicrovmEndpointUnavailableError"]
     assert opener.requests == 1
-    assert state_events(client) == ["get", "resume", "get", "get", "get", "terminate"]
+    assert state_events(client) == ["get", "terminate"]
+    assert client.requests("resume_microvm") == []
 
 
 @pytest.mark.parametrize(
@@ -1521,26 +1512,16 @@ def test_keeps_sending_the_job_to_a_microvm_suspended_from_outside(
     assert client.requests("resume_microvm") == []
 
 
-@pytest.mark.parametrize(
-    ("denied", "permission"),
-    [("get", "lambda:GetMicrovm"), ("resume", "lambda:ResumeMicrovm")],
-)
-def test_a_custom_strategy_sees_one_error_type_for_a_denial(
+def test_a_custom_strategy_sees_the_denial_error_type(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
     make_error: Any,
     connect_failed: Any,
-    denied: str,
-    permission: str,
 ) -> None:
     endpoint = fake_endpoint([connect_failed])
     error = make_error("AccessDeniedException", 403)
-    client = (
-        fake_client(endpoint=endpoint.url, states=[error])
-        if denied == "get"
-        else fake_client(endpoint=endpoint.url, states=["SUSPENDED"], resumes=[error])
-    )
+    client = fake_client(endpoint=endpoint.url, states=[error])
     seen: list[tuple[str, str]] = []
 
     def strategy(error: Exception, attempt: int) -> RetryDecision:
@@ -1556,7 +1537,7 @@ def test_a_custom_strategy_sees_one_error_type_for_a_denial(
     assert outcome(result)["error"] == "MicrovmDeliveryError"
     [(name, message)] = [entry for entry in seen if "denied" in entry[1]]
     assert name == "MicrovmPermissionDeniedError"
-    assert f"needs {permission}." in message
+    assert "needs lambda:GetMicrovm." in message
 
 
 @pytest.mark.parametrize("status", [500, 503])

@@ -9,7 +9,6 @@ import hashlib
 import os
 import re
 import threading
-import time
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
