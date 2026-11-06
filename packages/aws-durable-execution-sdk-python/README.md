@@ -57,11 +57,21 @@ durable execution spans as many invocations as it waits, retries or resumes, and
 the instance is dropped when each of those returns — so anything a plugin keeps in
 its attributes is gone by the next invocation of the same execution. State that
 has to survive that has two honest homes: rebuild it from the operation map the
-invocation hooks carry (`InvocationStartInfo.operations` is a full snapshot,
+invocation hooks carry (`InvocationStartInfo.operations` is a snapshot of the
+visible operation map,
 which is how the bundled Telemetry exporter reports operations that completed in an
 earlier invocation), or put it on the factory, which outlives every invocation —
 keyed by execution ARN, and pruned by the owner, because the SDK will not tell the
 factory when an execution ends for good.
+
+`InvocationStartInfo.updated_operations` identifies visible operations updated
+since the handler last observed state. `UpdatedOperationIds` alone cannot supply
+metadata for an operation absent from the snapshot. A cached parent result can
+skip a child's natural operation hooks during replay, even when that child has
+a newly delivered terminal update. Instrumentation that needs those completions
+must also consume invocation-start and checkpoint-change snapshots. The bundled
+OTel plugins retain such updates until their natural End or invocation
+finalization; this does not add synthetic lifecycle hooks for other plugins.
 
 Invocation operation-map snapshots and terminal `OperationEndInfo` own a copy of
 the error's mutable stack-trace list, including virtual child completions without
