@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     CheckpointError,
     CheckpointErrorCategory,
+    DistributedMapError,
     DurableApiErrorCategory,
     DurableExecutionsError,
     DurableOperationError,
@@ -257,6 +258,7 @@ def test_durable_operation_error_with_none_message():
     [
         StepError,
         InvokeError,
+        DistributedMapError,
         ChildContextError,
         WaitForConditionError,
         CallbackError,
