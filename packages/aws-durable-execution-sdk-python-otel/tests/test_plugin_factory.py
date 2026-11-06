@@ -161,7 +161,8 @@ def test_module_level_factories_are_default_configured() -> None:
 def test_declared_entry_points_name_the_bundled_factories() -> None:
     entry_points = _declared_entry_points()
 
-    assert set(entry_points) == {"otel-invocation", "otel-execution"}
+    assert set(entry_points) == {"otel", "otel-invocation", "otel-execution"}
+    assert _resolve(entry_points["otel"]) is EXECUTION_OTEL_PLUGIN_FACTORY
     assert _resolve(entry_points["otel-invocation"]) is INVOCATION_OTEL_PLUGIN_FACTORY
     assert _resolve(entry_points["otel-execution"]) is EXECUTION_OTEL_PLUGIN_FACTORY
 
@@ -176,6 +177,7 @@ def test_declared_entry_points_resolve_to_factories_that_build_plugins() -> None
     builds.
     """
     expected = {
+        "otel": ExecutionOtelPlugin,
         "otel-invocation": InvocationOtelPlugin,
         "otel-execution": ExecutionOtelPlugin,
     }

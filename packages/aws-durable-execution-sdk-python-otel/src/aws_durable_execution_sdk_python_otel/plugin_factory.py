@@ -25,7 +25,7 @@ one of its own that the tracer would never consult.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal, overload
 
 from aws_durable_execution_sdk_python_otel.execution_plugin import (
     ExecutionOtelPlugin,
@@ -94,8 +94,71 @@ class ExecutionOtelPluginFactory:
         return ExecutionOtelPlugin(self.config)
 
 
+@overload
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: Literal["execution"] = "execution",
+) -> ExecutionOtelPluginFactory: ...
+
+
+@overload
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: Literal["invocation"],
+) -> InvocationOtelPluginFactory: ...
+
+
+# A mode read from configuration at runtime is a plain ``str``, which neither
+# literal overload accepts. This last overload keeps that call type-checkable;
+# the union it returns is what a caller can know without a literal, and an
+# unsupported value still raises ``ValueError`` below.
+@overload
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: str,
+) -> ExecutionOtelPluginFactory | InvocationOtelPluginFactory: ...
+
+
+def create_otel_plugin_factory(
+    config: OtelPluginConfig | None = None,
+    *,
+    mode: str = "execution",
+) -> ExecutionOtelPluginFactory | InvocationOtelPluginFactory:
+    """Return a new factory for the selected view, defaulting to execution.
+
+    Each call constructs a factory of the selected view's class, carrying that
+    view's ``exclusive_group`` and registration metadata. Calls are not
+    memoized, so register exactly one: two factories of the same view in
+    ``plugins`` are rejected at registration as a duplicate in the
+    ``aws-durable-execution-otel-view`` exclusive group. Configuration is passed
+    unchanged to that class. Omitted configuration uses the globally configured
+    OpenTelemetry provider, resolved per invocation rather than here.
+
+    Args:
+        config: Existing OTel plugin configuration.
+        mode: ``"execution"`` for Workflow-parented operations, or
+            ``"invocation"`` for Invocation-parented operations.
+
+    Raises:
+        ValueError: If mode is neither ``"execution"`` nor ``"invocation"``.
+    """
+    if mode == "execution":
+        return ExecutionOtelPluginFactory(config)
+    if mode == "invocation":
+        return InvocationOtelPluginFactory(config)
+    raise ValueError("mode must be 'execution' or 'invocation'")
+
+
 INVOCATION_OTEL_PLUGIN_FACTORY = InvocationOtelPluginFactory()
 """Default-configured factory named by the ``otel-invocation`` entry point."""
 
 EXECUTION_OTEL_PLUGIN_FACTORY = ExecutionOtelPluginFactory()
-"""Default-configured factory named by the ``otel-execution`` entry point."""
+"""Default-configured factory named by the ``otel`` and ``otel-execution`` entry points.
+
+Both names resolve to this one object, so ``DURABLE_EXECUTION_PLUGINS=otel,otel-execution``
+loads a single factory: the loader skips the second by identity and logs a warning.
+``otel`` with ``otel-invocation`` names two different views and is rejected.
+"""
