@@ -24,6 +24,8 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from aws_durable_execution_sdk_python_otel import (
+    EXECUTION_OTEL_PLUGIN_FACTORY,
+    INVOCATION_OTEL_PLUGIN_FACTORY,
     ExecutionOtelPlugin,
     ExecutionOtelPluginFactory,
     InvocationOtelPlugin,
@@ -400,9 +402,88 @@ def test_unified_factory_preserves_view_across_resume(
     invocations = [span for span in spans if span.name == "Invocation"]
     assert len(workflows) == 1
     assert len(invocations) == 2
-    operation = next(span for span in spans if span.name == "work")
-    expected_parents = workflows if mode == "execution" else invocations
-    assert any(operation.parent == parent.context for parent in expected_parents)
+    operations = [span for span in spans if span.name == "work"]
+    assert len(operations) == 1
+    expected_parent = workflows[0]
+    if mode == "invocation":
+        expected_parent = next(
+            span
+            for span in invocations
+            if span.attributes is not None
+            and span.attributes.get("durable.invocation.first") is True
+        )
+    assert operations[0].parent == expected_parent.context
+
+
+@pytest.mark.parametrize(
+    ("mode", "entry_name"),
+    [
+        ("execution", "otel"),
+        ("execution", "otel-execution"),
+        ("invocation", "otel-invocation"),
+    ],
+)
+def test_unified_factory_conflicts_with_same_environment_view(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: Literal["execution", "invocation"],
+    entry_name: str,
+) -> None:
+    _, exporter = telemetry
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", entry_name)
+    factory = create_otel_plugin_factory(mode=mode)
+    observer = _ObserverFactory()
+    calls: list[str] = []
+
+    def handler(_event: Any, _context: DurableContext) -> str:
+        calls.append("handler")
+        return "unused"
+
+    with pytest.raises(PluginLoadError, match="registered more than once"):
+        durable_execution(handler, plugins=[observer, factory])
+    assert observer.instances == []
+    assert observer.statuses == []
+    assert calls == []
+    assert not exporter.get_finished_spans()
+
+
+@pytest.mark.parametrize(
+    ("factory", "entry_name", "parent_name"),
+    [
+        (EXECUTION_OTEL_PLUGIN_FACTORY, "otel", "Workflow"),
+        (EXECUTION_OTEL_PLUGIN_FACTORY, "otel-execution", "Workflow"),
+        (INVOCATION_OTEL_PLUGIN_FACTORY, "otel-invocation", "Invocation"),
+    ],
+)
+def test_default_factory_deduplicates_same_environment_view(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    factory: DurableInstrumentationPluginFactory,
+    entry_name: str,
+    parent_name: str,
+) -> None:
+    _, exporter = telemetry
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", entry_name)
+    calls: list[str] = []
+
+    def work(_step_context: Any) -> str:
+        calls.append("work")
+        return "saved"
+
+    def handler(_event: Any, durable: DurableContext) -> str:
+        return durable.step(work, name="work")
+
+    configured = durable_execution(handler, plugins=[factory])
+    with DurableFunctionTestRunner(handler=configured) as runner:
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    assert calls == ["work"]
+    spans = exporter.get_finished_spans()
+    assert sum(span.name == "Workflow" for span in spans) == 1
+    assert sum(span.name == "Invocation" for span in spans) == 1
+    operations = [span for span in spans if span.name == "work"]
+    assert len(operations) == 1
+    parent = next(span for span in spans if span.name == parent_name)
+    assert operations[0].parent == parent.context
 
 
 def test_default_alias_conflicts_with_explicit_invocation_view(

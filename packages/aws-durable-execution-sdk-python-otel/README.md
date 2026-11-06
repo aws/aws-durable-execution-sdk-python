@@ -67,12 +67,8 @@ selects the execution view instead, which parents operations to `Workflow` — a
 different span tree, not a different amount of instrumentation. See
 [Trace Structure](#trace-structure) for both shapes.
 
-Each call constructs a new `ExecutionOtelPluginFactory` or
-`InvocationOtelPluginFactory` of the selected view, carrying that class's
-`exclusive_group`. Calls are not memoized, so register exactly one: two
-factories of the same view in `plugins` are rejected at registration as a
-duplicate in the `aws-durable-execution-otel-view` exclusive group. Both existing factory
-classes remain supported, with unchanged configuration and behavior.
+`ExecutionOtelPluginFactory` and `InvocationOtelPluginFactory` remain supported
+with unchanged configuration and behavior.
 
 Alternatively, install this package in the function artifact or a Lambda layer
 and select either OTel plugin by entry-point name:
@@ -92,31 +88,30 @@ the plugin package and a configured OpenTelemetry provider and exporter, usually
 supplied by the ADOT layer. Installing or importing the package alone does not
 enable instrumentation.
 
-**Set exactly one OTel entry name.** Because `otel` and `otel-execution` resolve
-to the same factory object, listing both loads one factory: the loader skips the
-second by identity and logs
-
-```text
-Skipping dynamically configured plugin 'otel-execution' because the same plugin factory is already registered.
-```
-
-Listing `otel` with `otel-invocation` names two different views and raises
-`PluginLoadError`. The Java and JS/TypeScript SDKs enforce the same one-view
-contract but report a redundant second alias in their own idiom — Java rejects
-`otel,otel-execution` outright — so do not rely on a multi-alias value behaving
-identically across languages.
+**Set exactly one OTel entry name.** Listing both `otel` and `otel-execution`
+loads one factory and logs a warning because they resolve to the same object.
+Listing `otel` with `otel-invocation` selects different views and raises
+`PluginLoadError`.
 
 OTel 2.0 requires core SDK 3.x and the per-invocation factory contract. Publish
 the coordinated core release before the plugin. Core 2.x plugin instances and
 OTel 1.x entry points are rejected by core 3 at handler initialization.
 
-Configure one OTel view: `InvocationOtelPluginFactory` shows work within each
-Lambda invocation; `ExecutionOtelPluginFactory` shows logical operations across
-the execution. Their factories declare the same exclusive group, so registering
-both raises `PluginLoadError` at cold start, before any plugin is constructed.
-Keep one view across `plugins=[...]` and `DURABLE_EXECUTION_PLUGINS`. Unrelated
-plugin factories may accompany it. Repeating the same factory object through an
-entry point is deduplicated by identity.
+Configure OTel through either `plugins=[...]` or `DURABLE_EXECUTION_PLUGINS`.
+Registering multiple OTel factory objects raises `PluginLoadError` at cold
+start, even when they select the same view. For example,
+`plugins=[create_otel_plugin_factory()]` with `DURABLE_EXECUTION_PLUGINS=otel`
+fails because the function constructs a new factory while the entry point loads
+the default singleton. With custom configuration, register the factory
+explicitly and leave OTel entry names out of `DURABLE_EXECUTION_PLUGINS`.
+Unrelated plugins may use either source.
+
+If both sources must register the same default view, import
+`EXECUTION_OTEL_PLUGIN_FACTORY` from `aws_durable_execution_sdk_python_otel`
+and use `plugins=[EXECUTION_OTEL_PLUGIN_FACTORY]` with `otel` or
+`otel-execution`. The loader recognizes the same factory object and skips the
+duplicate. `INVOCATION_OTEL_PLUGIN_FACTORY` works the same way with
+`otel-invocation`.
 
 Factory classes can opt into registration metadata with
 `__durable_registration_api__ = 1`. Each opted-in class in the MRO contributes its
@@ -607,12 +602,10 @@ its own plugin instance. Selecting a factory does not resolve a provider or
 construct an invocation plugin. Mode is selected once; invalid values,
 including `None`, raise `ValueError`.
 
-Calls are not memoized —
-`create_otel_plugin_factory() is create_otel_plugin_factory()` is `False` — so
-register exactly one. Two factories of the same view in `plugins` raise
-`PluginLoadError` as a duplicate in the `aws-durable-execution-otel-view` exclusive group. A
-`mode` read from configuration at runtime is accepted and type-checks as the
-union of both return types.
+Register only one returned factory; see the
+[registration guidance](#quick-start-using-x-raycloudwatch-tracing) when using
+`DURABLE_EXECUTION_PLUGINS`. A `mode` read from configuration at runtime is
+accepted and type-checks as the union of both return types.
 
 ### `InvocationOtelPluginFactory`
 

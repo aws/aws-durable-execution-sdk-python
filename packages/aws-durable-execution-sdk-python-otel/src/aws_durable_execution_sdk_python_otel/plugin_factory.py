@@ -149,7 +149,7 @@ def create_otel_plugin_factory(
         return ExecutionOtelPluginFactory(config)
     if mode == "invocation":
         return InvocationOtelPluginFactory(config)
-    raise ValueError("mode must be 'execution' or 'invocation'")
+    raise ValueError(f"mode must be 'execution' or 'invocation', got {mode!r}")
 
 
 INVOCATION_OTEL_PLUGIN_FACTORY = InvocationOtelPluginFactory()
