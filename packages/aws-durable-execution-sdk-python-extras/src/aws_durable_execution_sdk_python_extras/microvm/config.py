@@ -149,8 +149,8 @@ class MicrovmBaseConfig:
     creates itself, such as "RunMicrovm returned no microvmId", has the
     request ID in its message when the strategy receives it.
 
-    A ``ResourceNotFoundException`` from ``GetMicrovm``, ``ResumeMicrovm``,
-    or ``CreateMicrovmAuthToken`` is the exception. It means that the
+    A ``ResourceNotFoundException`` from ``GetMicrovm`` or
+    ``CreateMicrovmAuthToken`` is the exception. It means that the
     MicroVM no longer exists. So the operation raises ``MicrovmStateError``
     of ``aws_durable_execution_sdk_python_extras.microvm.lifecycle``
     instead, and the strategy receives that error. Its ``__cause__`` is the
@@ -266,17 +266,21 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
     idle_policy: Mapping[str, Any] | None = None
     """The ``idlePolicy`` member of ``RunMicrovm``. Not set by default.
 
-    It needs all three members, for example ``{"maxIdleDurationSeconds": 300,
-    "suspendedDurationSeconds": 3600, "autoResumeEnabled": True}``.
+    It needs all three members, for example ``{"autoResumeEnabled": True,
+    "maxIdleDurationSeconds": 86400, "suspendedDurationSeconds": 3600}``.
 
-    An idle policy counts only inbound traffic to the endpoint, and a running
-    job receives none after its delivery. So ``maxIdleDurationSeconds`` must
-    be longer than the longest job, or the service suspends the MicroVM
-    during that job. Set it only for a MicroVM that serves inbound traffic of
-    its own. With an idle policy, the request step checks the MicroVM state
-    before each job, and resumes a suspended MicroVM. That needs
-    ``lambda:GetMicrovm`` and ``lambda:ResumeMicrovm`` in the function's
-    role.
+    To suspend a MicroVM, set ``idlePolicy`` with ``autoResumeEnabled: true``.
+    The SDK does not resume a MicroVM; the service resumes it on the next
+    request. This applies to :attr:`auto_suspend_on_idle` and to
+    :attr:`MicrovmInvokeOptions.suspend_after`.
+
+    Set ``maxIdleDurationSeconds`` above ``maximumDurationInSeconds`` (the
+    operation timeout plus 5 minutes). The idle timer counts only inbound
+    requests, so a shorter value suspends a running job.
+
+    Without ``autoResumeEnabled``, a job after a suspend fails after its
+    retries with ``MicrovmDeliveryError``. The first job after a suspend
+    takes about 1 s longer.
     """
 
     auto_suspend_on_idle: bool = False
@@ -286,14 +290,20 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
     A running MicroVM pays compute charges. A suspended MicroVM pays only for
     snapshot storage, and keeps its memory and files. With this setting, the
     session asks the worker in the ``run`` hook payload to suspend its own
-    MicroVM when idle. Before each job, the request step checks the MicroVM
-    state, and resumes a suspended MicroVM.
+    MicroVM when idle.
 
-    It is off by default, because it needs more permissions and changes what
+    To suspend a MicroVM, set ``idlePolicy`` with ``autoResumeEnabled: true``.
+    The SDK does not resume a MicroVM; the service resumes it on the next
+    request. Set ``maxIdleDurationSeconds`` above ``maximumDurationInSeconds``
+    (the operation timeout plus 5 minutes). The idle timer counts only
+    inbound requests, so a shorter value suspends a running job. Without
+    ``autoResumeEnabled``, a job after a suspend fails after its retries with
+    ``MicrovmDeliveryError``. See :attr:`idle_policy`.
+
+    It is off by default, because it needs more settings and changes what
     the MicroVM does between jobs:
 
-    1. The function's role needs ``lambda:GetMicrovm`` and
-       ``lambda:ResumeMicrovm``. Without them, every job fails.
+    1. :attr:`idle_policy` must set ``autoResumeEnabled``.
     2. The MicroVM's role needs ``lambda:SuspendMicrovm`` on the image. That
        permission lets code in any MicroVM of the image suspend any other.
        Use one image per trust boundary.
@@ -301,8 +311,8 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
        MicroVM is suspended. "Idle" means only that no job runs in the
        worker.
 
-    A resume adds latency to the next job, about 1 second in us-east-1, and
-    the job's ``timeout`` and ``heartbeat_timeout`` count it. Suspending does
+    The first job after a suspend takes about 1 s longer, and the job's
+    ``timeout`` and ``heartbeat_timeout`` count it. Suspending does
     not extend the MicroVM's lifetime.
 
     The worker must be a version that supports the setting. The JavaScript
@@ -319,9 +329,9 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
     A session whose ``timeout`` is under 10 seconds then does not suspend.
     It applies only when :attr:`auto_suspend_on_idle` is ``True``, and
     setting it otherwise fails validation. It must be at least 10 seconds,
-    and not longer than the session ``timeout``. A resumed MicroVM needs a
-    few seconds before its job arrives, so a shorter time could suspend it
-    again first.
+    and not longer than the session ``timeout``. A suspended MicroVM needs a
+    few seconds before the service resumes it and its job arrives, so a
+    shorter time could suspend it again first.
     """
 
 
@@ -337,8 +347,8 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     timeout: Duration
     """The longest time to wait for this job's result. At most 8 hours.
 
-    The time starts before the job is delivered. So it includes a resume of
-    a suspended MicroVM. The session's ``timeout`` does not shorten it.
+    The time starts before the job is delivered. So it includes the resume
+    of a suspended MicroVM. The session's ``timeout`` does not shorten it.
     """
 
     heartbeat_timeout: Duration | None = None
@@ -353,9 +363,9 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     disables the ``terminate`` hook, reports nothing. The heartbeat timeout
     is then the only way that the job fails soon after the MicroVM ends.
 
-    A job after a :attr:`suspend_after` job waits for the resume of the
-    MicroVM. The worker can refuse it with HTTP 503 for up to 30 seconds
-    before that. So set the heartbeat timeout of such a job to at least the
+    A job after a suspend waits for the service to resume the MicroVM. The
+    worker can refuse it with HTTP 503 for up to 30 seconds before that. So
+    set the heartbeat timeout of such a job to at least the
     ``retry_window`` plus 30 seconds.
     """
 
@@ -366,8 +376,15 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     The session calls ``SuspendMicrovm`` for the session's MicroVM when the
     job's result arrives, whether the job succeeded or failed. The call runs
     inside the job's child context, before the child context returns. It is
-    not a durable operation of its own. The next job of the session checks
-    the MicroVM state before delivery, and resumes a suspended MicroVM.
+    not a durable operation of its own.
+
+    To suspend a MicroVM, set ``idlePolicy`` with ``autoResumeEnabled: true``.
+    The SDK does not resume a MicroVM; the service resumes it on the next
+    request. Set ``maxIdleDurationSeconds`` above ``maximumDurationInSeconds``
+    (the operation timeout plus 5 minutes). The idle timer counts only
+    inbound requests, so a shorter value suspends a running job. Without
+    ``autoResumeEnabled``, a job after a suspend fails after its retries with
+    ``MicrovmDeliveryError``. See :attr:`MicrovmSessionConfig.idle_policy`.
 
     Read these rules before you set it:
 
@@ -375,8 +392,8 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
        arrives.
     2. Do not use it on a job that runs next to other jobs of the session
        (``map``, ``parallel``, promise combinators). Those jobs freeze until
-       the next job resumes the MicroVM, and can hit their heartbeat
-       timeout.
+       a later request makes the service resume the MicroVM, and can hit
+       their heartbeat timeout.
     3. The suspend runs inside the job's child context, so it follows the
        child context replay rules. A result larger than the child context
        checkpoint limit makes the child context run again on replay, and
@@ -386,7 +403,8 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
        operations wait. The call is then sent again. Suspending a suspended
        MicroVM succeeds.
     5. The function's execution role needs ``lambda:SuspendMicrovm`` on the
-       MicroVM image.
+       MicroVM image, and the session config needs an ``idle_policy`` with
+       ``autoResumeEnabled``.
     6. Adding or removing ``suspend_after`` changes what the session does on
        replay. Change it only through a new function version.
 
@@ -397,10 +415,10 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
 
     Set it on the job before a long wait, such as a durable wait or a
     callback. Do not set it on back-to-back jobs or on the last job of the
-    session. Each suspend and resume costs a snapshot and about 1 second of
-    latency for the next job. The session terminates the MicroVM after its
-    last job anyway. The image must enable the ``resume`` hook, and the
-    function's role needs ``lambda:GetMicrovm`` and ``lambda:ResumeMicrovm``.
+    session. Each suspend and resume costs a snapshot, and the first job
+    after a suspend takes about 1 s longer. The session terminates the
+    MicroVM after its last job anyway. The image must enable the ``resume``
+    hook.
 
     Only :meth:`MicrovmSession.invoke` accepts it. :func:`microvm` raises
     ``ValidationError`` for it. A value that is not a ``bool`` raises

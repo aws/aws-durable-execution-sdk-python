@@ -53,8 +53,9 @@ _T = TypeVar("_T")
 DEFAULT_AUTO_SUSPEND_IDLE_SECONDS = 60
 """The default :attr:`MicrovmSessionConfig.auto_suspend_idle_time`, in seconds.
 
-A resume took about 1 second in us-east-1. So 60 seconds keeps back-to-back
-jobs from paying for a suspend and a resume that they do not need. A long
+The first job after a suspend took about 1 second longer in us-east-1. So 60
+seconds keeps back-to-back jobs from paying for a suspend and a resume that
+they do not need. A long
 wait costs at most 60 seconds of compute before the MicroVM suspends. A
 session whose ``timeout`` is shorter uses its ``timeout``. A session whose
 ``timeout`` is under 10 seconds does not suspend by default.
@@ -63,10 +64,11 @@ session whose ``timeout`` is shorter uses its ``timeout``. A session whose
 _MIN_AUTO_SUSPEND_IDLE_SECONDS = 10
 """The shortest idle time a session accepts.
 
-A resumed MicroVM runs its ``resume`` hook, reports ``RUNNING`` at the next
-state poll, and then receives the job after a new auth token. That path can
-take a few seconds. A shorter idle time could suspend the MicroVM again
-before its job arrives.
+For about 5 seconds after a suspend, a request does not resume the
+MicroVM, and the request step retries it. The resumed MicroVM then runs its
+``resume`` hook before it receives the job. That path can take a few
+seconds. A shorter idle time could suspend the MicroVM again before its job
+arrives.
 """
 
 
@@ -102,23 +104,22 @@ def microvm_session(
     session needs no separate readiness wait.
 
     With ``config.auto_suspend_on_idle``, the worker in the MicroVM suspends
-    its own MicroVM when no job has run for ``auto_suspend_idle_time``. With
-    that setting or an ``idle_policy``, the request step of each job calls
-    ``GetMicrovm`` first. It resumes a suspended MicroVM, and it returns at
-    once for a new MicroVM that is still booting. The launch checkpoint
-    records whether the MicroVM can be suspended. Replay follows that record,
-    not the current config.
+    its own MicroVM when no job has run for ``auto_suspend_idle_time``. A
+    job with ``suspend_after`` makes the session call ``SuspendMicrovm``
+    after the job's result arrives. The SDK does not resume a MicroVM. The
+    service resumes it on the next request, when ``config.idle_policy`` sets
+    ``autoResumeEnabled``. So a session that suspends its MicroVM must set
+    that idle policy. Without it, a job after a suspend fails after its
+    retries with :class:`MicrovmDeliveryError`.
 
-    A job with ``suspend_after`` makes the session call ``SuspendMicrovm``
-    after the job's result arrives. Each later job of the handle then checks
-    the state before delivery, as with ``auto_suspend_on_idle``. That record is kept in
-    memory only. So every job over HTTP, of a session or of
-    :func:`microvm`, also checks the state after a sign that the MicroVM
-    does not run: no answer, or an HTTP 502 with
-    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A boot gives no such
-    sign, unless the worker takes more than 10 seconds to start listening.
-    Then the first delivery gets no answer, and the operation makes one
-    ``GetMicrovm`` call.
+    Every job over HTTP, of a session or of :func:`microvm`, checks the
+    state after a sign that the MicroVM does not run: no answer, or an HTTP
+    502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. A MicroVM that
+    has ended fails the job at once. A suspended MicroVM gives the same
+    sign, and the job keeps retrying until the service resumes it. A boot
+    gives no such sign, unless the worker takes more than 10 seconds to
+    start listening. Then the first delivery gets no answer, and the
+    operation makes one ``GetMicrovm`` call.
 
     A failed :meth:`MicrovmSession.invoke` raises inside the handler. The
     handler can catch the error and continue with the same MicroVM. An
@@ -209,40 +210,14 @@ class MicrovmSession:
     ``map`` and ``parallel`` items.
     """
 
-    def __init__(
-        self,
-        scope: _SessionScope,
-        launched: LaunchResult,
-        *,
-        resume_before_delivery: bool,
-    ) -> None:
+    def __init__(self, scope: _SessionScope, launched: LaunchResult) -> None:
         self._scope = scope
         self._launched = launched
-        self._resume_before_delivery = resume_before_delivery
-        # Set when a suspend_after job of this handle has returned or raised.
-        # Later jobs then check the state before delivery. The job itself
-        # does not, because its suspend has not run when it delivers. A
-        # replay of a completed job calls invoke() again, so it sets the flag
-        # too. The flag lives in memory only. A replay of a completed map
-        # item, parallel branch, or child context does not run its invoke()
-        # again, so it does not set the flag. The check after a sign of a
-        # suspended MicroVM covers that case.
-        self._may_be_suspended = False
 
     @property
     def microvm_id(self) -> str:
         """The ID of the session's MicroVM."""
         return self._launched.microvm_id
-
-    def _resume_mode(self) -> bool:
-        """Whether a job checks the MicroVM state before delivery.
-
-        The request step reads it at the start of each attempt. So a step
-        retry, and a ``map`` item that starts after a sibling set the flag,
-        see the current value. The flag only changes from ``False`` to
-        ``True``.
-        """
-        return self._resume_before_delivery or self._may_be_suspended
 
     def invoke(
         self,
@@ -287,16 +262,14 @@ class MicrovmSession:
             ValidationError: When ``name`` or ``options`` is not valid, for
                 example a ``suspend_after`` that is not a ``bool``.
             MicrovmNotRunningError: When the session's MicroVM has ended. The
-                session reports it when it checks the MicroVM state before
-                each job, and for every job when ``CreateMicrovmAuthToken``
-                reports the MicroVM removed. A check after a sign of a
-                suspended MicroVM reports it too.
+                state check after a sign that the MicroVM does not run
+                reports it, and so does ``CreateMicrovmAuthToken`` when it
+                reports the MicroVM removed.
             MicrovmDeliveryError: When the delivery fails after all retries,
-                or the route rejects the job. A suspended MicroVM whose
-                ``ResumeMicrovm`` is denied fails the delivery at once. A
-                denied ``GetMicrovm`` in the check after a sign of a
-                suspended MicroVM fails it at once too. The message names
-                the permission.
+                or the route rejects the job. A suspended MicroVM without
+                an idle policy that sets ``autoResumeEnabled`` fails this
+                way. A denied ``GetMicrovm`` in the state check fails the
+                delivery at once. The message names the permission.
             MicrovmJobFailedError: When the MicroVM reports a failure, or
                 sends a result that is not valid JSON.
             MicrovmTimeoutError: When no result or heartbeat arrives in time.
@@ -340,7 +313,6 @@ class MicrovmSession:
                 heartbeat_timeout_seconds=heartbeat_timeout_seconds,
                 request=options,
                 retry_window_seconds=retry_window_seconds,
-                resume=self._resume_mode,
             )
             try:
                 result = callback.result()
@@ -359,20 +331,9 @@ class MicrovmSession:
             return result
 
         try:
-            result = context.run_in_child_context(run, name=name)
-        except Exception as error:
-            # SuspendExecution is a BaseException, so a wait for the job
-            # does not set the flag. Only a failed job sets it: any other
-            # error ends the invocation unless the handler catches it, and
-            # the flag lives in memory only.
-            if isinstance(error, ChildContextError):
-                if suspend_after:
-                    self._may_be_suspended = True
-                raise MicrovmError.from_child_context_error(name, error) from error
-            raise
-        if suspend_after:
-            self._may_be_suspended = True
-        return result
+            return context.run_in_child_context(run, name=name)
+        except ChildContextError as error:
+            raise MicrovmError.from_child_context_error(name, error) from error
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -384,19 +345,6 @@ class _SessionScope(_MicrovmScope):
     outer_context: DurableContext = field(compare=False, repr=False)
     """The context that ``microvm_session`` was called with. A job created
     in it would be outside the session's child context."""
-
-    @property
-    def resume_from_config(self) -> bool:
-        """Whether the current config asks each job to check the MicroVM
-        state, and resume it.
-
-        The worker suspends an idle MicroVM, and an idle policy can suspend
-        it too. Either way, each job must resume it first. A session launch
-        records this value as its resume mode.
-        """
-        return (
-            self.auto_suspend_idle_seconds is not None or self.idle_policy is not None
-        )
 
     @classmethod
     def create(
@@ -442,34 +390,14 @@ class _SessionScope(_MicrovmScope):
             ),
             delivery=HTTP_DELIVERY,
             idle_policy=self.idle_policy,
-            resume_before_delivery=self.resume_from_config,
         )
         if launched.delivery != HTTP_DELIVERY:
             # A launch checkpoint from a release with another delivery. Every
             # session job goes over HTTP, so this release cannot run one.
             self.terminate(child, launched.microvm_id)
             raise unknown_delivery_error(self.name, launched)
-        # 1. The worker reads its idle time once, from the run hook payload of
-        #    the launch. RunMicrovm sets the idle policy once, at the launch.
-        # 2. The launch step's result comes from the checkpoint on replay.
-        # 3. So a deploy that changes auto_suspend_on_idle or idle_policy does
-        #    not change what the running MicroVM does.
-        # 4. A job that skips the state check of a suspended MicroVM gets a
-        #    502, or no answer. The request step then checks the state, and
-        #    resumes the MicroVM. That costs a failed request per job.
-        # 5. So each job follows the resume mode that the launch recorded,
-        #    not the current config.
-        # Every session launch records a boolean. So only `True` turns the
-        # state check on. A missing field, or any other value, reads as False.
         try:
-            result = handler(
-                MicrovmSession(
-                    self,
-                    launched,
-                    resume_before_delivery=launched.resume_before_delivery is True,
-                ),
-                child,
-            )
+            result = handler(MicrovmSession(self, launched), child)
         except ExecutionError:
             # A replay that does not match the history raises
             # NonDeterministicExecutionError, and the execution fails without
@@ -512,9 +440,9 @@ def _validate_auto_suspend(
     Raises:
         ValidationError: When a setting is not valid.
     """
-    # Suspending is opt-in. It needs lambda:GetMicrovm and
-    # lambda:ResumeMicrovm in the function's role, and lambda:SuspendMicrovm
-    # in the MicroVM's role. It also stops background processes between jobs.
+    # Suspending is opt-in. It needs an idle policy with autoResumeEnabled,
+    # and lambda:SuspendMicrovm in the MicroVM's role. It also stops
+    # background processes between jobs.
     if config.auto_suspend_on_idle is not True:
         if config.auto_suspend_idle_time is not None:
             msg = (

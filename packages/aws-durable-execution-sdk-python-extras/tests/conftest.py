@@ -10,7 +10,7 @@ import socket
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from botocore.exceptions import ClientError
@@ -31,22 +31,26 @@ Answer = BaseException | Callable[[dict[str, Any]], Any] | None
 class FakeMicrovmsClient:
     """Records Lambda MicroVMs API calls, and answers from scripted lists.
 
-    ``launches``, ``tokens``, ``terminates``, ``resumes``, and ``suspends``
-    hold the answers of ``run_microvm``, ``create_microvm_auth_token``,
-    ``terminate_microvm``, ``resume_microvm``, and ``suspend_microvm``, in
-    order. Each answer is an
-    exception to raise, a function that receives the request, or ``None`` for
-    success. After a list ends, every call succeeds.
+    ``launches``, ``tokens``, ``terminates``, and ``suspends`` hold the
+    answers of ``run_microvm``, ``create_microvm_auth_token``,
+    ``terminate_microvm``, and ``suspend_microvm``, in order. Each answer is
+    an exception to raise, a function that receives the request, or ``None``
+    for success. After a list ends, every call succeeds.
 
     ``states`` holds the answers of ``get_microvm``: a state such as
     ``"SUSPENDED"``, or an exception to raise. After the list ends, the state
-    is ``RUNNING``. With ``suspended_until_resumed``, the state after the
-    list ends is ``SUSPENDED`` until a ``resume_microvm`` call succeeds, and
-    ``RUNNING`` after it.
+    is ``RUNNING``.
+
+    The SDK never calls ``ResumeMicrovm``. So ``resume_microvm`` records the
+    call and raises ``AssertionError``, and the autouse fixture
+    ``no_resume_microvm`` fails any test whose client recorded such a call.
 
     ``run_microvm`` and ``get_microvm`` return ``endpoint``. The Nth auth
     token is ``{"x-test-token": "token-N"}``.
     """
+
+    instances: ClassVar[list[FakeMicrovmsClient]] = []
+    """Every client that a test created, for :func:`no_resume_microvm`."""
 
     def __init__(
         self,
@@ -54,20 +58,17 @@ class FakeMicrovmsClient:
         launches: list[Answer] | None = None,
         tokens: list[Answer] | None = None,
         terminates: list[Answer] | None = None,
-        resumes: list[Answer] | None = None,
         suspends: list[Answer] | None = None,
         states: list[str | BaseException] | None = None,
         endpoint: str | None = "mvm-1.microvm.example",
-        suspended_until_resumed: bool = False,
     ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.endpoint = endpoint
-        self._suspended = suspended_until_resumed
+        FakeMicrovmsClient.instances.append(self)
         self._answers: dict[str, list[Answer]] = {
             "run_microvm": list(launches or []),
             "create_microvm_auth_token": list(tokens or []),
             "terminate_microvm": list(terminates or []),
-            "resume_microvm": list(resumes or []),
             "suspend_microvm": list(suspends or []),
         }
         self._states = list(states or [])
@@ -109,10 +110,10 @@ class FakeMicrovmsClient:
         return {}
 
     def resume_microvm(self, **request: Any) -> dict[str, Any]:
-        self._answer("resume_microvm", request)
         with self._lock:
-            self._suspended = False
-        return {}
+            self.calls.append(("resume_microvm", request))
+        msg = "the SDK must never call ResumeMicrovm"
+        raise AssertionError(msg)
 
     def get_microvm(self, **request: Any) -> dict[str, Any]:
         with self._lock:
@@ -120,7 +121,7 @@ class FakeMicrovmsClient:
             if self._states:
                 state = self._states.pop(0)
             else:
-                state = "SUSPENDED" if self._suspended else "RUNNING"
+                state = "RUNNING"
         if isinstance(state, BaseException):
             raise state
         response: dict[str, Any] = {"microvmId": "mvm-1", "state": state}
@@ -139,6 +140,25 @@ def aws_region(monkeypatch: pytest.MonkeyPatch) -> None:
     # The local runner's execution ARN is not an ARN. So the operation takes
     # the Region from AWS_REGION, as it does outside Lambda.
     monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+
+@pytest.fixture(autouse=True)
+def no_resume_microvm() -> Iterator[None]:
+    """Fail a test whose fake client received a ``resume_microvm`` call.
+
+    A call raises ``AssertionError`` in the fake. Code that catches every
+    error, such as a worker thread, could hide that error. So the fixture
+    also checks the recorded calls after the test.
+    """
+    FakeMicrovmsClient.instances.clear()
+    yield
+    resumed = [
+        client
+        for client in FakeMicrovmsClient.instances
+        if client.requests("resume_microvm")
+    ]
+    FakeMicrovmsClient.instances.clear()
+    assert not resumed, "the SDK called ResumeMicrovm"
 
 
 @pytest.fixture

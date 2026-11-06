@@ -68,6 +68,14 @@ LAUNCH_FAILED = 'MicroVM "job": the launch failed: '
 STATE_ERROR = (
     "aws_durable_execution_sdk_python_extras.microvm.lifecycle.MicrovmStateError"
 )
+GET_DENIED = (
+    "MicroVM mvm-1 gave a sign that it does not run. GetMicrovm was denied, so "
+    "the operation cannot check its state. The function's execution role needs "
+    "lambda:GetMicrovm."
+)
+CONNECT_FAILED = (502, {"x-aws-proxy-error": "MICROVM_CONNECT_FAILED"})
+"""The answer of the endpoint of a suspended or dead MicroVM. The request
+step then calls ``GetMicrovm``."""
 STS_DENIED = (
     "An error occurred (AccessDenied) when calling the AssumeRole operation: "
     "not authorized to assume role"
@@ -142,9 +150,6 @@ class ScriptedClient:
         microvm = {"microvmId": "mvm-1", "state": "RUNNING", "endpoint": self.endpoint}
         return self._answer("get_microvm", microvm)
 
-    def resume_microvm(self, **request: Any) -> Any:
-        return self._answer("resume_microvm", {})
-
     def create_microvm_auth_token(self, **request: Any) -> Any:
         return self._answer("create_microvm_auth_token", {"authToken": {"x-t": "t"}})
 
@@ -173,8 +178,10 @@ def catching(
     - ``microvm``: one job over HTTP, because the config sets a path.
     - ``session``: a session with the default config. It makes no
       ``GetMicrovm`` call.
-    - ``checking session``: a session with ``auto_suspend_on_idle``. It calls
-      ``GetMicrovm`` before each job.
+    - ``checking session``: a session whose endpoint answers the first
+      request with HTTP 502 and ``MICROVM_CONNECT_FAILED``. The request step
+      then calls ``GetMicrovm``. The scenario passes that answer in its
+      ``statuses``.
 
     After the error, a durable wait ends the invocation. The next invocation
     replays the failed operation from its checkpoint and catches the error
@@ -203,7 +210,6 @@ def catching(
                     config=MicrovmSessionConfig(
                         **fields,
                         timeout=Duration.from_hours(1),
-                        auto_suspend_on_idle=kind == "checking session",
                     ),
                     handler=lambda vm, ctx: vm.invoke(
                         ctx,
@@ -282,7 +288,7 @@ class Scenario:
     """The step message without and with the request ID ``req-1``."""
     call: str
     calls: int
-    statuses: tuple[int, ...] = ()
+    statuses: tuple[Any, ...] = ()
 
 
 def _denied(operation: str) -> tuple[str, str]:
@@ -332,24 +338,6 @@ SCENARIOS: dict[str, Scenario] = {
         calls=2,
         statuses=(401,),
     ),
-    "CreateMicrovmAuthToken reports the MicroVM removed, in a session that "
-    "checks the state": Scenario(
-        kind="checking session",
-        answers=lambda rid: {
-            "create_microvm_auth_token": [
-                service_error(
-                    "ResourceNotFoundException", "gone", "CreateMicrovmAuthToken", rid
-                )
-            ]
-        },
-        error_class=MicrovmNotRunningError,
-        prefix=DELIVERY,
-        step="job.request",
-        step_error_type=STATE_ERROR,
-        step_message=(REMOVED, f"{REMOVED} CreateMicrovmAuthToken request ID: req-1."),
-        call="create_microvm_auth_token",
-        calls=1,
-    ),
     "CreateMicrovmAuthToken reports the MicroVM removed, for a microvm job": Scenario(
         kind="microvm",
         answers=lambda rid: {
@@ -383,26 +371,7 @@ SCENARIOS: dict[str, Scenario] = {
         step_message=(REMOVED, f"{REMOVED} GetMicrovm request ID: req-1."),
         call="get_microvm",
         calls=1,
-    ),
-    "ResumeMicrovm reports the MicroVM removed": Scenario(
-        kind="checking session",
-        answers=lambda rid: {
-            "get_microvm": [
-                {"microvmId": "mvm-1", "state": "SUSPENDED", **metadata("get-1")}
-            ],
-            "resume_microvm": [
-                service_error(
-                    "ResourceNotFoundException", "gone", "ResumeMicrovm", rid, 404
-                )
-            ],
-        },
-        error_class=MicrovmNotRunningError,
-        prefix=DELIVERY,
-        step="job.request",
-        step_error_type=STATE_ERROR,
-        step_message=(REMOVED, f"{REMOVED} ResumeMicrovm request ID: req-1."),
-        call="resume_microvm",
-        calls=1,
+        statuses=(CONNECT_FAILED,),
     ),
     # The request ID of an STS error belongs to STS. So the message names no
     # RunMicrovm request ID, with or without a request ID on the error.
@@ -453,6 +422,7 @@ SCENARIOS: dict[str, Scenario] = {
         ),
         call="get_microvm",
         calls=1,
+        statuses=(CONNECT_FAILED,),
     ),
     "GetMicrovm reports a terminating MicroVM without a reason": Scenario(
         kind="checking session",
@@ -471,6 +441,7 @@ SCENARIOS: dict[str, Scenario] = {
         ),
         call="get_microvm",
         calls=1,
+        statuses=(CONNECT_FAILED,),
     ),
     "RunMicrovm rejects the launch": Scenario(
         kind="microvm",
@@ -532,28 +503,14 @@ SCENARIOS: dict[str, Scenario] = {
         error_class=MicrovmDeliveryError,
         prefix=DELIVERY,
         step="job.request",
-        step_error_type="botocore.errorfactory.AccessDeniedException",
-        step_message=_denied("GetMicrovm"),
+        step_error_type=(
+            "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
+            "MicrovmPermissionDeniedError"
+        ),
+        step_message=(GET_DENIED, f"{GET_DENIED} GetMicrovm request ID: req-1."),
         call="get_microvm",
         calls=1,
-    ),
-    "ResumeMicrovm denies access": Scenario(
-        kind="checking session",
-        answers=lambda rid: {
-            "get_microvm": [{"microvmId": "mvm-1", "state": "SUSPENDED"}],
-            "resume_microvm": [
-                service_error(
-                    "AccessDeniedException", "denied", "ResumeMicrovm", rid, 403
-                )
-            ],
-        },
-        error_class=MicrovmDeliveryError,
-        prefix=DELIVERY,
-        step="job.request",
-        step_error_type="botocore.errorfactory.AccessDeniedException",
-        step_message=_denied("ResumeMicrovm"),
-        call="resume_microvm",
-        calls=1,
+        statuses=(CONNECT_FAILED,),
     ),
     "CreateMicrovmAuthToken denies access": Scenario(
         kind="microvm",
@@ -628,7 +585,7 @@ def test_names_the_request_id_that_botocore_parses_from_a_real_answer(
 ) -> None:
     """A real lambda-microvms client, with botocore's Stubber, raises the
     modeled error with the request ID in ``ResponseMetadata``."""
-    endpoint = fake_endpoint()
+    endpoint = fake_endpoint([CONNECT_FAILED])
     client = boto3.session.Session().client("lambda-microvms", region_name="us-west-2")
     started = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
     caught: list[MicrovmError] = []
@@ -643,6 +600,15 @@ def test_names_the_request_id_that_botocore_parses_from_a_real_answer(
                 "imageVersion": "1",
                 "maximumDurationInSeconds": 3900,
                 "startedAt": started,
+            },
+        )
+        stub.add_response(
+            "create_microvm_auth_token",
+            {"authToken": {"x-amz-microvm-token": "t"}},
+            {
+                "microvmIdentifier": "mvm-1",
+                "expirationInMinutes": 5,
+                "allowedPorts": [{"port": 8080}],
             },
         )
         stub.add_client_error(
@@ -1065,7 +1031,6 @@ def test_names_no_terminate_request_id_for_an_error_of_another_operation(
             ("run_microvm", "microvm"),
             ("create_microvm_auth_token", "session"),
             ("terminate_microvm", "terminate"),
-            ("get_microvm", "checking session"),
         ]
         for pattern, calls in [
             (re.compile(r": Rate exceeded$"), 3),
@@ -1095,7 +1060,6 @@ def test_a_message_based_strategy_decides_on_the_message_of_the_service(
         "run_microvm": "RunMicrovm",
         "create_microvm_auth_token": "CreateMicrovmAuthToken",
         "terminate_microvm": "TerminateMicrovm",
-        "get_microvm": "GetMicrovm",
     }[call]
     client = ScriptedClient(
         fake_endpoint().url, **{call: throttled(operation, with_id=True, count=3)}

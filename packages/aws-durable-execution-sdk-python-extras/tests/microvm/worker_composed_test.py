@@ -433,17 +433,20 @@ class RecordingLogger:
 
 
 @pytest.mark.parametrize("resume_hook", [True, False], ids=["resume-hook", "none"])
-def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
+def test_the_service_resumes_a_worker_that_suspended_itself_between_two_jobs(
     fake_client: Any, monkeypatch: pytest.MonkeyPatch, resume_hook: bool
 ) -> None:
-    """The worker suspends its idle MicroVM, and the next job resumes it.
+    """The worker suspends its idle MicroVM, and the next job's request makes
+    the service resume it.
 
-    A stand-in for Lambda keeps the MicroVM's state. SuspendMicrovm from the
-    worker sets it to ``SUSPENDED`` and sends the ``suspend`` hook.
-    ResumeMicrovm from the session sets it to ``RUNNING``, and sends the
-    ``resume`` hook when the image enables it. The worker's timers run 20
-    times faster, so the session's 60-second idle time takes 3 seconds, and
-    the 30-second refusal takes 1.5 seconds.
+    A :class:`SimulatedMicrovm` stands in for Lambda. SuspendMicrovm from the
+    worker sends the ``suspend`` hook and sets the state to ``SUSPENDED``.
+    The first request after the suspend gets 502 MICROVM_CONNECT_FAILED, as
+    in the first seconds after a suspend. The next request resumes the
+    MicroVM: the stand-in sends the ``resume`` hook when the image enables
+    it, sets the state to ``RUNNING``, and forwards the request. The
+    worker's timers run 20 times faster, so the session's 60-second idle
+    time takes 3 seconds, and the 30-second refusal takes 1.5 seconds.
 
     Without the ``resume`` hook, the worker answers the second job with 503
     until its refusal ends. The request step delivers it again after each
@@ -459,57 +462,31 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
         "_start_timer",
         lambda delay, action: original_timer(delay / 20, action),
     )
-    state = {"value": "RUNNING"}
-    lock = threading.Lock()
+    microvm = SimulatedMicrovm(resume_hook=resume_hook)
     holder: dict[Any, Any] = {}
 
-    class StatefulMicrovms(fake_client):  # type: ignore[misc, valid-type]
+    class SessionMicrovms(fake_client):  # type: ignore[misc, valid-type]
         def get_microvm(self, **request: Any) -> dict[str, Any]:
-            with lock:
-                current = state["value"]
             response = super().get_microvm(**request)
-            return {**response, "state": current}
-
-        def resume_microvm(self, **request: Any) -> dict[str, Any]:
-            super().resume_microvm(**request)
-            with lock:
-                state["value"] = "RUNNING"
-            if resume_hook:
-                post_hook(holder["worker"], "resume")
-            return {}
+            return {**response, "state": microvm.state()}
 
     class WorkerMicrovms:
         """The worker's lambda-microvms client."""
 
-        def __init__(self) -> None:
-            self.suspended: list[str] = []
-
         def suspend_microvm(self, *, microvmIdentifier: str) -> dict[str, Any]:  # noqa: N803
-            self.suspended.append(microvmIdentifier)
-            with lock:
-                state["value"] = "SUSPENDED"
+            microvm.suspended.append(microvmIdentifier)
             # Lambda calls the suspend hook before it freezes the MicroVM.
             post_hook(holder["worker"], "suspend")
+            microvm.set_state("SUSPENDED")
             return {}
-
-    worker_microvms = WorkerMicrovms()
 
     def job(job_input: Any, context: MicrovmJobContext) -> Any:
         return f"{job_input} done"
 
-    def wait_until_suspended(_: Any) -> str:
-        deadline = time.monotonic() + WAIT
-        while time.monotonic() < deadline:
-            with lock:
-                if state["value"] == "SUSPENDED":
-                    return "suspended"
-            time.sleep(0.01)
-        return "still running"
-
     def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
         options = MicrovmInvokeOptions(timeout=Duration.from_minutes(1))
         first = vm.invoke(ctx, "build", job_input="build", options=options)
-        between = ctx.step(wait_until_suspended, name="pause")
+        between = ctx.step(lambda _: microvm.wait_for("SUSPENDED"), name="pause")
         second = vm.invoke(ctx, "test", job_input="test", options=options)
         return [first, between, second]
 
@@ -526,21 +503,22 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
         lambda: start_microvm_worker(
             handler=job,
             create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
-            create_microvms_client=lambda region: worker_microvms,  # type: ignore[arg-type, return-value]
+            create_microvms_client=lambda region: WorkerMicrovms(),  # type: ignore[arg-type, return-value]
             logger=logger,
             port=0,
         )
     )
     holder["worker"] = worker
+    microvm.worker = worker
     try:
-        client = StatefulMicrovms(
-            launches=[run_hook_to(worker)],
-            endpoint=url_of(worker),
+        client = SessionMicrovms(
+            launches=[run_hook_to(worker)], endpoint=microvm.endpoint
         )
         holder["config"] = MicrovmSessionConfig(
             image_identifier="img",
             execution_role_arn="role",
             timeout=Duration.from_minutes(5),
+            idle_policy=IDLE_POLICY,
             auto_suspend_on_idle=True,
             auto_suspend_idle_time=Duration.from_seconds(60),
             client=client,
@@ -551,15 +529,21 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
     finally:
         worker.close()
         runner.close()
+        microvm.close()
 
     assert result.status is InvocationStatus.SUCCEEDED, result.error
     assert json.loads(result.result or "null") == [
         "build done",
-        "suspended",
+        "SUSPENDED",
         "test done",
     ]
-    assert worker_microvms.suspended[0] == "mvm-1"
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    assert microvm.suspended[0] == "mvm-1"
+    # The first request after the suspend got the 502. The state check found
+    # the MicroVM SUSPENDED, and the job kept retrying. The SDK made no
+    # ResumeMicrovm call.
+    assert 502 in microvm.answers
+    assert len(client.requests("get_microvm")) >= 1
+    assert client.requests("resume_microvm") == []
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
     refusals = logger.count("job refused: the MicroVM is suspending")
     if resume_hook:
@@ -573,22 +557,38 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
 # ---------------------------------------------------------------------------
 
 
-class SimulatedMicrovm:
-    """A stand-in for Lambda that keeps the state of one MicroVM.
+IDLE_POLICY = {
+    "autoResumeEnabled": True,
+    "maxIdleDurationSeconds": 86400,
+    "suspendedDurationSeconds": 3600,
+}
+"""An idle policy that lets the service resume the MicroVM on a request."""
 
-    1. The session's SuspendMicrovm sends the ``suspend`` hook, and then sets
-       the state to ``SUSPENDED``. Lambda calls the hook before the freeze.
-    2. The session's ResumeMicrovm sends the ``resume`` hook, and then sets
-       the state to ``RUNNING``. A probe saw the hook before ``RUNNING``.
-    3. :attr:`endpoint` stands in for the MicroVM endpoint. It forwards each
-       job to the worker while the MicroVM runs. While it is suspended, it
+
+class SimulatedMicrovm:
+    """A stand-in for Lambda that keeps the state of one MicroVM whose idle
+    policy sets ``autoResumeEnabled``.
+
+    1. A SuspendMicrovm call sends the ``suspend`` hook, and then sets the
+       state to ``SUSPENDED`` with :meth:`set_state`. Lambda calls the hook
+       before the freeze.
+    2. :attr:`endpoint` stands in for the MicroVM endpoint. It forwards each
+       job to the worker while the MicroVM runs.
+    3. For the first ``settling_requests`` requests after a suspend, it
        answers HTTP 502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``,
-       as the service does.
+       as the service does in the first seconds after a suspend.
+    4. The next request resumes the MicroVM, as the service does. It sends
+       the ``resume`` hook when ``resume_hook`` is set, sets the state to
+       ``RUNNING``, and forwards the request. A probe saw the hook before
+       the request reached the worker.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, resume_hook: bool = True, settling_requests: int = 1) -> None:
         self._lock = threading.Lock()
         self._state = "RUNNING"
+        self._resume_hook = resume_hook
+        self._settling_requests = settling_requests
+        self._settling = 0
         self.worker: MicrovmWorker | None = None
         self.suspended: list[str] = []
         self.answers: list[int] = []
@@ -597,7 +597,7 @@ class SimulatedMicrovm:
         class Endpoint(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802 - the http.server name
                 body = self.rfile.read(int(self.headers.get("content-length", "0")))
-                if simulated.state() == "SUSPENDED":
+                if not simulated.resume_on_request():
                     simulated.record(502)
                     self.send_response(502)
                     self.send_header("x-aws-proxy-error", "MICROVM_CONNECT_FAILED")
@@ -632,6 +632,23 @@ class SimulatedMicrovm:
     def set_state(self, state: str) -> None:
         with self._lock:
             self._state = state
+            if state == "SUSPENDED":
+                self._settling = self._settling_requests
+
+    def resume_on_request(self) -> bool:
+        """Return whether the request can go to the worker. A suspended
+        MicroVM refuses it while it settles, and resumes otherwise."""
+        with self._lock:
+            if self._state != "SUSPENDED":
+                return True
+            if self._settling > 0:
+                self._settling -= 1
+                return False
+        if self._resume_hook:
+            assert self.worker is not None
+            post_hook(self.worker, "resume")
+        self.set_state("RUNNING")
+        return True
 
     def forward(self, path: str, body: bytes) -> tuple[int, bytes]:
         """Send the job to the worker. Return the status and the body of the
@@ -687,12 +704,6 @@ def suspend_after_session(
             response = super().get_microvm(**request)
             return {**response, "state": microvm.state()}
 
-        def resume_microvm(self, **request: Any) -> dict[str, Any]:
-            super().resume_microvm(**request)
-            post_hook(holder["worker"], "resume")
-            microvm.set_state("RUNNING")
-            return {}
-
         def suspend_microvm(self, **request: Any) -> dict[str, Any]:
             super().suspend_microvm(**request)
             microvm.suspended.append(request["microvmIdentifier"])
@@ -727,6 +738,7 @@ def suspend_after_session(
             image_identifier="img",
             execution_role_arn="role",
             timeout=Duration.from_minutes(5),
+            idle_policy=IDLE_POLICY,
             client=client,
         )
         arn = runner.run_async(input="null", execution_timeout=WAIT)
@@ -750,7 +762,7 @@ def echo(job_input: Any, context: MicrovmJobContext) -> Any:
     return f"{job_input} done"
 
 
-def test_suspends_after_a_job_and_the_next_job_resumes_the_microvm(
+def test_suspends_after_a_job_and_the_service_resumes_the_microvm(
     fake_client: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     def make_pipeline(microvm: SimulatedMicrovm) -> Pipeline:
@@ -774,55 +786,14 @@ def test_suspends_after_a_job_and_the_next_job_resumes_the_microvm(
     assert not [record for record in caplog.records if record.levelname == "WARNING"]
     assert microvm.suspended == ["mvm-1"]
     assert logger.extras("suspending the MicroVM after a job") == []
-    # The flag makes the second job check the state before delivery. So it
-    # resumes the MicroVM before it sends the job, and gets no 502.
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert 502 not in microvm.answers
+    # The second job's first request got the 502 of a settling suspend. The
+    # state check found SUSPENDED, and the next request made the service
+    # resume the MicroVM. The SDK made no ResumeMicrovm call.
+    assert microvm.answers[-2:] == [502, 202]
+    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("resume_microvm") == []
     assert microvm.state() == "RUNNING"
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
-
-
-def test_a_replay_that_lost_the_flag_resumes_through_the_check_after_a_502(
-    fake_client: Any,
-) -> None:
-    # 1. The map item asks for a suspend after its job.
-    # 2. A durable wait ends the invocation. The next invocation replays
-    #    the completed map without running its item. So the flag is lost.
-    # 3. The next job goes to the suspended MicroVM, and gets a 502
-    #    MICROVM_CONNECT_FAILED. The request step checks the state, resumes
-    #    the MicroVM, and sends the job again.
-    def make_pipeline(microvm: SimulatedMicrovm) -> Pipeline:
-        def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
-            shards: list[Any] = ctx.map(
-                ["a"],
-                lambda item_context, item, index, items: vm.invoke(
-                    item_context,
-                    f"shard-{item}",
-                    job_input=item,
-                    options=options(suspend_after=True),
-                ),
-                name="shards",
-            ).get_results()
-            between = ctx.step(lambda _: microvm.wait_for("SUSPENDED"), name="pause")
-            ctx.wait(Duration.from_seconds(1), name="wait")
-            after = vm.invoke(ctx, "after", job_input="after", options=options())
-            return [shards, between, after]
-
-        return pipeline
-
-    outcome, client, microvm, _ = suspend_after_session(
-        fake_client, make_pipeline, echo
-    )
-
-    assert outcome == [["a done"], "SUSPENDED", "after done"]
-    assert microvm.suspended == ["mvm-1"]
-    # The job after the wait made no state check before delivery. Its first
-    # request got the 502. The check after it found SUSPENDED, resumed the
-    # MicroVM, and polled until RUNNING. The second request reached the
-    # worker.
-    assert microvm.answers[-2:] == [502, 202]
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert microvm.state() == "RUNNING"
 
 
 class LosingProxy:
@@ -891,21 +862,23 @@ class LosingProxy:
         self._server.server_close()
 
 
-def test_resumes_the_microvm_when_a_resend_of_a_running_job_meets_a_suspend(
+def test_the_service_resumes_the_microvm_when_a_resend_of_a_running_job_meets_a_suspend(
     fake_client: Any,
 ) -> None:
     """A resend of a running job during a suspend gets 503, not 202.
 
     1. The worker accepts the job, and its 202 is lost.
-    2. The request step checks the state again, and sees ``RUNNING``.
+    2. The request step checks the state, and sees ``RUNNING``.
     3. Lambda sends the ``suspend`` hook, and the MicroVM is ``SUSPENDED``.
     4. The resend reaches the worker during the suspend refusal.
+    5. The next resend reaches a suspended MicroVM. The service resumes it
+       and sends the ``resume`` hook, and the worker accepts the resend of
+       its running job.
 
-    A 202 at step 4 would end the delivery. Nothing would resume the
-    MicroVM, and the frozen job would never complete its callback. The 503
-    makes the request step check the state again, see ``SUSPENDED``, and
-    resume the MicroVM. The job here continues only after ResumeMicrovm, as
-    a frozen job does.
+    A 202 at step 4 would end the delivery. No later request would resume
+    the MicroVM, and the frozen job would never complete its callback. The
+    503 makes the request step send the job again. The job here continues
+    only after the resume, as a frozen job does.
     """
     state = {"value": "RUNNING"}
     lock = threading.Lock()
@@ -919,18 +892,19 @@ def test_resumes_the_microvm_when_a_resend_of_a_running_job_meets_a_suspend(
             response = super().get_microvm(**request)
             return {**response, "state": current}
 
-        def resume_microvm(self, **request: Any) -> dict[str, Any]:
-            super().resume_microvm(**request)
-            with lock:
-                state["value"] = "RUNNING"
-            resumed.set()
-            post_hook(holder["worker"], "resume")
-            return {}
-
     def suspend() -> None:
         post_hook(holder["worker"], "suspend")
         with lock:
             state["value"] = "SUSPENDED"
+
+    def auto_resume() -> None:
+        # The service resumes a suspended MicroVM on a request, when its idle
+        # policy sets autoResumeEnabled.
+        with lock:
+            assert state["value"] == "SUSPENDED"
+            state["value"] = "RUNNING"
+        resumed.set()
+        post_hook(holder["worker"], "resume")
 
     runs: list[str] = []
 
@@ -959,13 +933,14 @@ def test_resumes_the_microvm_when_a_resend_of_a_running_job_meets_a_suspend(
         )
     )
     holder["worker"] = worker
-    proxy = LosingProxy(worker, lose={1}, before={2: suspend})
+    proxy = LosingProxy(worker, lose={1}, before={2: suspend, 3: auto_resume})
     try:
         client = StatefulMicrovms(launches=[run_hook_to(worker)], endpoint=proxy.url)
         holder["config"] = MicrovmSessionConfig(
             image_identifier="img",
             execution_role_arn="role",
             timeout=Duration.from_minutes(5),
+            idle_policy=IDLE_POLICY,
             auto_suspend_on_idle=True,
             auto_suspend_idle_time=Duration.from_seconds(60),
             client=client,
@@ -982,4 +957,4 @@ def test_resumes_the_microvm_when_a_resend_of_a_running_job_meets_a_suspend(
     assert json.loads(result.result or "null") == "done"
     assert runs == ["build"]
     assert proxy.statuses == [None, 503, 202]
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    assert client.requests("resume_microvm") == []
