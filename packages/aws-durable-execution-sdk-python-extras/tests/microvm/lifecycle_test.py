@@ -446,7 +446,11 @@ def test_check_raises_the_state_error_for_a_removed_microvm(
 
 @pytest.mark.parametrize(
     ("code", "status"),
-    [("ThrottlingException", 429), ("ServiceException", 500)],
+    [
+        ("ThrottlingException", 429),
+        ("ServiceException", 500),
+        ("UnrecognizedClientException", 403),
+    ],
 )
 def test_check_reports_a_failed_get_microvm_without_failing_the_job(
     fake_client: Any, code: str, status: int
@@ -480,9 +484,9 @@ def test_check_fails_at_once_when_get_microvm_is_denied(fake_client: Any) -> Non
         check_with(client)
 
     assert str(raised.value) == (
-        "GetMicrovm was denied, so the operation cannot check the state of "
-        "MicroVM mvm-1. The function's execution role needs lambda:GetMicrovm. "
-        "GetMicrovm request ID: req-1."
+        "MicroVM mvm-1 gave a sign that it does not run. GetMicrovm was "
+        "denied, so the operation cannot check its state. The function's "
+        "execution role needs lambda:GetMicrovm. GetMicrovm request ID: req-1."
     )
     assert raised.value.__cause__ is error
     assert calls(client) == ["get_microvm"]

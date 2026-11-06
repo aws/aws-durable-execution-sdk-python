@@ -236,9 +236,9 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
             raise microvm_not_found(microvm_id, "GetMicrovm", error) from error
         if code == "AccessDeniedException":
             msg = (
-                "GetMicrovm was denied, so the operation cannot check the "
-                f"state of MicroVM {microvm_id}. The function's execution role "
-                "needs lambda:GetMicrovm."
+                f"MicroVM {microvm_id} gave a sign that it does not run. "
+                "GetMicrovm was denied, so the operation cannot check its "
+                "state. The function's execution role needs lambda:GetMicrovm."
             )
             response = (
                 error.response

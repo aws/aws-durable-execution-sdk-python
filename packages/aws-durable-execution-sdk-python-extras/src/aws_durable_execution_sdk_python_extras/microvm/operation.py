@@ -346,7 +346,9 @@ def microvm(
             ``CreateMicrovmAuthToken`` can report a removed MicroVM. It is
             a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
-            or the route answers a 4xx status such as 404, or a redirect.
+            or the route answers a 4xx status such as 404, or a redirect, or
+            ``GetMicrovm`` or ``ResumeMicrovm`` is denied. The message names
+            the permission.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
             result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.

@@ -293,7 +293,10 @@ class MicrovmSession:
                 suspended MicroVM reports it too.
             MicrovmDeliveryError: When the delivery fails after all retries,
                 or the route rejects the job. A suspended MicroVM whose
-                ``ResumeMicrovm`` is denied fails the delivery at once.
+                ``ResumeMicrovm`` is denied fails the delivery at once. A
+                denied ``GetMicrovm`` in the check after a sign of a
+                suspended MicroVM fails it at once too. The message names
+                the permission.
             MicrovmJobFailedError: When the MicroVM reports a failure, or
                 sends a result that is not valid JSON.
             MicrovmTimeoutError: When no result or heartbeat arrives in time.

@@ -2645,10 +2645,10 @@ def test_fails_at_once_when_the_state_check_is_denied(
     assert outcome(result) == {
         "error": "MicrovmDeliveryError",
         "message": (
-            'MicroVM "build": the job could not be delivered: GetMicrovm was '
-            "denied, so the operation cannot check the state of MicroVM mvm-1. "
-            "The function's execution role needs lambda:GetMicrovm. GetMicrovm "
-            "request ID: req-get."
+            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 '
+            "gave a sign that it does not run. GetMicrovm was denied, so the "
+            "operation cannot check its state. The function's execution role "
+            "needs lambda:GetMicrovm. GetMicrovm request ID: req-get."
         ),
     }
     step_error = (
