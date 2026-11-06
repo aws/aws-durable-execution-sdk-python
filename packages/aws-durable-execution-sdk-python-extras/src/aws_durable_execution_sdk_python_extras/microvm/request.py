@@ -268,9 +268,6 @@ class SendJobOptions:
     receives what remains of the retry window, in seconds. ``None`` from it
     keeps the current endpoint.
     """
-    unavailable_note: Callable[[], str | None] | None = None
-    """A sentence to add to the message of
-    :class:`MicrovmEndpointUnavailableError`, or ``None``."""
 
 
 def require_time_for_call(remaining_seconds: Callable[[], float | None]) -> None:
@@ -383,6 +380,8 @@ def send_job(options: SendJobOptions) -> int:
             ``MicrovmStateError``.
         MicrovmStateError: When ``recheck`` or ``suspend_check`` reports
             that the MicroVM can no longer run a job.
+        MicrovmGetDeniedError: When ``suspend_check`` is denied
+            ``GetMicrovm``.
         MicrovmResumeDeniedError: When ``suspend_check`` finds a suspended
             MicroVM, and ``ResumeMicrovm`` is denied.
         Exception: When ``CreateMicrovmAuthToken`` fails otherwise. The
@@ -400,11 +399,9 @@ def send_job(options: SendJobOptions) -> int:
 
     def unavailable() -> Exception:
         elapsed_ms = round((time.monotonic() - started) * 1000)
-        note = options.unavailable_note() if options.unavailable_note else None
         return MicrovmEndpointUnavailableError(
             f"The MicroVM did not accept the job at {options.path} after "
             f"{attempt} attempts in {elapsed_ms} ms. Last failure: {last_failure}."
-            + (f" {note}" if note else "")
         )
 
     def deadline() -> float:

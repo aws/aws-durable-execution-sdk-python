@@ -374,15 +374,8 @@ _STATE_CHECK_WARNING = (
     "is suspended. The request step keeps sending the job."
 )
 """The warning, once per step attempt, so up to 5 with the default retry
-strategy, after a failed state check of an attempt without the resume
-mode."""
-
-_GET_DENIED_NOTE = (
-    "GetMicrovm was denied, so the operation could not check whether the "
-    "MicroVM is suspended."
-)
-"""The sentence that the first tier adds to its final error after a denied
-state check. Without it, the message names only the last HTTP failure."""
+strategy, after a transient failure of the state check of an attempt
+without the resume mode. A denied check fails the step instead."""
 
 
 def step_retry_strategy(
@@ -601,9 +594,13 @@ class _MicrovmScope:
         2. A session MicroVM can also give that sign while it is suspended.
            The check then resumes it.
 
-        A failed ``GetMicrovm`` call in the check logs one warning per step
-        attempt, so up to 5 with the default retry strategy, and the
-        attempt keeps sending the job.
+        A denied ``GetMicrovm`` call in the check fails the step at once,
+        with a message that names ``lambda:GetMicrovm``. The default retry
+        strategy does not retry it, and the job fails with
+        ``MicrovmDeliveryError``. Any other failed ``GetMicrovm`` call, such
+        as throttling, a 5xx answer, or a connection error, logs one warning
+        per step attempt, so up to 5 with the default retry strategy, and
+        the attempt keeps sending the job.
 
         ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
         answer ``ResourceNotFoundException`` for a removed MicroVM. An
@@ -657,7 +654,6 @@ class _MicrovmScope:
 
             recheck: Callable[[float], str | None] | None = None
             check: Callable[[float], str | None] | None = None
-            get_denied = False
             if strict:
                 require_time_for_call(remaining_seconds)
 
@@ -669,11 +665,9 @@ class _MicrovmScope:
             else:
 
                 def check_state(max_wait_seconds: float) -> str | None:
-                    nonlocal get_denied
                     try:
                         return resume_if_suspended(options(max_wait_seconds))
                     except MicrovmStateCheckError as error:
-                        get_denied = get_denied or error.denied
                         if not check_warned.is_set():
                             check_warned.set()
                             logger.warning(
@@ -713,9 +707,6 @@ class _MicrovmScope:
                         window_started_at=window_started_at,
                         recheck=recheck,
                         suspend_check=check,
-                        unavailable_note=lambda: (
-                            _GET_DENIED_NOTE if get_denied else None
-                        ),
                     )
                 )
             except ClientError as error:

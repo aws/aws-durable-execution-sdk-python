@@ -67,17 +67,23 @@ class MicrovmStateCheckError(Exception):
     """``GetMicrovm`` failed in the check of :func:`resume_if_suspended`.
 
     The request step of a job without the resume mode runs that check only
-    after a sign that the MicroVM does not run. The job may never have
-    needed the check. Roles of :func:`microvm` from before this check may
-    not have ``lambda:GetMicrovm``. So the step logs one warning per step
-    attempt, and keeps sending the job. With the default retry strategy,
-    that is up to 5 warnings. ``__cause__`` is the error of the call.
+    after a sign that the MicroVM does not run. A failure other than a
+    denied call can be transient, such as throttling, a 5xx answer, or a
+    connection error. So the step logs one warning per step attempt, and
+    keeps sending the job. With the default retry strategy, that is up to 5
+    warnings. ``__cause__`` is the error of the call. A denied call raises
+    :class:`MicrovmGetDeniedError` instead.
     """
 
-    def __init__(self, message: str, *, denied: bool) -> None:
-        super().__init__(message)
-        self.denied = denied
-        """Whether the service answered ``AccessDeniedException``."""
+
+class MicrovmGetDeniedError(Exception):
+    """``GetMicrovm`` was denied in the check of :func:`resume_if_suspended`.
+
+    A later call is denied the same way. So the default retry strategy does
+    not retry it, and the delivery raises ``MicrovmDeliveryError`` at once.
+    The message names the permission, and ends with the request ID of the
+    call.
+    """
 
 
 class MicrovmResumeDeniedError(Exception):
@@ -173,7 +179,8 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
       suspended MicroVM answers the same 502. So the check also resumes a
       suspended MicroVM.
 
-    1. ``GetMicrovm`` runs once. A failure other than
+    1. ``GetMicrovm`` runs once. ``AccessDeniedException`` raises
+       :class:`MicrovmGetDeniedError`. Any other failure except
        ``ResourceNotFoundException`` raises :class:`MicrovmStateCheckError`.
        The caller then keeps sending the job.
     2. ``RUNNING`` or ``PENDING``: the function returns at once.
@@ -196,7 +203,9 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
         none.
 
     Raises:
-        MicrovmStateCheckError: When the first ``GetMicrovm`` call fails.
+        MicrovmGetDeniedError: When the first ``GetMicrovm`` call is denied.
+        MicrovmStateCheckError: When the first ``GetMicrovm`` call fails
+            otherwise.
         MicrovmStateError: When the MicroVM can no longer run a job.
         MicrovmResumeDeniedError: When ``ResumeMicrovm`` is denied.
         MicrovmEndpointUnavailableError: When the MicroVM does not reach
@@ -225,12 +234,25 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
         code = error_code(error)
         if code == "ResourceNotFoundException":
             raise microvm_not_found(microvm_id, "GetMicrovm", error) from error
+        if code == "AccessDeniedException":
+            msg = (
+                "GetMicrovm was denied, so the operation cannot check the "
+                f"state of MicroVM {microvm_id}. The function's execution role "
+                "needs lambda:GetMicrovm."
+            )
+            response = (
+                error.response
+                if is_microvms_service_error("GetMicrovm", error)
+                else None
+            )
+            raise MicrovmGetDeniedError(
+                with_request_id(msg, "GetMicrovm", response)
+            ) from error
         raise MicrovmStateCheckError(
-            str(add_request_id("GetMicrovm", error)),
-            denied=code == "AccessDeniedException",
+            str(add_request_id("GetMicrovm", error))
         ) from error
     except BotoCoreError as error:
-        raise MicrovmStateCheckError(str(error), denied=False) from error
+        raise MicrovmStateCheckError(str(error)) from error
     state = current.get("state")
     _raise_if_ended(microvm_id, current)
     if state not in {"SUSPENDING", "SUSPENDED"}:

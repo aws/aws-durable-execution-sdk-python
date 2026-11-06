@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
 )
 from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
     EnsureRunningOptions,
+    MicrovmGetDeniedError,
     MicrovmResumeDeniedError,
     MicrovmStateCheckError,
     MicrovmStateError,
@@ -444,19 +445,18 @@ def test_check_raises_the_state_error_for_a_removed_microvm(
 
 
 @pytest.mark.parametrize(
-    ("code", "denied"),
-    [("AccessDeniedException", True), ("ThrottlingException", False)],
+    ("code", "status"),
+    [("ThrottlingException", 429), ("ServiceException", 500)],
 )
 def test_check_reports_a_failed_get_microvm_without_failing_the_job(
-    fake_client: Any, code: str, denied: bool
+    fake_client: Any, code: str, status: int
 ) -> None:
-    error = service_error("GetMicrovm", code)
+    error = service_error("GetMicrovm", code, status)
     client = fake_client(states=[error])
 
     with pytest.raises(MicrovmStateCheckError) as raised:
         check_with(client)
 
-    assert raised.value.denied is denied
     assert f"({code})" in str(raised.value)
     assert str(raised.value).endswith(f"{code} message. GetMicrovm request ID: req-1.")
     assert raised.value.__cause__ is error
@@ -469,8 +469,37 @@ def test_check_reports_a_get_microvm_connection_failure(fake_client: Any) -> Non
     with pytest.raises(MicrovmStateCheckError) as raised:
         check_with(client)
 
-    assert raised.value.denied is False
     assert raised.value.__cause__ is error
+
+
+def test_check_fails_at_once_when_get_microvm_is_denied(fake_client: Any) -> None:
+    error = service_error("GetMicrovm", "AccessDeniedException", 403)
+    client = fake_client(states=[error])
+
+    with pytest.raises(MicrovmGetDeniedError) as raised:
+        check_with(client)
+
+    assert str(raised.value) == (
+        "GetMicrovm was denied, so the operation cannot check the state of "
+        "MicroVM mvm-1. The function's execution role needs lambda:GetMicrovm. "
+        "GetMicrovm request ID: req-1."
+    )
+    assert raised.value.__cause__ is error
+    assert calls(client) == ["get_microvm"]
+
+
+def test_check_names_no_get_request_id_for_an_error_of_another_call(
+    fake_client: Any,
+) -> None:
+    # An STS error inside the call carries the request ID of STS.
+    client = fake_client(
+        states=[service_error("AssumeRole", "AccessDeniedException", 403)]
+    )
+
+    with pytest.raises(MicrovmGetDeniedError) as raised:
+        check_with(client)
+
+    assert str(raised.value).endswith("needs lambda:GetMicrovm.")
 
 
 @pytest.mark.parametrize("state", ["SUSPENDING", "SUSPENDED"])

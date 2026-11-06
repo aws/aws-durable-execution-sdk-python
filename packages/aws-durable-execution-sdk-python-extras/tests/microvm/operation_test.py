@@ -33,7 +33,7 @@ from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
 )
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
@@ -1309,26 +1309,76 @@ def test_keeps_sending_the_job_when_the_microvm_runs(
     assert client.requests("resume_microvm") == []
 
 
-def test_keeps_sending_the_job_with_one_warning_when_get_microvm_is_denied(
+def get_microvm_error(code: str, status: int) -> ClientError:
+    """A ``GetMicrovm`` error that carries a request ID."""
+    response: Any = {
+        "Error": {"Code": code, "Message": f"{code} message"},
+        "ResponseMetadata": {"HTTPStatusCode": status, "RequestId": "req-get"},
+    }
+    return ClientError(response, "GetMicrovm")
+
+
+def test_fails_at_once_when_get_microvm_is_denied(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
+) -> None:
+    endpoint = fake_endpoint([connect_failed] * 10)
+    client = fake_client(
+        endpoint=endpoint.url,
+        states=[get_microvm_error("AccessDeniedException", 403)] * 10,
+    )
+    # The default retry strategy decides on the error of the step.
+    config = config_with(
+        client, request=MicrovmRequestConfig(path="/job"), retry_strategy=None
+    )
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmDeliveryError",
+        "message": (
+            'MicroVM "build": the job could not be delivered: GetMicrovm was '
+            "denied, so the operation cannot check the state of MicroVM mvm-1. "
+            "The function's execution role needs lambda:GetMicrovm. GetMicrovm "
+            "request ID: req-get."
+        ),
+    }
+    step_error = result.get_context("build").get_step("build.request").error
+    assert step_error is not None
+    assert step_error.type == (
+        "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
+        "MicrovmGetDeniedError"
+    )
+    assert len(endpoint.requests) == 1
+    assert state_events(client) == ["get", "terminate"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        get_microvm_error("ThrottlingException", 429),
+        get_microvm_error("ServiceException", 500),
+        EndpointConnectionError(endpoint_url="https://lambda.example"),
+    ],
+    ids=["throttled", "5xx", "connection"],
+)
+def test_keeps_sending_the_job_with_one_warning_when_get_microvm_fails(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
-    make_error: Any,
     connect_failed: Any,
     caplog: pytest.LogCaptureFixture,
+    error: Exception,
 ) -> None:
     # The failures end at 0.25, 0.75, 1.75, and 3.75 seconds. The checks run
-    # at 0.25 and 3.75 seconds, at most once per 2 seconds. Both are denied.
+    # at 0.25 and 3.75 seconds, at most once per 2 seconds. Both fail.
     endpoint = fake_endpoint([connect_failed] * 4)
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=[make_error("AccessDeniedException", 403)] * 10,
-    )
+    client = fake_client(endpoint=endpoint.url, states=[error] * 10)
     config = config_with(
         client,
         request=MicrovmRequestConfig(
             path="/job", retry_window=Duration.from_seconds(10)
         ),
+        retry_strategy=None,
     )
 
     with caplog.at_level("WARNING"):

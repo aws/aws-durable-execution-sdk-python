@@ -146,11 +146,13 @@ class MicrovmNotRunningError(MicrovmDeliveryError):
     records only the message of the failure. So a support case can quote
     the request ID from the message, on the first run and on replay.
 
-    A ``GetMicrovm`` call that is denied or fails does not report the
-    state. The request step then logs one warning per step attempt, so up
-    to 5 with the default retry strategy, and keeps retrying. So
-    the job fails with a plain :class:`MicrovmDeliveryError`, after the
-    retries of both tiers.
+    A denied ``GetMicrovm`` call does not report the state. It fails the
+    job at once with a plain :class:`MicrovmDeliveryError`, whose message
+    names ``lambda:GetMicrovm``. A ``GetMicrovm`` call that fails otherwise,
+    such as a throttled call, does not report the state either. The request
+    step then logs one warning per step attempt, so up to 5 with the
+    default retry strategy, and keeps retrying. So the job fails with a
+    plain :class:`MicrovmDeliveryError`, after the retries of both tiers.
 
     A job in the ``run`` hook has no request step. So a MicroVM that ends
     before it runs that job fails it with :class:`MicrovmTimeoutError`, at
