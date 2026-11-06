@@ -2657,7 +2657,7 @@ def test_fails_at_once_when_the_state_check_is_denied(
     assert step_error is not None
     assert step_error.type == (
         "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
-        "MicrovmGetDeniedError"
+        "MicrovmPermissionDeniedError"
     )
     assert len(client.requests("get_microvm")) == 1
     assert len(endpoint.requests) == 1

@@ -72,27 +72,18 @@ class MicrovmStateCheckError(Exception):
     connection error. So the step logs one warning per step attempt, and
     keeps sending the job. With the default retry strategy, that is up to 5
     warnings. ``__cause__`` is the error of the call. A denied call raises
-    :class:`MicrovmGetDeniedError` instead.
+    :class:`MicrovmPermissionDeniedError` instead.
     """
 
 
-class MicrovmGetDeniedError(Exception):
-    """``GetMicrovm`` was denied in the check of :func:`resume_if_suspended`.
+class MicrovmPermissionDeniedError(Exception):
+    """``GetMicrovm`` or ``ResumeMicrovm`` was denied in the check of
+    :func:`resume_if_suspended`.
 
     A later call is denied the same way. So the default retry strategy does
     not retry it, and the delivery raises ``MicrovmDeliveryError`` at once.
-    The message names the permission, and ends with the request ID of the
-    call.
-    """
-
-
-class MicrovmResumeDeniedError(Exception):
-    """``ResumeMicrovm`` was denied for a suspending or suspended MicroVM.
-
-    Nothing else resumes the MicroVM, and a later attempt is denied the same
-    way. So the default retry strategy does not retry it, and the delivery
-    raises ``MicrovmDeliveryError`` at once. The message names the
-    permission, and ends with the request ID of the call.
+    The message names the denied action and the permission, and ends with
+    the request ID of the call. ``__cause__`` is the error of the call.
     """
 
 
@@ -180,7 +171,7 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
       suspended MicroVM.
 
     1. ``GetMicrovm`` runs once. ``AccessDeniedException`` raises
-       :class:`MicrovmGetDeniedError`. Any other failure except
+       :class:`MicrovmPermissionDeniedError`. Any other failure except
        ``ResourceNotFoundException`` raises :class:`MicrovmStateCheckError`.
        The caller then keeps sending the job.
     2. ``RUNNING`` or ``PENDING``: the function returns at once.
@@ -190,7 +181,7 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
     4. ``TERMINATING``, ``TERMINATED``, or not found: it raises
        :class:`MicrovmStateError`.
 
-    A denied ``ResumeMicrovm`` raises :class:`MicrovmResumeDeniedError`.
+    A denied ``ResumeMicrovm`` raises :class:`MicrovmPermissionDeniedError`.
     ``ConflictException`` is not an error: polling continues. A resume that
     the service rejects with a conflict while the MicroVM is still
     suspending is sent again once the MicroVM is suspended. Any other
@@ -203,11 +194,11 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
         none.
 
     Raises:
-        MicrovmGetDeniedError: When the first ``GetMicrovm`` call is denied.
+        MicrovmPermissionDeniedError: When the first ``GetMicrovm`` call,
+            or ``ResumeMicrovm``, is denied.
         MicrovmStateCheckError: When the first ``GetMicrovm`` call fails
             otherwise.
         MicrovmStateError: When the MicroVM can no longer run a job.
-        MicrovmResumeDeniedError: When ``ResumeMicrovm`` is denied.
         MicrovmEndpointUnavailableError: When the MicroVM does not reach
             ``RUNNING`` in time.
         ClientError: When ``ResumeMicrovm`` fails otherwise, or a later
@@ -235,18 +226,11 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
         if code == "ResourceNotFoundException":
             raise microvm_not_found(microvm_id, "GetMicrovm", error) from error
         if code == "AccessDeniedException":
-            msg = (
-                f"MicroVM {microvm_id} gave a sign that it does not run. "
-                "GetMicrovm was denied, so the operation cannot check its "
-                "state. The function's execution role needs lambda:GetMicrovm."
-            )
-            response = (
-                error.response
-                if is_microvms_service_error("GetMicrovm", error)
-                else None
-            )
-            raise MicrovmGetDeniedError(
-                with_request_id(msg, "GetMicrovm", response)
+            raise _denied(
+                f"MicroVM {microvm_id} gave a sign that it does not run.",
+                "GetMicrovm",
+                "check its state",
+                error,
             ) from error
         raise MicrovmStateCheckError(
             str(add_request_id("GetMicrovm", error))
@@ -269,18 +253,11 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
         if code == "ResourceNotFoundException":
             raise microvm_not_found(microvm_id, "ResumeMicrovm", error) from error
         if code == "AccessDeniedException":
-            msg = (
-                f"MicroVM {microvm_id} is {state}. ResumeMicrovm was denied, "
-                "so the operation cannot resume it. The function's execution "
-                "role needs lambda:ResumeMicrovm."
-            )
-            response = (
-                error.response
-                if is_microvms_service_error("ResumeMicrovm", error)
-                else None
-            )
-            raise MicrovmResumeDeniedError(
-                with_request_id(msg, "ResumeMicrovm", response)
+            raise _denied(
+                f"MicroVM {microvm_id} is {state}.",
+                "ResumeMicrovm",
+                "resume it",
+                error,
             ) from error
         if code != "ConflictException":
             raise add_request_id("ResumeMicrovm", error)
@@ -295,6 +272,26 @@ def resume_if_suspended(options: EnsureRunningOptions) -> str | None:
         resuming=True,
         resume_accepted=accepted,
     )
+
+
+def _denied(
+    situation: str,
+    operation: Literal["GetMicrovm", "ResumeMicrovm"],
+    effect: str,
+    error: ClientError,
+) -> MicrovmPermissionDeniedError:
+    """Return the error for a denied ``operation`` call.
+
+    The message names the action and the permission, and ends with the
+    request ID of the call. An error of another call, such as STS, carries
+    the request ID of that call. So the message then has no request ID.
+    """
+    msg = (
+        f"{situation} {operation} was denied, so the operation cannot "
+        f"{effect}. The function's execution role needs lambda:{operation}."
+    )
+    response = error.response if is_microvms_service_error(operation, error) else None
+    return MicrovmPermissionDeniedError(with_request_id(msg, operation, response))
 
 
 def _raise_if_ended(microvm_id: str, current: Any) -> None:

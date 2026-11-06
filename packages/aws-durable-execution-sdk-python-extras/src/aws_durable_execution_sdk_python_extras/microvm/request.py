@@ -388,10 +388,9 @@ def send_job(options: SendJobOptions) -> int:
             ``MicrovmStateError``.
         MicrovmStateError: When ``recheck`` or ``suspend_check`` reports
             that the MicroVM can no longer run a job.
-        MicrovmGetDeniedError: When ``suspend_check`` is denied
-            ``GetMicrovm``.
-        MicrovmResumeDeniedError: When ``suspend_check`` finds a suspended
-            MicroVM, and ``ResumeMicrovm`` is denied.
+        MicrovmPermissionDeniedError: When ``suspend_check`` is denied
+            ``GetMicrovm``, or finds a suspended MicroVM and is denied
+            ``ResumeMicrovm``.
         Exception: When ``CreateMicrovmAuthToken`` fails otherwise. The
             message of a botocore error ends with the request ID.
     """

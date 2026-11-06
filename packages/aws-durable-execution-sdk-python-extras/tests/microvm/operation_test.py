@@ -1349,7 +1349,7 @@ def test_fails_at_once_when_get_microvm_is_denied(
     assert step_error is not None
     assert step_error.type == (
         "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
-        "MicrovmGetDeniedError"
+        "MicrovmPermissionDeniedError"
     )
     assert len(endpoint.requests) == 1
     assert state_events(client) == ["get", "terminate"]
@@ -1511,6 +1511,44 @@ def test_fails_at_once_when_resume_is_denied_for_a_microvm_suspended_from_outsid
     }
     assert len(endpoint.requests) == 1
     assert state_events(client) == ["get", "resume", "terminate"]
+
+
+@pytest.mark.parametrize(
+    ("denied", "permission"),
+    [("get", "lambda:GetMicrovm"), ("resume", "lambda:ResumeMicrovm")],
+)
+def test_a_custom_strategy_sees_one_error_type_for_a_denial(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    make_error: Any,
+    connect_failed: Any,
+    denied: str,
+    permission: str,
+) -> None:
+    endpoint = fake_endpoint([connect_failed])
+    error = make_error("AccessDeniedException", 403)
+    client = (
+        fake_client(endpoint=endpoint.url, states=[error])
+        if denied == "get"
+        else fake_client(endpoint=endpoint.url, states=["SUSPENDED"], resumes=[error])
+    )
+    seen: list[tuple[str, str]] = []
+
+    def strategy(error: Exception, attempt: int) -> RetryDecision:
+        seen.append((type(error).__name__, str(error)))
+        return RetryDecision.no_retry()
+
+    config = config_with(
+        client, request=MicrovmRequestConfig(path="/job"), retry_strategy=strategy
+    )
+
+    result = run(catching(config), {})
+
+    assert outcome(result)["error"] == "MicrovmDeliveryError"
+    [(name, message)] = [entry for entry in seen if "denied" in entry[1]]
+    assert name == "MicrovmPermissionDeniedError"
+    assert f"needs {permission}." in message
 
 
 @pytest.mark.parametrize("status", [500, 503])

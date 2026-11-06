@@ -18,8 +18,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
 )
 from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
     EnsureRunningOptions,
-    MicrovmGetDeniedError,
-    MicrovmResumeDeniedError,
+    MicrovmPermissionDeniedError,
     MicrovmStateCheckError,
     MicrovmStateError,
     ensure_running,
@@ -480,7 +479,7 @@ def test_check_fails_at_once_when_get_microvm_is_denied(fake_client: Any) -> Non
     error = service_error("GetMicrovm", "AccessDeniedException", 403)
     client = fake_client(states=[error])
 
-    with pytest.raises(MicrovmGetDeniedError) as raised:
+    with pytest.raises(MicrovmPermissionDeniedError) as raised:
         check_with(client)
 
     assert str(raised.value) == (
@@ -500,7 +499,7 @@ def test_check_names_no_get_request_id_for_an_error_of_another_call(
         states=[service_error("AssumeRole", "AccessDeniedException", 403)]
     )
 
-    with pytest.raises(MicrovmGetDeniedError) as raised:
+    with pytest.raises(MicrovmPermissionDeniedError) as raised:
         check_with(client)
 
     assert str(raised.value).endswith("needs lambda:GetMicrovm.")
@@ -513,7 +512,7 @@ def test_check_fails_at_once_when_resume_microvm_is_denied(
     error = service_error("ResumeMicrovm", "AccessDeniedException", 403)
     client = fake_client(states=[state], resumes=[error])
 
-    with pytest.raises(MicrovmResumeDeniedError) as raised:
+    with pytest.raises(MicrovmPermissionDeniedError) as raised:
         check_with(client)
 
     assert str(raised.value) == (
@@ -534,7 +533,7 @@ def test_check_names_no_request_id_for_an_error_of_another_call(
         resumes=[service_error("AssumeRole", "AccessDeniedException", 403)],
     )
 
-    with pytest.raises(MicrovmResumeDeniedError) as raised:
+    with pytest.raises(MicrovmPermissionDeniedError) as raised:
         check_with(client)
 
     assert str(raised.value).endswith("needs lambda:ResumeMicrovm.")
