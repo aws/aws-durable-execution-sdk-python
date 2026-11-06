@@ -7,8 +7,9 @@ next job as soon as the MicroVM resumes.
 
 The session does not suspend when idle. The first job sets suspend_after, so
 the durable function calls SuspendMicrovm after that job's result arrives.
-The function's role needs lambda:SuspendMicrovm on the image. A callback named gate holds
-the second job. The caller completes the callback with
+The function's role needs lambda:SuspendMicrovm on the image. The idle
+policy sets autoResumeEnabled, so the service resumes the MicroVM on the
+next request. A callback named gate holds the second job. The caller completes the callback with
 SendDurableExecutionCallbackSuccess to start the second job.
 """
 
@@ -32,6 +33,18 @@ from aws_durable_execution_sdk_python_extras.microvm import (
 # So a failed caller leaves the MicroVM suspended for 5 minutes, not for the
 # whole execution timeout.
 GATE = CallbackConfig(timeout=Duration.from_minutes(5))
+
+# The SDK does not resume a MicroVM. The service resumes a suspended MicroVM on
+# the next request, because the idle policy sets autoResumeEnabled.
+# maxIdleDurationSeconds is above maximumDurationInSeconds, the 10-minute
+# session timeout plus 5 minutes. The service's idle timer counts only inbound
+# requests, so a shorter value could suspend a running job.
+# suspendedDurationSeconds is the same 15 minutes, longer than the session.
+IDLE_POLICY = {
+    "autoResumeEnabled": True,
+    "maxIdleDurationSeconds": 3600,
+    "suspendedDurationSeconds": 900,
+}
 
 # The second job waits for the resume. The worker can refuse it with HTTP 503
 # for up to 30 seconds before that, and the request step retries for up to
@@ -89,10 +102,10 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
         # The callback result carries no data. So the handler ignores it.
         session_context.create_callback(name="gate", config=GATE).result()
 
-        # The first job set suspend_after. So the request step calls
-        # GetMicrovm, finds the MicroVM SUSPENDED, and calls ResumeMicrovm
-        # before it sends the job. A suspended MicroVM keeps its files. So
-        # this job reads the file that the first job wrote.
+        # The first job set suspend_after. So this job's first request finds
+        # the MicroVM SUSPENDED, and the service resumes it on a request.
+        # A suspended MicroVM keeps its files. So this job reads the file
+        # that the first job wrote.
         read = vm.invoke(
             session_context,
             "read",
@@ -120,6 +133,7 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
             image_identifier=image_arn,
             execution_role_arn=execution_role_arn,
             timeout=Duration.from_minutes(10),
+            idle_policy=IDLE_POLICY,
         ),
         handler=write_gate_read,
     )
