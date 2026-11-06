@@ -2676,9 +2676,9 @@ def test_keeps_sending_after_a_failed_state_check_with_one_warning(
     code: str,
     status: int,
 ) -> None:
-    # The failures end at 0.25, 0.75, 1.75, and 3.75 seconds. The checks run
-    # at 0.25 and 3.75 seconds, and both fail. The fifth request succeeds.
-    endpoint = fake_endpoint([connect_failed] * 4)
+    # The failures come at 0, 0.25, 0.75, 1.75, and 3.75 seconds. The checks
+    # run at 0 and 3.75 seconds, and both fail. The sixth request succeeds.
+    endpoint = fake_endpoint([connect_failed] * 5)
     client = fake_client(
         endpoint=endpoint.url,
         states=[get_microvm_error(code, status)] * 10,
@@ -2701,7 +2701,7 @@ def test_keeps_sending_after_a_failed_state_check_with_one_warning(
 
     assert outcome(result) == {"result": "done"}
     assert len(client.requests("get_microvm")) == 2
-    assert len(endpoint.requests) == 5
+    assert len(endpoint.requests) == 6
     assert warnings(caplog, STATE_CHECK_WARNING) == 1
 
 

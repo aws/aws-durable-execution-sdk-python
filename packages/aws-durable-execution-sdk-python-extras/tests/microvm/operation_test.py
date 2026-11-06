@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import datetime
+import email.message
 import hashlib
 import json
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -1352,6 +1355,62 @@ def test_fails_at_once_when_get_microvm_is_denied(
     assert state_events(client) == ["get", "terminate"]
 
 
+class SlowDeadEndpoint(urllib.request.OpenerDirector):
+    """An opener that stands in for the endpoint of a dead MicroVM.
+
+    Each request takes ``seconds``, then gets a 502 with
+    ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. A dead
+    endpoint was measured to take 3 to 8 seconds for that 502. The tests use
+    a shorter delay that still uses up a 1-second retry window.
+    """
+
+    def __init__(self, seconds: float, *, answer: bool) -> None:
+        super().__init__()
+        self.seconds = seconds
+        self.answer = answer
+        self.requests = 0
+
+    def open(self, fullurl: Any, data: Any = None, timeout: Any = None) -> Any:
+        self.requests += 1
+        time.sleep(self.seconds)
+        if not self.answer:
+            raise urllib.error.URLError("connection reset")
+        headers = email.message.Message()
+        headers["x-aws-proxy-error"] = "MICROVM_CONNECT_FAILED"
+        raise urllib.error.HTTPError(
+            fullurl.full_url, 502, "Bad Gateway", headers, None
+        )
+
+
+@pytest.mark.parametrize("answer", [True, False], ids=["connect-failed", "no-answer"])
+def test_checks_the_state_after_a_sign_that_uses_up_the_retry_window(
+    run: Any, fake_client: Any, answer: bool
+) -> None:
+    # The delayed sign uses up the 1-second window. The state check still
+    # runs, because only the invocation reserve limits it.
+    opener = SlowDeadEndpoint(1.5, answer=answer)
+    client = ended_client(fake_client, "mvm-1.microvm.example", "TERMINATED")
+    config = config_with(
+        client,
+        request=MicrovmRequestConfig(
+            path="/job", retry_window=Duration.from_seconds(1)
+        ),
+        opener=opener,
+    )
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmNotRunningError",
+        "message": (
+            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 is '
+            "TERMINATED: Success. GetMicrovm request ID: req-1."
+        ),
+    }
+    assert opener.requests == 1
+    assert len(client.requests("get_microvm")) == 1
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -1369,9 +1428,9 @@ def test_keeps_sending_the_job_with_one_warning_when_get_microvm_fails(
     caplog: pytest.LogCaptureFixture,
     error: Exception,
 ) -> None:
-    # The failures end at 0.25, 0.75, 1.75, and 3.75 seconds. The checks run
-    # at 0.25 and 3.75 seconds, at most once per 2 seconds. Both fail.
-    endpoint = fake_endpoint([connect_failed] * 4)
+    # The failures come at 0, 0.25, 0.75, 1.75, and 3.75 seconds. The checks
+    # run at 0 and 3.75 seconds, at most once per 2 seconds. Both fail.
+    endpoint = fake_endpoint([connect_failed] * 5)
     client = fake_client(endpoint=endpoint.url, states=[error] * 10)
     config = config_with(
         client,
@@ -1385,7 +1444,7 @@ def test_keeps_sending_the_job_with_one_warning_when_get_microvm_fails(
         result = run(catching(config), {}, succeed_with("done"))
 
     assert outcome(result) == {"result": "done"}
-    assert len(endpoint.requests) == 5
+    assert len(endpoint.requests) == 6
     assert len(client.requests("get_microvm")) == 2
     assert (
         sum(

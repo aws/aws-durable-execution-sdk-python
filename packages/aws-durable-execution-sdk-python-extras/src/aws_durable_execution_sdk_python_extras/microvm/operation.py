@@ -585,8 +585,11 @@ class _MicrovmScope:
         that the MicroVM does not run, at most once per 2 seconds: an HTTP
         502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no
         answer. See
-        :func:`resume_if_suspended`. Every job over HTTP runs this check,
-        from :func:`microvm` and from a session:
+        :func:`resume_if_suspended`. The check runs first after the sign,
+        before the retry window and the backoff, and only the invocation
+        reserve limits it. So a sign that uses up the window still gets the
+        check. Every job over HTTP runs this check, from :func:`microvm` and
+        from a session:
 
         1. The endpoint of a terminated MicroVM answers that 502, measured
            in us-east-1. Without the check, the request step retries the
