@@ -2812,14 +2812,20 @@ def test_durable_parallel_branch_is_compatible_with_parallel_functions_arg():
 # region per-context replay status
 
 
-def _replay_state(operations: dict[str, Operation]) -> ExecutionState:
+def _replay_state(
+    operations: dict[str, Operation],
+    *,
+    plugin_executor: PluginExecutor | None = None,
+    updated_operation_ids: list[str] | None = None,
+) -> ExecutionState:
     """Build a real ExecutionState seeded with the given operations."""
     return ExecutionState(
         durable_execution_arn="arn:aws:durable:us-east-1:123456789012:execution/test",
         initial_checkpoint_token="token",  # noqa: S106
         operations=operations,
         service_client=Mock(),
-        plugin_executor=PluginExecutor(plugins=None),
+        plugin_executor=plugin_executor or PluginExecutor(plugins=None),
+        updated_operation_ids=updated_operation_ids,
     )
 
 
@@ -3301,6 +3307,332 @@ def test_virtual_child_checkpoint_is_rejected_before_replay_hooks(
 
     assert captured == []
     assert child_body_calls == []
+
+
+def _named_wait_op(
+    operation_id: str,
+    name: str,
+    parent_id: str | None,
+    status: OperationStatus = OperationStatus.SUCCEEDED,
+) -> Operation:
+    """Build a WAIT checkpoint with the identity fields replay validation checks."""
+    return Operation(
+        operation_id=operation_id,
+        operation_type=OperationType.WAIT,
+        status=status,
+        sub_type=OperationSubType.WAIT,
+        name=name,
+        parent_id=parent_id,
+    )
+
+
+def _named_step_op(
+    operation_id: str,
+    name: str,
+    result: str,
+    parent_id: str | None = None,
+) -> Operation:
+    """Build a succeeded STEP checkpoint with the identity fields replay validation checks."""
+    return Operation(
+        operation_id=operation_id,
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=OperationSubType.STEP,
+        name=name,
+        parent_id=parent_id,
+        step_details=StepDetails(result=json.dumps(result)),
+    )
+
+
+def _capturing_end_plugin() -> tuple[
+    list[tuple[str, str, bool, OperationStatus]], PluginExecutor
+]:
+    """Return a recorder and a PluginExecutor that captures on_operation_end."""
+    captured: list[tuple[str, str, bool, OperationStatus]] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_operation_end(self, info):
+            captured.append(("end", info.operation_id, info.is_replayed, info.status))
+
+    return captured, PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+
+
+def _wait_update_ends(
+    captured: list[tuple[str, str, bool, OperationStatus]], *wait_ids: str
+) -> list[tuple[str, str, bool, OperationStatus]]:
+    """Return on_operation_end records for the given wait ids, in capture order."""
+    wanted = set(wait_ids)
+    return [event for event in captured if event[1] in wanted]
+
+
+def test_virtual_child_preserves_replay_and_emits_update_for_inner_wait():
+    """A virtual child with no container checkpoint keeps replay status.
+
+    A virtual container intentionally has no checkpoint, so the absence of one
+    at its id must not flip the creator to NEW before the child is created.
+    Otherwise the inner wait's stored history is bypassed and its update
+    notification is dropped. Regression test for issue #889.
+    """
+    captured, plugin_executor = _capturing_end_plugin()
+    with plugin_invocation(plugin_executor):
+        state = _replay_state({}, plugin_executor=plugin_executor)
+        parent = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        context_id = parent._peek_next_operation_id()  # noqa: SLF001
+        child_probe = parent.create_child_context(context_id, is_virtual=True)
+        wait_id = child_probe._peek_next_operation_id()  # noqa: SLF001
+        state._operations[wait_id] = _named_wait_op(  # noqa: SLF001
+            wait_id, "virtual-wait", parent_id=None
+        )
+        state._updated_operation_ids.add(wait_id)  # noqa: SLF001
+
+        child_entered_replay: list[bool] = []
+
+        def body(child: DurableContext) -> str:
+            child_entered_replay.append(child.is_replaying())
+            child.wait(Duration.from_seconds(5), name="virtual-wait")
+            return "ok"
+
+        result = parent.run_in_child_context(
+            body, name="virtual-context", config=ChildConfig(is_virtual=True)
+        )
+
+    # The child inherits REPLAY and the plugin gets on_operation_end for the wait.
+    assert child_entered_replay == [True]
+    assert _wait_update_ends(captured, wait_id) == [
+        ("end", wait_id, False, OperationStatus.SUCCEEDED)
+    ]
+    assert result == "ok"
+
+
+def test_replay_aware_brand_new_virtual_op_keeps_replay():
+    """A brand-new virtual operation keeps replay status.
+
+    A virtual container never checkpoints itself, so the missing checkpoint is
+    by design and must not flip the context to NEW before its child is created.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    inside_status: list[bool] = []
+    with ctx._replay_aware(is_virtual=True):  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    assert inside_status == [True]
+
+
+def test_virtual_child_refines_to_new_at_genuinely_new_inner_operation():
+    """A virtual child keeps replay until its own look-ahead finds new work.
+
+    The virtual container's missing checkpoint preserves the child in REPLAY,
+    but the first inner operation with no checkpoint is genuine new work and
+    must flip the child to NEW before it runs.
+    """
+    state = _replay_state({})
+    parent = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    child_entry_replay: list[bool] = []
+    child_after_new_op: list[bool] = []
+
+    def body(child: DurableContext) -> str:
+        child_entry_replay.append(child.is_replaying())
+        with child._replay_aware():  # noqa: SLF001
+            child._create_step_id()  # noqa: SLF001 - consume the brand-new op id
+            child_after_new_op.append(child.is_replaying())
+        return "ok"
+
+    parent.run_in_child_context(
+        body, name="virtual-context", config=ChildConfig(is_virtual=True)
+    )
+
+    assert child_entry_replay == [True]
+    assert child_after_new_op == [False]
+
+
+def test_nested_virtual_child_preserves_replay_and_emits_update_for_inner_wait():
+    """A virtual child nested in a virtual child still preserves replay status.
+
+    Each virtual layer has no checkpoint by design. The inner wait's history
+    must survive both layers and its update notification delivered once.
+    """
+    captured, plugin_executor = _capturing_end_plugin()
+    with plugin_invocation(plugin_executor):
+        state = _replay_state({}, plugin_executor=plugin_executor)
+        parent = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        outer_id = parent._peek_next_operation_id()  # noqa: SLF001
+        outer_probe = parent.create_child_context(outer_id, is_virtual=True)
+        inner_id = outer_probe._peek_next_operation_id()  # noqa: SLF001
+        inner_probe = outer_probe.create_child_context(inner_id, is_virtual=True)
+        wait_id = inner_probe._peek_next_operation_id()  # noqa: SLF001
+        state._operations[wait_id] = _named_wait_op(  # noqa: SLF001
+            wait_id, "nested-wait", parent_id=None
+        )
+        state._updated_operation_ids.add(wait_id)  # noqa: SLF001
+
+        inner_entered_replay: list[bool] = []
+
+        def inner_body(inner: DurableContext) -> str:
+            inner_entered_replay.append(inner.is_replaying())
+            inner.wait(Duration.from_seconds(5), name="nested-wait")
+            return "ok"
+
+        def outer_body(outer: DurableContext) -> str:
+            return outer.run_in_child_context(
+                inner_body, name="inner-context", config=ChildConfig(is_virtual=True)
+            )
+
+        result = parent.run_in_child_context(
+            outer_body, name="outer-context", config=ChildConfig(is_virtual=True)
+        )
+
+    assert inner_entered_replay == [True]
+    assert _wait_update_ends(captured, wait_id) == [
+        ("end", wait_id, False, OperationStatus.SUCCEEDED)
+    ]
+    assert result == "ok"
+
+
+def test_next_operation_exists_when_only_first_inner_checkpoint_is_present():
+    """Look-ahead treats a virtual child's first inner checkpoint as existence.
+
+    After a completed operation, `_next_operation_exists` must not require a
+    checkpoint at the next operation's own id. Virtual children never have one.
+    """
+    state = _replay_state({})
+    ctx = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    ctx._create_step_id()  # noqa: SLF001 - previous completed op advances the counter
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    child_probe = ctx.create_child_context(next_id, is_virtual=True)
+    first_inner_id = child_probe._peek_next_operation_id()  # noqa: SLF001
+    state._operations[first_inner_id] = _named_wait_op(  # noqa: SLF001
+        first_inner_id, "inner-wait", parent_id=None
+    )
+
+    assert ctx._next_operation_exists() is True  # noqa: SLF001
+
+
+def test_virtual_child_after_replayed_step_preserves_replay_and_emits_update():
+    """A replayed step before a virtual child must not flip the context to NEW.
+
+    After the step, look-ahead finds no checkpoint at the virtual child's own
+    id. Existence of the child's first inner wait must keep replay active so
+    the wait's on_operation_end is delivered.
+    """
+    captured, plugin_executor = _capturing_end_plugin()
+    with plugin_invocation(plugin_executor):
+        state = _replay_state({}, plugin_executor=plugin_executor)
+        parent = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        step_id = parent._create_step_id_for_logical_step(1)
+        context_id = parent._create_step_id_for_logical_step(2)
+        child_probe = parent.create_child_context(context_id, is_virtual=True)
+        wait_id = child_probe._peek_next_operation_id()  # noqa: SLF001
+        state._operations[step_id] = _named_step_op(  # noqa: SLF001
+            step_id, "before-child", "done"
+        )
+        state._operations[wait_id] = _named_wait_op(  # noqa: SLF001
+            wait_id, "virtual-wait", parent_id=None
+        )
+        state._updated_operation_ids.add(wait_id)  # noqa: SLF001
+
+        child_entered_replay: list[bool] = []
+
+        def body(child: DurableContext) -> str:
+            child_entered_replay.append(child.is_replaying())
+            child.wait(Duration.from_seconds(5), name="virtual-wait")
+            return "ok"
+
+        step_result = parent.step(
+            lambda _step_context: "should-not-run", name="before-child"
+        )
+        assert step_result == "done"
+        result = parent.run_in_child_context(
+            body, name="virtual-context", config=ChildConfig(is_virtual=True)
+        )
+
+    assert child_entered_replay == [True]
+    assert _wait_update_ends(captured, wait_id) == [
+        ("end", wait_id, False, OperationStatus.SUCCEEDED)
+    ]
+    assert result == "ok"
+
+
+def test_two_virtual_children_in_a_row_preserve_replay_and_emit_update():
+    """The second of two consecutive virtual children stays in replay.
+
+    After the first virtual child, look-ahead finds no checkpoint at the second
+    child's own id. The second child's first inner wait must keep replay active.
+    """
+    captured, plugin_executor = _capturing_end_plugin()
+    with plugin_invocation(plugin_executor):
+        state = _replay_state({}, plugin_executor=plugin_executor)
+        parent = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        first_id = parent._create_step_id_for_logical_step(1)
+        second_id = parent._create_step_id_for_logical_step(2)
+        first_probe = parent.create_child_context(first_id, is_virtual=True)
+        second_probe = parent.create_child_context(second_id, is_virtual=True)
+        first_wait_id = first_probe._peek_next_operation_id()  # noqa: SLF001
+        second_wait_id = second_probe._peek_next_operation_id()  # noqa: SLF001
+        state._operations[first_wait_id] = _named_wait_op(  # noqa: SLF001
+            first_wait_id, "first-wait", parent_id=None
+        )
+        state._operations[second_wait_id] = _named_wait_op(  # noqa: SLF001
+            second_wait_id, "second-wait", parent_id=None
+        )
+        state._updated_operation_ids.add(first_wait_id)  # noqa: SLF001
+        state._updated_operation_ids.add(second_wait_id)  # noqa: SLF001
+
+        first_entered_replay: list[bool] = []
+        second_entered_replay: list[bool] = []
+
+        def first_body(child: DurableContext) -> str:
+            first_entered_replay.append(child.is_replaying())
+            child.wait(Duration.from_seconds(5), name="first-wait")
+            return "first"
+
+        def second_body(child: DurableContext) -> str:
+            second_entered_replay.append(child.is_replaying())
+            child.wait(Duration.from_seconds(5), name="second-wait")
+            return "second"
+
+        first_result = parent.run_in_child_context(
+            first_body, name="first-virtual", config=ChildConfig(is_virtual=True)
+        )
+        second_result = parent.run_in_child_context(
+            second_body, name="second-virtual", config=ChildConfig(is_virtual=True)
+        )
+
+    assert first_entered_replay == [True]
+    assert second_entered_replay == [True]
+    assert _wait_update_ends(captured, first_wait_id, second_wait_id) == [
+        ("end", first_wait_id, False, OperationStatus.SUCCEEDED),
+        ("end", second_wait_id, False, OperationStatus.SUCCEEDED),
+    ]
+    assert first_result == "first"
+    assert second_result == "second"
 
 
 def test_replay_aware_emits_update_hook_for_operation_updated_since_last_invocation():
