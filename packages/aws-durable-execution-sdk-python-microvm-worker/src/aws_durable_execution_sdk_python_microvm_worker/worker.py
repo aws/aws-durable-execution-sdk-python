@@ -317,8 +317,9 @@ class MicrovmWorkerListener:
     second delivery of a known job gets it after the ``terminate`` hook too,
     because that hook fails a running job's callback. A second delivery of a
     running job during a suspend refusal gets HTTP 503, as a new job does.
-    The running job can freeze with the MicroVM. The 503 makes the durable
-    function check the state and resume the MicroVM.
+    The running job can freeze with the MicroVM. After the 503, the durable
+    function delivers the job again, and the service resumes the MicroVM on
+    a later request.
 
     A document that does not match the contract gets HTTP 400. If the
     document still names a callback, the listener fails that callback. So
@@ -337,8 +338,9 @@ class MicrovmWorkerListener:
        freezes.
     4. From the moment the idle time ends, the listener answers every new
        job with HTTP 503 and does not start it. A job accepted then would
-       freeze with the MicroVM. After a 503, the durable function resumes the
-       MicroVM and delivers the job again.
+       freeze with the MicroVM. After a 503, the durable function delivers
+       the job again, and the service resumes the MicroVM on a later
+       request.
     5. The refusal ends when the ``resume`` hook arrives, or 30 seconds after
        the call returned. The idle time then starts again.
     6. A call that the service rejected on its first attempt, for example
@@ -1025,7 +1027,8 @@ class MicrovmWorkerListener:
             #
             # 1. An ID in _finished gets 202 in every state. Its job has
             #    ended, and the answer starts nothing. A 503 would make the
-            #    durable function resume the MicroVM only to get this answer.
+            #    durable function deliver the job again, and the service
+            #    resume the MicroVM, only to get this answer.
             # 2. A known ID gets 202 while the MicroVM terminates. The
             #    terminate hook fails a running job's callback. So the
             #    durable function learns the outcome from the callback.
@@ -1033,8 +1036,9 @@ class MicrovmWorkerListener:
             #    job does. The running job can freeze with the MicroVM. A
             #    202 would end the delivery, and nothing would resume the
             #    MicroVM. So the job would wait for its heartbeat timeout or
-            #    its timeout. The 503 makes the durable function check the
-            #    state, resume the MicroVM, and deliver the job again.
+            #    its timeout. After the 503, the durable function delivers
+            #    the job again, and the service resumes the MicroVM on a
+            #    later request.
             may_freeze = (
                 job.callback_id in self._jobs
                 and self._suspending
@@ -1055,7 +1059,8 @@ class MicrovmWorkerListener:
         if terminating or suspending:
             # Terminating: the MicroVM is about to end, and the job could not
             # finish. Suspending: the MicroVM is about to freeze. The durable
-            # function resumes it and delivers the job again.
+            # function delivers the job again, and the service resumes the
+            # MicroVM on a later request.
             state = "terminating" if terminating else "suspending"
             self._logger.info(
                 f"job refused: the MicroVM is {state}",

@@ -2502,8 +2502,8 @@ def test_answers_a_resent_finished_job_with_202_during_a_suspend_refusal(
     start: Any, logger: Any, refusal: str
 ) -> None:
     # The job has ended, so a resend starts nothing and cannot freeze with
-    # the MicroVM. A 503 would make the durable function resume the MicroVM
-    # only to get this answer.
+    # the MicroVM. A 503 would make the durable function deliver the job
+    # again, and the service resume the MicroVM, only to get this answer.
     h = start()
     h.run_hook(IDLE)
     assert h.job("cb-done") == 202
@@ -2530,8 +2530,8 @@ def test_refuses_a_resent_running_job_with_503_during_a_suspend_refusal(
 ) -> None:
     # The running job can freeze with the MicroVM. A 202 would end the
     # delivery, and nothing would resume the MicroVM. After the 503, the
-    # durable function checks the state, resumes the MicroVM, and delivers
-    # the job again.
+    # durable function delivers the job again, and the service resumes the
+    # MicroVM on a later request.
     h = start()
     h.run_hook(IDLE)
     assert h.job("cb-1") == 202

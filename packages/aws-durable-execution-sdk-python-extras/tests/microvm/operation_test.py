@@ -495,8 +495,6 @@ def test_sends_every_job_over_http_to_a_configured_route(
     assert client.requests("create_microvm_auth_token")[0]["allowedPorts"] == [
         {"port": 3000}
     ]
-    # A single job never resumes its MicroVM. So its launch checkpoint has no
-    # resume mode.
     launch = result.get_context("build").get_step("build.launch")
     assert launch.result is not None
     assert json.loads(launch.result) == {
@@ -506,37 +504,32 @@ def test_sends_every_job_over_http_to_a_configured_route(
     }
 
 
-@pytest.mark.parametrize("resume_before_delivery", [True, False])
-def test_launch_result_writes_and_reads_a_resume_mode(
-    resume_before_delivery: bool,  # noqa: FBT001 - a pytest parameter
+@pytest.mark.parametrize("value", [True, False, "true", 1, None])
+def test_launch_result_ignores_the_resume_mode_of_an_older_release(
+    value: Any,
 ) -> None:
-    launched = operation.LaunchResult(
+    # An older release wrote resumeBeforeDelivery in a session launch. An
+    # execution in flight replays that checkpoint, and the field has no
+    # effect.
+    launched = operation.LaunchResult.from_dict(
+        {
+            "microvmId": "mvm-1",
+            "endpoint": "mvm-1.lambda-microvm.us-east-1.on.aws",
+            "delivery": "http",
+            "resumeBeforeDelivery": value,
+        }
+    )
+
+    assert launched == operation.LaunchResult(
         microvm_id="mvm-1",
         delivery="http",
         endpoint="mvm-1.lambda-microvm.us-east-1.on.aws",
-        resume_before_delivery=resume_before_delivery,
     )
-
-    data = launched.to_dict()
-
-    assert data == {
+    assert launched.to_dict() == {
         "microvmId": "mvm-1",
         "endpoint": "mvm-1.lambda-microvm.us-east-1.on.aws",
         "delivery": "http",
-        "resumeBeforeDelivery": resume_before_delivery,
     }
-    assert operation.LaunchResult.from_dict(json.loads(json.dumps(data))) == launched
-
-
-@pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}])
-def test_launch_result_reads_only_a_bool_as_a_resume_mode(value: Any) -> None:
-    # In Python True == 1. So a check by equality would read 1 as True.
-    launched = operation.LaunchResult.from_dict(
-        {"microvmId": "mvm-1", "delivery": "http", "resumeBeforeDelivery": value}
-    )
-
-    assert launched.resume_before_delivery is None
-    assert "resumeBeforeDelivery" not in launched.to_dict()
 
 
 def test_keeps_the_configured_ingress_for_http(
@@ -1216,7 +1209,7 @@ def test_passes_an_execution_error_of_the_wait_through(
 
 STATE_CHECK_WARNING = (
     "GetMicrovm failed, so the operation could not check whether the MicroVM "
-    "is suspended. The request step keeps sending the job."
+    "has ended. The request step keeps sending the job."
 )
 
 
@@ -1411,50 +1404,41 @@ def test_checks_the_state_after_a_sign_that_uses_up_the_retry_window(
     assert len(client.requests("get_microvm")) == 1
 
 
-def test_the_wait_for_a_resume_gets_a_new_retry_window_without_a_deadline(
+def test_ends_an_attempt_of_a_suspended_microvm_without_a_deadline(
     run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 1. The compute reports no deadline, so no invocation reserve applies.
     # 2. The delayed sign uses up the 1-second window before the state check.
-    # 3. The MicroVM stays SUSPENDED after ResumeMicrovm accepts the resume.
-    # The wait for RUNNING then gets a new 1-second window. It polls at 0,
-    # 0.25, and 0.75 seconds, and the next poll would start after the window.
-    # Without that limit, the wait never ends. So GetMicrovm fails 10
-    # seconds after its first call, and the test fails instead of hanging.
+    # 3. The MicroVM stays SUSPENDED, and its endpoint keeps answering 502.
+    # The check makes one GetMicrovm call and does not wait. The window then
+    # ends the attempt.
     monkeypatch.setattr(operation, "_remaining_seconds", lambda context: lambda: None)
     opener = SlowDeadEndpoint(1.5, answer=True)
     client = fake_client(endpoint="mvm-1.microvm.example", states=["SUSPENDED"] * 100)
-    plain = client.get_microvm
-    first_call: list[float] = []
+    seen: list[str] = []
 
-    def get_microvm(**request: Any) -> Any:
-        if not first_call:
-            first_call.append(time.monotonic())
-        if time.monotonic() - first_call[0] > 10:
-            msg = "the guard ended a wait for RUNNING without a limit"
-            raise RuntimeError(msg)
-        return plain(**request)
+    def strategy(error: Exception, attempt: int) -> RetryDecision:
+        seen.append(type(error).__name__)
+        return RetryDecision.no_retry()
 
-    client.get_microvm = get_microvm
     config = config_with(
         client,
         request=MicrovmRequestConfig(
             path="/job", retry_window=Duration.from_seconds(1)
         ),
         opener=opener,
+        retry_strategy=strategy,
     )
 
     result = run(catching(config), {})
 
     error = outcome(result)
     assert error["error"] == "MicrovmDeliveryError"
-    assert error["message"].startswith(
-        'MicroVM "build": the job could not be delivered: MicroVM mvm-1 did not '
-        "reach RUNNING in "
-    )
-    assert error["message"].endswith(" ms. Last state: SUSPENDED.")
+    assert "did not accept the job at /job after 1 attempts" in error["message"]
+    assert seen == ["MicrovmEndpointUnavailableError"]
     assert opener.requests == 1
-    assert state_events(client) == ["get", "resume", "get", "get", "get", "terminate"]
+    assert state_events(client) == ["get", "terminate"]
+    assert client.requests("resume_microvm") == []
 
 
 @pytest.mark.parametrize(
@@ -1504,81 +1488,40 @@ def test_keeps_sending_the_job_with_one_warning_when_get_microvm_fails(
 
 
 def state_events(client: Any) -> list[str]:
-    """The GetMicrovm, ResumeMicrovm, and TerminateMicrovm calls, in order."""
-    names = {
-        "get_microvm": "get",
-        "resume_microvm": "resume",
-        "terminate_microvm": "terminate",
-    }
+    """The GetMicrovm and TerminateMicrovm calls, in order."""
+    names = {"get_microvm": "get", "terminate_microvm": "terminate"}
     return [names[call] for call, _ in client.calls if call in names]
 
 
-def test_resumes_a_microvm_suspended_from_outside_and_the_job_succeeds(
-    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
+@pytest.mark.parametrize("state", ["SUSPENDING", "SUSPENDED"])
+def test_keeps_sending_the_job_to_a_microvm_suspended_from_outside(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any, state: str
 ) -> None:
+    # The service resumes the MicroVM on a later request, when its idle
+    # policy sets autoResumeEnabled. So the state check does not fail the
+    # job, and the SDK makes no ResumeMicrovm call.
     endpoint = fake_endpoint([connect_failed])
-    client = fake_client(endpoint=endpoint.url, states=["SUSPENDED"])
+    client = fake_client(endpoint=endpoint.url, states=[state])
     config = config_with(client, request=MicrovmRequestConfig(path="/job"))
 
     result = run(catching(config), {}, succeed_with("done"))
 
     assert outcome(result) == {"result": "done"}
     assert len(endpoint.requests) == 2
-    assert state_events(client) == ["get", "resume", "get", "terminate"]
+    assert state_events(client) == ["get", "terminate"]
+    assert client.requests("resume_microvm") == []
 
 
-def test_fails_at_once_when_resume_is_denied_for_a_microvm_suspended_from_outside(
+def test_a_custom_strategy_sees_the_denial_error_type(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
     make_error: Any,
     connect_failed: Any,
-) -> None:
-    endpoint = fake_endpoint([connect_failed])
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=["SUSPENDED"],
-        resumes=[make_error("AccessDeniedException", 403)],
-    )
-    # The default retry strategy decides on the error of the step.
-    config = config_with(
-        client, request=MicrovmRequestConfig(path="/job"), retry_strategy=None
-    )
-
-    result = run(catching(config), {})
-
-    assert outcome(result) == {
-        "error": "MicrovmDeliveryError",
-        "message": (
-            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 is '
-            "SUSPENDED. ResumeMicrovm was denied, so the operation cannot resume "
-            "it. The function's execution role needs lambda:ResumeMicrovm."
-        ),
-    }
-    assert len(endpoint.requests) == 1
-    assert state_events(client) == ["get", "resume", "terminate"]
-
-
-@pytest.mark.parametrize(
-    ("denied", "permission"),
-    [("get", "lambda:GetMicrovm"), ("resume", "lambda:ResumeMicrovm")],
-)
-def test_a_custom_strategy_sees_one_error_type_for_a_denial(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    make_error: Any,
-    connect_failed: Any,
-    denied: str,
-    permission: str,
 ) -> None:
     endpoint = fake_endpoint([connect_failed])
     error = make_error("AccessDeniedException", 403)
-    client = (
-        fake_client(endpoint=endpoint.url, states=[error])
-        if denied == "get"
-        else fake_client(endpoint=endpoint.url, states=["SUSPENDED"], resumes=[error])
-    )
+    client = fake_client(endpoint=endpoint.url, states=[error])
     seen: list[tuple[str, str]] = []
 
     def strategy(error: Exception, attempt: int) -> RetryDecision:
@@ -1594,7 +1537,7 @@ def test_a_custom_strategy_sees_one_error_type_for_a_denial(
     assert outcome(result)["error"] == "MicrovmDeliveryError"
     [(name, message)] = [entry for entry in seen if "denied" in entry[1]]
     assert name == "MicrovmPermissionDeniedError"
-    assert f"needs {permission}." in message
+    assert "needs lambda:GetMicrovm." in message
 
 
 @pytest.mark.parametrize("status", [500, 503])

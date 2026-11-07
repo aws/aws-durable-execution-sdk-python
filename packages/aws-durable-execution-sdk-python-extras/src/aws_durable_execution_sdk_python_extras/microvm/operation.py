@@ -9,7 +9,6 @@ import hashlib
 import os
 import re
 import threading
-import time
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -65,12 +64,10 @@ from aws_durable_execution_sdk_python_extras.microvm.job import (
     run_hook_payload_without_job,
 )
 from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
-    EnsureRunningOptions,
     MicrovmStateCheckError,
     MicrovmStateError,
-    ensure_running,
+    check_not_ended,
     microvm_not_found,
-    resume_if_suspended,
 )
 from aws_durable_execution_sdk_python_extras.microvm.request import (
     DEFAULT_MICROVM_JOB_PATH,
@@ -79,7 +76,6 @@ from aws_durable_execution_sdk_python_extras.microvm.request import (
     MAX_REQUEST_RETRY_WINDOW_SECONDS,
     SendJobOptions,
     call_before_deadline,
-    require_time_for_call,
     reserve_starts_at,
     send_job,
 )
@@ -214,9 +210,12 @@ and a segment of three dots are not dot segments.
 class LaunchResult:
     """What the launch step checkpoints.
 
-    Wire names: ``microvmId``, ``endpoint``, ``delivery``, and
-    ``resumeBeforeDelivery``. The JavaScript operation checkpoints the same
-    document.
+    Wire names: ``microvmId``, ``endpoint``, and ``delivery``. The
+    JavaScript operation checkpoints the same document.
+
+    An older release also wrote ``resumeBeforeDelivery`` in a session
+    launch. ``from_dict`` ignores that key, so an execution in flight
+    replays its launch checkpoint.
     """
 
     microvm_id: str
@@ -225,30 +224,15 @@ class LaunchResult:
     so every replay follows the delivery that the launch prepared for."""
     endpoint: str | None = None
     """The MicroVM's endpoint. Present only for HTTP delivery."""
-    resume_before_delivery: bool | None = None
-    """Whether each session job checks the MicroVM state, and resumes a
-    suspended MicroVM, before delivery. Only a session launch records it.
-    Replay reads it from the checkpoint. So every replay follows the mode that
-    the launch prepared the MicroVM for. A ``microvm`` launch leaves it
-    ``None``. ``from_dict`` keeps only a bool, and reads any other value as
-    ``None``. ``run_session`` reads only ``True`` as a resume mode."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
-        # The field is typed bool | None. to_dict() writes it back. So
-        # from_dict keeps only a bool, and reads any other value as None.
-        resume_before_delivery = data.get("resumeBeforeDelivery")
         return cls(
             microvm_id=data["microvmId"],
             delivery=data.get("delivery", ""),
             endpoint=data.get("endpoint"),
-            resume_before_delivery=(
-                resume_before_delivery
-                if isinstance(resume_before_delivery, bool)
-                else None
-            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -256,10 +240,6 @@ class LaunchResult:
         if self.endpoint is not None:
             data["endpoint"] = self.endpoint
         data["delivery"] = self.delivery
-        # A microvm() launch records no resume mode. So its checkpoint has no
-        # such key, as in the JavaScript operation.
-        if self.resume_before_delivery is not None:
-            data["resumeBeforeDelivery"] = self.resume_before_delivery
         return data
 
 
@@ -347,8 +327,7 @@ def microvm(
             a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
             or the route answers a 4xx status such as 404, or a redirect, or
-            ``GetMicrovm`` or ``ResumeMicrovm`` is denied. The message names
-            the permission.
+            ``GetMicrovm`` is denied. The message names the permission.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
             result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.
@@ -373,11 +352,11 @@ longer run a job. The SDK records the fully-qualified class name."""
 
 _STATE_CHECK_WARNING = (
     "GetMicrovm failed, so the operation could not check whether the MicroVM "
-    "is suspended. The request step keeps sending the job."
+    "has ended. The request step keeps sending the job."
 )
 """The warning, once per step attempt, so up to 5 with the default retry
-strategy, after a transient failure of the state check of an attempt
-without the resume mode. A denied check fails the step instead."""
+strategy, after a transient failure of the state check. A denied check
+fails the step instead."""
 
 
 def step_retry_strategy(
@@ -517,15 +496,11 @@ class _MicrovmScope:
         payload: str,
         delivery: str,
         idle_policy: Mapping[str, Any] | None = None,
-        resume_before_delivery: bool | None = None,
     ) -> LaunchResult:
         """Run the launch step, ``<name>.launch``.
 
         The client token is the SHA-256 hex digest of ``token_source``. It
         must be unique per launch and stable across retries and replays.
-
-        ``resume_before_delivery`` is the resume mode to record. Only a
-        session launch sets it.
 
         Raises:
             MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
@@ -534,11 +509,7 @@ class _MicrovmScope:
             return LaunchResult.from_dict(
                 child.step(
                     lambda _: self._launch_call(
-                        token_source,
-                        payload,
-                        delivery,
-                        idle_policy,
-                        resume_before_delivery,
+                        token_source, payload, delivery, idle_policy
                     ).to_dict(),
                     name=f"{self.name}.launch",
                     config=StepConfig(
@@ -568,7 +539,6 @@ class _MicrovmScope:
         heartbeat_timeout_seconds: int | None,
         request: MicrovmRequestConfig,
         retry_window_seconds: int,
-        resume: bool | Callable[[], bool] = False,
     ) -> None:
         """Run the request step, ``<job_name>.request``: POST the job to the
         MicroVM's endpoint.
@@ -576,30 +546,24 @@ class _MicrovmScope:
         The step retries inside each attempt with :func:`send_job`, the first
         tier. The step retry strategy is the second tier.
 
-        With ``resume``, each attempt first makes sure the MicroVM runs, and
-        resumes a suspended one. It then sends the job to the endpoint that
-        ``GetMicrovm`` reports. A session sets it when its MicroVM can be
-        suspended. A callable is read at the start of each attempt.
-
-        An attempt without ``resume`` calls ``GetMicrovm`` after each sign
-        that the MicroVM does not run, at most once per 2 seconds: an HTTP
-        502 with ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no
-        answer. See
-        :func:`resume_if_suspended`. The check runs first after the sign,
-        before the retry window and the backoff, and only the invocation
-        reserve limits it. So a sign that uses up the window still gets the
-        check. The resume and the wait for ``RUNNING`` after the check get
-        a new retry window, and end earlier at the reserve. So the wait
-        ends without a Lambda deadline too. Every job over HTTP runs this
-        check, from :func:`microvm` and from a session:
+        An attempt calls ``GetMicrovm`` after each sign that the MicroVM does
+        not run, at most once per 2 seconds: an HTTP 502 with
+        ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``, or no answer. See
+        :func:`check_not_ended`. The check runs first after the sign, before
+        the retry window and the backoff, and only the invocation reserve
+        limits it. So a sign that uses up the window still gets the check.
+        Every job over HTTP runs this check, from :func:`microvm` and from a
+        session:
 
         1. The endpoint of a terminated MicroVM answers that 502, measured
            in us-east-1. Without the check, the request step retries the
            502 as a MicroVM that is still starting, in both retry tiers.
            With the check, a terminating, terminated, or removed MicroVM
            fails the job at once with ``MicrovmNotRunningError``.
-        2. A session MicroVM can also give that sign while it is suspended.
-           The check then resumes it.
+        2. A session MicroVM can also give that sign while it is suspending
+           or suspended. The check then lets the attempt keep sending the
+           job. The SDK does not resume the MicroVM. The service resumes it
+           on a request when its idle policy sets ``autoResumeEnabled``.
 
         A denied ``GetMicrovm`` call in the check fails the step at once,
         with a message that names ``lambda:GetMicrovm``. The default retry
@@ -609,10 +573,10 @@ class _MicrovmScope:
         per step attempt, so up to 5 with the default retry strategy, and
         the attempt keeps sending the job.
 
-        ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
-        answer ``ResourceNotFoundException`` for a removed MicroVM. An
-        attempt raises ``MicrovmStateError`` for that answer of any of the
-        three calls. The default retry strategy does not retry it.
+        ``GetMicrovm`` and ``CreateMicrovmAuthToken`` answer
+        ``ResourceNotFoundException`` for a removed MicroVM. An attempt
+        raises ``MicrovmStateError`` for that answer of either call. The
+        default retry strategy does not retry it.
 
         Raises:
             MicrovmNotRunningError: When the MicroVM can no longer run a job.
@@ -641,55 +605,22 @@ class _MicrovmScope:
         def attempt(step_context: StepContext) -> None:
             client = self._client()
             logger = step_context.logger
-            # The state check before delivery and the request's retries share
-            # one window. So the wait for a resume counts toward it.
-            window_started_at = time.monotonic()
             # _launch_call raises when RunMicrovm returns no endpoint for an
             # HTTP delivery. The launch step checkpoints only what
             # _launch_call returned. So an HTTP launch always has an endpoint.
             endpoint = cast("str", launched.endpoint)
-            strict = resume() if callable(resume) else resume
 
-            def options(max_wait_seconds: float) -> EnsureRunningOptions:
-                return EnsureRunningOptions(
-                    client=client,
-                    microvm_id=microvm_id,
-                    max_wait_seconds=max_wait_seconds,
-                    remaining_seconds=remaining_seconds,
-                    logger=logger,
-                )
-
-            recheck: Callable[[float], str | None] | None = None
-            check: Callable[[float], str | None] | None = None
-            if strict:
-                require_time_for_call(remaining_seconds)
-
-                def running(max_wait_seconds: float) -> str | None:
-                    return ensure_running(options(max_wait_seconds))
-
-                endpoint = running(retry_window_seconds) or endpoint
-                recheck = running
-            else:
-
-                def check_state(max_wait_seconds: float) -> str | None:
-                    # The check runs before the retry window decides, so
-                    # what remains of the window does not limit it. The wait
-                    # for a resume gets the length of the window, and the
-                    # invocation reserve. So a compute without a deadline
-                    # still ends the wait.
-                    wait = min(max_wait_seconds, retry_window_seconds)
-                    try:
-                        return resume_if_suspended(options(wait))
-                    except MicrovmStateCheckError as error:
-                        if not check_warned.is_set():
-                            check_warned.set()
-                            logger.warning(
-                                _STATE_CHECK_WARNING,
-                                extra={"microvmId": microvm_id, "error": str(error)},
-                            )
-                        return None
-
-                check = check_state
+            def check_state() -> str | None:
+                try:
+                    return check_not_ended(client, microvm_id, remaining_seconds)
+                except MicrovmStateCheckError as error:
+                    if not check_warned.is_set():
+                        check_warned.set()
+                        logger.warning(
+                            _STATE_CHECK_WARNING,
+                            extra={"microvmId": microvm_id, "error": str(error)},
+                        )
+                    return None
 
             # Only CreateMicrovmAuthToken can raise ResourceNotFoundException
             # here:
@@ -698,9 +629,9 @@ class _MicrovmScope:
             # 2. send_job calls new_token() outside any try. So the error
             #    leaves send_job unchanged.
             # 3. _run_with_limit re-raises the same error object.
-            # 4. ensure_running and resume_if_suspended turn the same answer
-            #    of GetMicrovm and ResumeMicrovm into MicrovmStateError. So
-            #    neither call raises a ClientError with that code.
+            # 4. check_not_ended turns the same answer of GetMicrovm into
+            #    MicrovmStateError. So it raises no ClientError with that
+            #    code.
             #
             # So the step raises MicrovmStateError for CreateMicrovmAuthToken.
             # The default retry strategy does not retry that error.
@@ -717,9 +648,7 @@ class _MicrovmScope:
                         remaining_seconds=remaining_seconds,
                         logger=logger,
                         opener=self.config.opener,
-                        window_started_at=window_started_at,
-                        recheck=recheck,
-                        suspend_check=check,
+                        state_check=check_state,
                     )
                 )
             except ClientError as error:
@@ -782,7 +711,6 @@ class _MicrovmScope:
         payload: str,
         delivery: str,
         idle_policy: Mapping[str, Any] | None,
-        resume_before_delivery: bool | None = None,
     ) -> LaunchResult:
         """Call ``RunMicrovm``, and return what the launch step checkpoints."""
         over_http = delivery == HTTP_DELIVERY
@@ -839,7 +767,6 @@ class _MicrovmScope:
             microvm_id=microvm_id,
             delivery=delivery,
             endpoint=endpoint if over_http else None,
-            resume_before_delivery=resume_before_delivery,
         )
 
     def suspend(self, child: DurableContext, microvm_id: str) -> None:
@@ -848,8 +775,8 @@ class _MicrovmScope:
 
         It runs inside a job's child context, after the job's outcome is
         known, and it is not a durable operation. A failed call must not
-        fail the job. The next job of the session checks the MicroVM state
-        and resumes it when needed, and suspending a suspended MicroVM
+        fail the job. The MicroVM then keeps running until its worker or its
+        idle policy suspends it, and suspending a suspended MicroVM
         succeeds.
 
         The call makes one attempt, and it sends no attempt after the
@@ -890,8 +817,8 @@ class _MicrovmScope:
         the check before the reserve can still reach the service after it.
         It can reach the service after the next job started. This method
         cannot prevent that. Such an attempt can then freeze the next job,
-        which waits until a later job resumes the MicroVM or its heartbeat
-        timeout ends it.
+        which waits until a later request makes the service resume the
+        MicroVM, or its heartbeat timeout ends it.
         """
         deadline = reserve_starts_at(_remaining_seconds(child))
         state = _SuspendCall()
@@ -924,9 +851,9 @@ class _MicrovmScope:
             child.logger.warning(
                 f'MicroVM "{self.name}": SuspendMicrovm failed for {microvm_id}. '
                 "The MicroVM may still be running and billed until the idle "
-                "suspend or the end of the session. The next job checks its "
-                "state. A missing permission needs lambda:SuspendMicrovm in the "
-                f"function's execution role. Error: {detail}",
+                "suspend or the end of the session. A missing permission needs "
+                "lambda:SuspendMicrovm in the function's execution role. "
+                f"Error: {detail}",
                 extra={"microvmId": microvm_id, "error": detail},
             )
 

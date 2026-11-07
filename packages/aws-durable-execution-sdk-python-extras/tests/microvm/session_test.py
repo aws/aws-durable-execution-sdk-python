@@ -17,7 +17,7 @@ from typing import Any
 
 import boto3
 import pytest
-from aws_durable_execution_sdk_python.config import Duration, MapConfig, StepConfig
+from aws_durable_execution_sdk_python.config import Duration, StepConfig
 from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
@@ -598,12 +598,10 @@ def test_fails_inside_the_session_for_a_handler_that_is_not_callable(
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
 
 
-def test_passes_an_idle_policy_through_and_resumes_before_each_job(
+def test_passes_an_idle_policy_through_and_checks_no_state_before_a_job(
     run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
-    client = fake_client(
-        endpoint=fake_endpoint().url, states=["RUNNING", "SUSPENDED", "RUNNING"]
-    )
+    client = fake_client(endpoint=fake_endpoint().url)
     policy = {
         "maxIdleDurationSeconds": 300,
         "suspendedDurationSeconds": 3600,
@@ -621,8 +619,9 @@ def test_passes_an_idle_policy_through_and_resumes_before_each_job(
     assert launch["idlePolicy"] == policy
     # An idle policy does not ask the worker to suspend.
     assert "autoSuspendIdleSeconds" not in json.loads(launch["runHookPayload"])
-    assert len(client.requests("get_microvm")) == 3
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    # The service resumes the MicroVM on a request. So a job whose MicroVM
+    # answers makes no GetMicrovm call.
+    assert client.requests("get_microvm") == []
 
 
 def test_asks_the_worker_to_suspend_after_60_seconds_by_default(
@@ -643,7 +642,7 @@ def test_asks_the_worker_to_suspend_after_60_seconds_by_default(
         "region": "us-west-2",
         "autoSuspendIdleSeconds": 60,
     }
-    assert len(client.requests("get_microvm")) == 2
+    assert client.requests("get_microvm") == []
 
 
 @pytest.mark.parametrize(
@@ -671,17 +670,20 @@ def test_sends_the_idle_time_to_the_worker(
     assert payload.get("autoSuspendIdleSeconds") == idle_seconds
 
 
-def test_resumes_a_microvm_that_the_worker_suspended_and_uses_its_endpoint(
-    run: Any, fake_client: Any, fake_endpoint: Any
+@pytest.mark.parametrize("state", ["SUSPENDING", "SUSPENDED"])
+def test_keeps_sending_to_a_microvm_that_the_worker_suspended_and_uses_its_endpoint(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any, state: str
 ) -> None:
-    launched_at = fake_endpoint()
+    # The endpoint of a suspending or suspended MicroVM answers 502
+    # MICROVM_CONNECT_FAILED. The state check finds no ended MicroVM, so the
+    # job keeps retrying, and the service resumes the MicroVM on a request.
+    # The SDK makes no ResumeMicrovm call.
+    launched_at = fake_endpoint([connect_failed])
     resumed_at = fake_endpoint()
-    client = fake_client(
-        endpoint=launched_at.url, states=["SUSPENDED", "SUSPENDED", "RUNNING"]
-    )
+    client = fake_client(endpoint=launched_at.url, states=[state])
 
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        # The resumed MicroVM reports a new endpoint.
+        # GetMicrovm reports a new endpoint.
         client.endpoint = resumed_at.url
         return vm.invoke(ctx, "build", job_input=1, options=job())
 
@@ -692,80 +694,13 @@ def test_resumes_a_microvm_that_the_worker_suspended_and_uses_its_endpoint(
     )
 
     assert outcome(result) == {"result": "done"}
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert launched_at.requests == []
+    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("resume_microvm") == []
+    assert len(launched_at.requests) == 1
     assert len(resumed_at.requests) == 1
 
 
-def test_checks_the_state_again_after_a_gateway_error(
-    run: Any, fake_client: Any, fake_endpoint: Any
-) -> None:
-    # The MicroVM suspends itself between the state check and the request.
-    # The endpoint answers 502, and the worker answers 503 while it suspends.
-    endpoint = fake_endpoint([502, 503])
-    client = fake_client(
-        endpoint=endpoint.url, states=["RUNNING", "SUSPENDED", "RUNNING", "RUNNING"]
-    )
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        return vm.invoke(ctx, "build", job_input=1, options=job())
-
-    result = run(
-        session_handler(session_config(client, auto_suspend_on_idle=True), body),
-        None,
-        [("build", succeed_with("done"))],
-    )
-
-    assert outcome(result) == {"result": "done"}
-    assert len(endpoint.requests) == 3
-    assert len(client.requests("get_microvm")) == 4
-    assert len(client.requests("resume_microvm")) == 1
-
-
-@pytest.mark.parametrize(
-    ("statuses", "states"),
-    [([], ["SUSPENDED"]), ([502], ["RUNNING", "SUSPENDED"])],
-    ids=["before-delivery", "after-a-gateway-error"],
-)
-def test_resumes_again_when_a_resume_conflicts(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    make_error: Any,
-    statuses: list[int],
-    states: list[str],
-) -> None:
-    # The service rejects the first ResumeMicrovm with ConflictException.
-    # The MicroVM stays SUSPENDED until a resume succeeds. So the next
-    # SUSPENDED answer sends ResumeMicrovm again.
-    endpoint = fake_endpoint(statuses)
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=states,
-        resumes=[make_error("ConflictException", 409)],
-        suspended_until_resumed=True,
-    )
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        return vm.invoke(
-            ctx,
-            "build",
-            job_input=1,
-            options=job(retry_window=Duration.from_seconds(5)),
-        )
-
-    result = run(
-        session_handler(session_config(client, auto_suspend_on_idle=True), body),
-        None,
-        [("build", succeed_with("done"))],
-    )
-
-    assert outcome(result) == {"result": "done"}
-    assert len(client.requests("resume_microvm")) == 2
-    assert len(endpoint.requests) == len(statuses) + 1
-
-
-def test_does_not_check_the_state_again_after_a_rejection(
+def test_makes_no_state_check_after_a_rejection(
     run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
     endpoint = fake_endpoint([429])
@@ -782,13 +717,17 @@ def test_does_not_check_the_state_again_after_a_rejection(
 
     assert outcome(result) == {"result": "done"}
     assert len(endpoint.requests) == 2
-    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("get_microvm") == []
 
 
 def test_fails_the_job_at_once_when_the_microvm_no_longer_exists(
-    run: Any, fake_client: Any, fake_endpoint: Any, make_error: Any
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    make_error: Any,
+    connect_failed: Any,
 ) -> None:
-    endpoint = fake_endpoint()
+    endpoint = fake_endpoint([connect_failed])
     client = fake_client(
         endpoint=endpoint.url,
         states=[make_error("ResourceNotFoundException", 404)],
@@ -806,16 +745,18 @@ def test_fails_the_job_at_once_when_the_microvm_no_longer_exists(
     assert error["message"].startswith(
         'MicroVM "build": the job could not be delivered: MicroVM mvm-1 no longer exists.'
     )
-    # The state error is not retried, and no request is sent.
+    # The state error is not retried, and no second request is sent.
     assert len(client.requests("get_microvm")) == 1
-    assert endpoint.requests == []
+    assert len(endpoint.requests) == 1
     assert len(client.requests("terminate_microvm")) == 1
 
 
 def test_lets_the_handler_catch_the_not_running_error_on_replay_too(
-    run: Any, fake_client: Any, fake_endpoint: Any
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
-    client = fake_client(endpoint=fake_endpoint().url, states=["TERMINATED"])
+    client = fake_client(
+        endpoint=fake_endpoint([connect_failed]).url, states=["TERMINATED"]
+    )
 
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
         try:
@@ -859,12 +800,12 @@ def test_terminates_only_after_the_handler_ends(
 
 
 def test_session_requests_match_the_lambda_microvms_api_model(
-    run: Any, fake_endpoint: Any
+    run: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
-    """botocore validates RunMicrovm with an idle policy, GetMicrovm, and
-    ResumeMicrovm against the service model."""
+    """botocore validates RunMicrovm with an idle policy, and GetMicrovm,
+    against the service model."""
 
-    endpoint = fake_endpoint()
+    endpoint = fake_endpoint([connect_failed])
     client = boto3.session.Session().client("lambda-microvms", region_name="us-west-2")
     policy = {
         "maxIdleDurationSeconds": 300,
@@ -897,17 +838,6 @@ def test_session_requests_match_the_lambda_microvms_api_model(
             },
         )
         stub.add_response(
-            "get_microvm",
-            {**microvm, "state": "SUSPENDED"},
-            {"microvmIdentifier": "mvm-1"},
-        )
-        stub.add_response("resume_microvm", {}, {"microvmIdentifier": "mvm-1"})
-        stub.add_response(
-            "get_microvm",
-            {**microvm, "state": "RUNNING"},
-            {"microvmIdentifier": "mvm-1"},
-        )
-        stub.add_response(
             "create_microvm_auth_token",
             {"authToken": {"x-amz-microvm-token": "t"}},
             {
@@ -915,6 +845,13 @@ def test_session_requests_match_the_lambda_microvms_api_model(
                 "expirationInMinutes": 5,
                 "allowedPorts": [{"port": 8080}],
             },
+        )
+        # The first request gets 502 MICROVM_CONNECT_FAILED. The state check
+        # finds the MicroVM SUSPENDED, and the next request succeeds.
+        stub.add_response(
+            "get_microvm",
+            {**microvm, "state": "SUSPENDED"},
+            {"microvmIdentifier": "mvm-1"},
         )
         stub.add_response("terminate_microvm", {}, {"microvmIdentifier": "mvm-1"})
 
@@ -1087,22 +1024,17 @@ def test_runs_jobs_in_parallel_branches(
         "a",
         "b",
     ]
-    assert len(client.requests("get_microvm")) == 2
+    assert client.requests("get_microvm") == []
     assert len(client.requests("terminate_microvm")) == 1
 
 
-def test_runs_both_items_when_a_resume_finds_another_in_progress(
-    run: Any, fake_client: Any, fake_endpoint: Any, make_error: Any
+def test_runs_both_items_when_both_find_the_microvm_suspended(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
-    # Both items find the MicroVM SUSPENDED and call ResumeMicrovm. The
-    # service accepts the first call. It answers ConflictException to each
-    # later call while the resume runs.
-    endpoint = fake_endpoint()
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=["SUSPENDED"] * 4,
-        resumes=[None] + [make_error("ConflictException", 409)] * 4,
-    )
+    # Both items get 502 MICROVM_CONNECT_FAILED, and both state checks find
+    # the MicroVM SUSPENDED. Both keep retrying. No item calls ResumeMicrovm.
+    endpoint = fake_endpoint([connect_failed, connect_failed])
+    client = fake_client(endpoint=endpoint.url, states=["SUSPENDED"] * 2)
 
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
         return ctx.map(
@@ -1120,11 +1052,9 @@ def test_runs_both_items_when_a_resume_finds_another_in_progress(
     )
 
     assert outcome(result) == {"result": ["A", "B"]}
-    # The item whose call conflicts calls ResumeMicrovm again at each later
-    # SUSPENDED answer. The order of the threads sets how many answers it
-    # gets. The other item calls once.
-    assert 2 <= len(client.requests("resume_microvm")) <= 4
-    assert len(endpoint.requests) == 2
+    assert len(client.requests("get_microvm")) == 2
+    assert client.requests("resume_microvm") == []
+    assert len(endpoint.requests) == 4
 
 
 def test_rejects_the_outer_context_before_the_job_starts(
@@ -1299,9 +1229,9 @@ def test_passes_an_execution_error_of_a_job_wait_through(
 
 
 IDLE_POLICY = {
-    "maxIdleDurationSeconds": 60,
+    "maxIdleDurationSeconds": 86400,
     "suspendedDurationSeconds": 3600,
-    "autoResumeEnabled": False,
+    "autoResumeEnabled": True,
 }
 
 
@@ -1389,13 +1319,11 @@ def two_jobs_with_a_wait_between(
 
 def checkpoint_launch_as(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None:
     """Make the launch step checkpoint the MicroVM fields of a real launch,
-    plus ``fields``, and no resume mode of its own. Every replay then reads
-    that checkpoint."""
+    plus ``fields``. Every replay then reads that checkpoint."""
     original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def launch(self: Any, *args: Any) -> Any:
         data = original(self, *args).to_dict()
-        del data["resumeBeforeDelivery"]
         data.update(fields)
         return SimpleNamespace(to_dict=lambda: data)
 
@@ -1403,19 +1331,12 @@ def checkpoint_launch_as(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None
 
 
 @pytest.mark.parametrize(
-    ("fields", "resume_before_delivery"),
-    [
-        ({"auto_suspend_on_idle": True}, True),
-        ({"idle_policy": IDLE_POLICY}, True),
-        ({}, False),
-    ],
+    "fields",
+    [{"auto_suspend_on_idle": True}, {"idle_policy": IDLE_POLICY}, {}],
     ids=["auto_suspend_on_idle", "idle_policy", "neither"],
 )
-def test_records_the_resume_mode_in_the_launch_checkpoint(
-    run: Any,
-    fake_client: Any,
-    fields: dict[str, Any],
-    resume_before_delivery: bool,  # noqa: FBT001 - a pytest parameter
+def test_writes_no_resume_mode_in_the_launch_checkpoint(
+    run: Any, fake_client: Any, fields: dict[str, Any]
 ) -> None:
     client = fake_client()
 
@@ -1428,110 +1349,42 @@ def test_records_the_resume_mode_in_the_launch_checkpoint(
         "microvmId": "mvm-1",
         "endpoint": client.endpoint,
         "delivery": "http",
-        "resumeBeforeDelivery": resume_before_delivery,
     }
 
 
-@pytest.mark.parametrize(
-    "first",
-    [{"auto_suspend_on_idle": True}, {"idle_policy": IDLE_POLICY}],
-    ids=["auto_suspend_on_idle", "idle_policy"],
-)
-def test_still_resumes_before_each_job_when_a_deploy_turns_suspending_off(
-    run: Any, fake_client: Any, fake_endpoint: Any, first: dict[str, Any]
-) -> None:
-    # The worker reads its idle time from the run hook payload of the launch.
-    # RunMicrovm sets the idle policy at the launch. So the MicroVM still
-    # suspends during the first job's wait, after the deploy.
-    endpoint = fake_endpoint()
-    client = fake_client(
-        endpoint=endpoint.url, states=["RUNNING", "SUSPENDED", "RUNNING"]
-    )
-    handler, invocations = handler_across_deploy(
-        client, first, {}, two_jobs_with_a_wait_between
-    )
-    sent_in = record_invocation_of_each_request(endpoint, invocations)
-
-    result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
-
-    assert outcome(result)["result"]["test"] == 2
-    # The first job runs in the first invocation, with the launch's config.
-    # The second job runs in a later invocation, after the deploy.
-    assert len(sent_in) == 2
-    assert sent_in[0] == 1
-    assert sent_in[1] > sent_in[0]
-    # The first job checks the state once: RUNNING. The second job checks it
-    # after the deploy: SUSPENDED. It resumes the MicroVM, and checks the
-    # state again before delivery: RUNNING.
-    assert len(client.requests("get_microvm")) == 3
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert len(endpoint.requests) == 2
-    assert launch_checkpoint(result)["resumeBeforeDelivery"] is True
-
-
-def test_makes_no_state_check_when_a_deploy_turns_suspending_on(
-    run: Any, fake_client: Any, fake_endpoint: Any
-) -> None:
-    # The launch asked the worker for no suspend and set no idle policy. So
-    # the MicroVM never suspends, and a state check would need
-    # lambda:GetMicrovm for nothing.
-    endpoint = fake_endpoint()
-    client = fake_client(endpoint=endpoint.url)
-    handler, invocations = handler_across_deploy(
-        client, {}, {"auto_suspend_on_idle": True}, two_jobs_with_a_wait_between
-    )
-    sent_in = record_invocation_of_each_request(endpoint, invocations)
-
-    result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
-
-    assert outcome(result)["result"]["test"] == 2
-    # The first job runs in the first invocation, with the launch's config.
-    # The second job runs in a later invocation, after the deploy.
-    assert len(sent_in) == 2
-    assert sent_in[0] == 1
-    assert sent_in[1] > sent_in[0]
-    [launch] = client.requests("run_microvm")
-    assert "autoSuspendIdleSeconds" not in json.loads(launch["runHookPayload"])
-    # The second job runs after the deploy. It still checks no state.
-    assert client.requests("get_microvm") == []
-    assert len(endpoint.requests) == 2
-    assert launch_checkpoint(result)["resumeBeforeDelivery"] is False
-
-
-@pytest.mark.parametrize(
-    "fields",
-    [{}, {"resumeBeforeDelivery": "true"}, {"resumeBeforeDelivery": 1}],
-    ids=["missing", "string-true", "one"],
-)
-def test_makes_no_state_check_for_a_launch_checkpoint_without_a_bool_resume_mode(
+def test_replays_a_launch_checkpoint_with_the_resume_mode_of_an_older_release(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
+    connect_failed: Any,
     monkeypatch: pytest.MonkeyPatch,
-    fields: dict[str, Any],
 ) -> None:
-    # The current config asks for suspending. So only the checkpoint can make
-    # these jobs skip the state check. In Python "true" and 1 are truthy. So a
-    # truthiness check would turn the state check on. A read of `is True`
-    # keeps it off.
-    checkpoint_launch_as(monkeypatch, **fields)
-    client = fake_client(endpoint=fake_endpoint().url)
-    config = session_config(client, auto_suspend_on_idle=True)
-
-    result = run(
-        session_handler(config, two_jobs),
-        None,
-        [("build", succeed_with(1)), ("test", succeed_with(2))],
+    # 1. An older release wrote resumeBeforeDelivery: true in the launch
+    #    checkpoint of a session that can suspend.
+    # 2. The second job runs in a later invocation, which replays that
+    #    checkpoint.
+    # 3. The MicroVM is suspended then. Its endpoint answers 502
+    #    MICROVM_CONNECT_FAILED, and the state check finds it SUSPENDED.
+    # 4. The job keeps retrying, and the service resumes the MicroVM. The
+    #    SDK makes no GetMicrovm call before delivery, and no ResumeMicrovm
+    #    call.
+    checkpoint_launch_as(monkeypatch, resumeBeforeDelivery=True)
+    endpoint = fake_endpoint([202, connect_failed])
+    client = fake_client(endpoint=endpoint.url, states=["SUSPENDED"])
+    config = {"auto_suspend_on_idle": True}
+    handler, invocations = handler_across_deploy(
+        client, config, config, two_jobs_with_a_wait_between
     )
+    sent_in = record_invocation_of_each_request(endpoint, invocations)
+
+    result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
 
     assert outcome(result)["result"]["test"] == 2
-    assert launch_checkpoint(result) == {
-        "microvmId": "mvm-1",
-        "endpoint": client.endpoint,
-        "delivery": "http",
-        **fields,
-    }
-    assert client.requests("get_microvm") == []
+    assert launch_checkpoint(result)["resumeBeforeDelivery"] is True
+    assert len(sent_in) == 3
+    assert sent_in[1] > sent_in[0]
+    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("resume_microvm") == []
 
 
 # ---------------------------------------------------------------------------
@@ -1541,12 +1394,12 @@ def test_makes_no_state_check_for_a_launch_checkpoint_without_a_bool_resume_mode
 SUSPEND_WARNING_START = (
     'MicroVM "pipeline": SuspendMicrovm failed for mvm-1. The MicroVM may still '
     "be running and billed until the idle suspend or the end of the session. "
-    "The next job checks its state. A missing permission needs "
-    "lambda:SuspendMicrovm in the function's execution role. Error: "
+    "A missing permission needs lambda:SuspendMicrovm in the function's "
+    "execution role. Error: "
 )
 STATE_CHECK_WARNING = (
     "GetMicrovm failed, so the operation could not check whether the MicroVM "
-    "is suspended. The request step keeps sending the job."
+    "has ended. The request step keeps sending the job."
 )
 
 
@@ -1599,9 +1452,7 @@ def test_suspends_the_microvm_after_the_job_only_when_it_is_set(
     assert all("suspendAfter" not in request["body"] for request in endpoint.requests)
     [launch] = client.requests("run_microvm")
     assert json.loads(launch["runHookPayload"]) == {"version": 1, "region": "us-west-2"}
-    # suspend_after is not a session setting. So the launch records no
-    # resume mode for it.
-    assert launch_checkpoint(result)["resumeBeforeDelivery"] is False
+    assert "resumeBeforeDelivery" not in launch_checkpoint(result)
 
 
 def test_suspends_the_microvm_after_the_job_inside_its_child_context(
@@ -1660,7 +1511,7 @@ def test_logs_a_warning_and_returns_the_result_when_the_suspend_fails(
         "ResponseMetadata": {"HTTPStatusCode": 403, "RequestId": "req-suspend-1"},
     }
     error = ClientError(response, "SuspendMicrovm")
-    client = fake_client(endpoint=endpoint.url, suspends=[error], states=["RUNNING"])
+    client = fake_client(endpoint=endpoint.url, suspends=[error])
 
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
         build = vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
@@ -1678,8 +1529,6 @@ def test_logs_a_warning_and_returns_the_result_when_the_suspend_fails(
     assert warning.startswith(SUSPEND_WARNING_START)
     # The error carries the request ID of the failed call, as in the JS SDK.
     assert "SuspendMicrovm request ID: req-suspend-1." in warning
-    # The next job checks the state, as after a suspend that worked.
-    assert len(client.requests("get_microvm")) == 1
     assert len(endpoint.requests) == 2
 
 
@@ -2402,35 +2251,20 @@ def test_leaves_a_later_call_of_the_client_on_the_same_thread_alone(
     assert sent == ["mvm-1/suspend", "mvm-2/suspend"]
 
 
-def test_checks_the_state_before_the_job_after_a_failed_suspend_after_job(
-    run: Any, fake_client: Any, fake_endpoint: Any
+@pytest.mark.parametrize("state", ["SUSPENDING", "SUSPENDED"])
+def test_keeps_sending_the_job_after_a_suspend_after_job(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    connect_failed: Any,
+    state: str,
 ) -> None:
-    endpoint = fake_endpoint()
-    client = fake_client(endpoint=endpoint.url)
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        try:
-            vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
-        except MicrovmJobFailedError:
-            pass
-        return vm.invoke(ctx, "test", job_input=2, options=job())
-
-    result = run(
-        session_handler(session_config(client), body),
-        None,
-        [("build", fail_with("BuildError", "no compiler")), ("test", succeed_with(2))],
-    )
-
-    assert outcome(result) == {"result": 2}
-    # The failed job set the flag, so only the second job checks the state.
-    assert len(client.requests("get_microvm")) == 1
-
-
-def test_checks_the_state_before_the_jobs_after_a_suspend_after_job(
-    run: Any, fake_client: Any, fake_endpoint: Any
-) -> None:
-    endpoint = fake_endpoint()
-    client = fake_client(endpoint=endpoint.url, states=["SUSPENDED", "RUNNING"])
+    # The second job finds the MicroVM suspending or suspended. Its endpoint
+    # answers 502 MICROVM_CONNECT_FAILED, and the state check finds no ended
+    # MicroVM. So the job keeps retrying, and the service resumes the
+    # MicroVM on a request. The SDK makes no ResumeMicrovm call.
+    endpoint = fake_endpoint([202, connect_failed])
+    client = fake_client(endpoint=endpoint.url, states=[state])
 
     def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
         build = vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
@@ -2443,25 +2277,20 @@ def test_checks_the_state_before_the_jobs_after_a_suspend_after_job(
     )
 
     assert outcome(result) == {"result": [1, 2]}
-    # The flag is set after the first job's child context. So the first job
-    # makes no GetMicrovm before its own delivery. The second job finds the
-    # MicroVM SUSPENDED, resumes it, and sends the job when it runs.
     names = [name for name, _ in client.calls]
     assert names.index("get_microvm") > names.index("suspend_microvm")
-    assert len(client.requests("get_microvm")) == 2
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert len(endpoint.requests) == 2
+    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("resume_microvm") == []
+    assert [request["body"]["input"] for request in endpoint.requests] == [1, 2, 2]
 
 
-def test_sets_the_flag_again_when_a_completed_suspend_after_job_replays(
-    run: Any, fake_client: Any, fake_endpoint: Any
+def test_a_job_after_a_replayed_suspend_after_job_keeps_sending(
+    run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
     # The second job runs in a later invocation. The first job's child
-    # context is complete then, so its function does not run again. invoke()
-    # sets the flag after the child context returns, so the second job still
-    # checks the state before delivery.
-    endpoint = fake_endpoint()
-    client = fake_client(endpoint=endpoint.url, states=["SUSPENDED", "RUNNING"])
+    # context is complete then, so its function does not run again.
+    endpoint = fake_endpoint([202, connect_failed])
+    client = fake_client(endpoint=endpoint.url, states=["SUSPENDED"])
     handler, invocations = handler_across_deploy(
         client, {}, {}, suspend_then_wait_then_job
     )
@@ -2471,108 +2300,12 @@ def test_sets_the_flag_again_when_a_completed_suspend_after_job_replays(
 
     assert outcome(result) == {"result": [1, 2]}
     assert sent_in[1] > sent_in[0] + 1
-    assert len(client.requests("get_microvm")) == 2
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert len(endpoint.requests) == 2
+    assert len(client.requests("get_microvm")) == 1
+    assert client.requests("resume_microvm") == []
+    assert len(endpoint.requests) == 3
     # The completed job does not run again on replay. So the session does
     # not send a second SuspendMicrovm.
     assert client.requests("suspend_microvm") == [{"microvmIdentifier": "mvm-1"}]
-
-
-def test_resumes_through_the_fallback_after_a_map_item_lost_the_flag(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    connect_failed: Any,
-) -> None:
-    # 1. Item a asks for a suspend after its job.
-    # 2. The job after the map runs in a later invocation, after a wait.
-    # 3. The map is complete then, so its items do not run again, and the
-    #    flag is lost.
-    # 4. So the job goes to the endpoint of a suspended MicroVM, which
-    #    answers 502 MICROVM_CONNECT_FAILED. The step checks the state,
-    #    resumes the MicroVM, and sends the job again.
-    endpoint = fake_endpoint([202, 202, connect_failed])
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=["RUNNING", "SUSPENDED", "RUNNING"],
-    )
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        shards: list[Any] = ctx.map(
-            ["a", "b"],
-            lambda item_context, item, index, items: vm.invoke(
-                item_context,
-                f"shard-{item}",
-                job_input=item,
-                options=job(suspend_after=item == "a"),
-            ),
-            name="shards",
-            config=MapConfig(max_concurrency=1),
-        ).get_results()
-        ctx.wait(Duration.from_seconds(1), name="pause")
-        return [shards, vm.invoke(ctx, "test", job_input=2, options=job())]
-
-    result = run(
-        session_handler(session_config(client), body),
-        None,
-        [
-            ("shard-a", succeed_with("A")),
-            ("shard-b", succeed_with("B")),
-            ("test", succeed_with(2)),
-        ],
-    )
-
-    assert outcome(result) == {"result": [["A", "B"], 2]}
-    # Item a runs before the flag is set, so it checks nothing. Item b checks
-    # the state before delivery. The job after the map checks it after the
-    # 502, and once more after the resume.
-    assert len(client.requests("get_microvm")) == 3
-    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
-    assert [request["body"]["input"] for request in endpoint.requests] == [
-        "a",
-        "b",
-        2,
-        2,
-    ]
-
-
-def test_the_fallback_resumes_again_after_a_conflict_during_the_suspend(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    make_error: Any,
-    connect_failed: Any,
-) -> None:
-    # The check finds the MicroVM SUSPENDING. The service rejects the resume
-    # with ConflictException. The suspend then ends, and the MicroVM stays
-    # SUSPENDED until a resume succeeds. So the first SUSPENDED answer sends
-    # ResumeMicrovm again.
-    endpoint = fake_endpoint([connect_failed])
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=["SUSPENDING"],
-        resumes=[make_error("ConflictException", 409)],
-        suspended_until_resumed=True,
-    )
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        return vm.invoke(
-            ctx,
-            "build",
-            job_input=1,
-            options=job(retry_window=Duration.from_seconds(5)),
-        )
-
-    result = run(
-        session_handler(session_config(client), body),
-        None,
-        [("build", succeed_with("done"))],
-    )
-
-    assert outcome(result) == {"result": "done"}
-    assert len(client.requests("resume_microvm")) == 2
-    assert len(endpoint.requests) == 2
 
 
 def test_a_session_that_never_suspends_checks_the_state_after_no_answer(
@@ -2705,38 +2438,6 @@ def test_keeps_sending_after_a_failed_state_check_with_one_warning(
     assert warnings(caplog, STATE_CHECK_WARNING) == 1
 
 
-def test_fails_at_once_when_resume_is_denied_for_a_suspended_microvm(
-    run: Any,
-    fake_client: Any,
-    fake_endpoint: Any,
-    make_error: Any,
-    connect_failed: Any,
-) -> None:
-    endpoint = fake_endpoint([connect_failed])
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=["SUSPENDED"],
-        resumes=[make_error("AccessDeniedException", 403)],
-    )
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        return vm.invoke(ctx, "build", job_input=1, options=job())
-
-    # The default strategy decides on the error of the step.
-    result = run(session_handler(session_config(client, retry_strategy=None), body))
-
-    assert outcome(result) == {
-        "error": "MicrovmDeliveryError",
-        "message": (
-            'MicroVM "build": the job could not be delivered: MicroVM mvm-1 is '
-            "SUSPENDED. ResumeMicrovm was denied, so the operation cannot resume "
-            "it. The function's execution role needs lambda:ResumeMicrovm."
-        ),
-    }
-    assert len(client.requests("resume_microvm")) == 1
-    assert len(endpoint.requests) == 1
-
-
 def test_fails_with_not_running_when_the_check_finds_the_microvm_terminated(
     run: Any, fake_client: Any, fake_endpoint: Any, connect_failed: Any
 ) -> None:
@@ -2751,32 +2452,4 @@ def test_fails_with_not_running_when_the_check_finds_the_microvm_terminated(
     error = outcome(result)
     assert error["error"] == "MicrovmNotRunningError"
     assert "MicroVM mvm-1 is TERMINATED." in error["message"]
-    assert len(endpoint.requests) == 1
-
-
-def test_a_flagged_session_keeps_the_strict_state_check(
-    run: Any, fake_client: Any, fake_endpoint: Any, make_error: Any
-) -> None:
-    # After a suspend_after job, the state check before delivery fails the
-    # job for a denied GetMicrovm, as in a session with auto-suspend. The
-    # suspend_after job itself makes no state check.
-    endpoint = fake_endpoint()
-    client = fake_client(
-        endpoint=endpoint.url,
-        states=[make_error("AccessDeniedException", 403)],
-    )
-
-    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
-        build = vm.invoke(ctx, "build", job_input=1, options=job(suspend_after=True))
-        return [build, vm.invoke(ctx, "test", job_input=2, options=job())]
-
-    result = run(
-        session_handler(session_config(client), body),
-        None,
-        [("build", succeed_with(1))],
-    )
-
-    error = outcome(result)
-    assert error["error"] == "MicrovmDeliveryError"
-    assert "AccessDeniedException message" in error["message"]
     assert len(endpoint.requests) == 1

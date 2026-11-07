@@ -122,20 +122,17 @@ class MicrovmNotRunningError(MicrovmDeliveryError):
     the same state, so the job is not retried. To continue a session, start
     a new session.
 
-    Three checks raise it:
+    Two checks raise it:
 
-    1. A session that checks the MicroVM state before each job. It checks
-       when ``auto_suspend_on_idle`` is ``True``, when an ``idle_policy``
-       is set, and after a job with ``suspend_after``. ``GetMicrovm`` or
-       ``ResumeMicrovm`` then reports the state.
-    2. Every job over HTTP, of a session or of :func:`microvm`, after a
+    1. Every job over HTTP, of a session or of :func:`microvm`, after a
        request without an answer, or after an HTTP 502 with
        ``x-aws-proxy-error: MICROVM_CONNECT_FAILED``. The request step then
        calls ``GetMicrovm`` after each such answer, at most once per 2
        seconds. The endpoint of a terminated MicroVM answers that 502,
        measured in us-east-1. So a MicroVM that ends before its job arrives
-       fails the job after one request.
-    3. Every job over HTTP. The request step calls
+       fails the job after one request. A suspending or suspended MicroVM
+       gives the same sign, and the job keeps retrying.
+    2. Every job over HTTP. The request step calls
        ``CreateMicrovmAuthToken`` before the first request, and again after
        a 401 or 403. That call can answer ``ResourceNotFoundException``. For
        a terminated MicroVM whose record still exists, the call issues a
