@@ -255,7 +255,7 @@ A running MicroVM pays compute charges. A suspended MicroVM pays only for snapsh
 1. `auto_suspend_on_idle=True` asks the worker in the MicroVM to suspend its own MicroVM when no job has run for `auto_suspend_idle_time`. The default idle time is 60 seconds, or the session `timeout` if that is shorter. The idle time must be at least 10 seconds. So a session whose `timeout` is under 10 seconds does not suspend by default, even with `auto_suspend_on_idle=True`.
 2. `suspend_after=True` on a job makes the durable function suspend the MicroVM after that job. See [Suspending after a job](#suspending-after-a-job).
 
-To suspend a MicroVM, set `idlePolicy` with `autoResumeEnabled: true`. The SDK does not resume a MicroVM; the service resumes it on the next request. The session config field is `idle_policy`:
+To suspend a MicroVM, set `idle_policy` with `"autoResumeEnabled": True`. The SDK does not resume a MicroVM; the service resumes it on the next request:
 
 ```python
 config = MicrovmSessionConfig(
@@ -272,21 +272,22 @@ config = MicrovmSessionConfig(
 )
 ```
 
-- Set `maxIdleDurationSeconds` above `maximumDurationInSeconds` (the operation timeout plus 5 minutes). The idle timer counts only inbound requests, so a shorter value suspends a running job.
+- Set `maxIdleDurationSeconds` above `maximumDurationInSeconds` (the session `timeout` plus 5 minutes). The idle timer counts only inbound requests, so a shorter value suspends a running job.
 - Without `autoResumeEnabled`, a job after a suspend fails after its retries with `MicrovmDeliveryError`. With the default retry strategy, that takes about 6 minutes.
-- The first job after a suspend takes about 1 s longer.
+- Set `suspendedDurationSeconds` to the session `timeout` or more. What happens to a job when that time ends is not verified.
+- A job that arrives more than about 5 seconds after a suspend takes about 1 s longer. A job sent right after a suspend can take up to about 10 seconds, as in the next list.
 - The idle policy needs all three fields, and `maxIdleDurationSeconds` must be at least 60. `RunMicrovm` rejects any other policy, and the launch fails with `MicrovmLaunchError`. The session does not check the policy itself.
 
 A job reaches a suspended MicroVM this way:
 
-1. For about 5 seconds after a suspend, the endpoint answers a request with HTTP 502 and `x-aws-proxy-error: MICROVM_CONNECT_FAILED`. That request does not resume the MicroVM. The request step retries it, after 250 milliseconds at first, doubling up to 4 seconds. Its 5th retry starts 7.75 seconds after the first request, so the retries reach past that window.
+1. For about 5 seconds after a suspend, the endpoint answers a request with HTTP 502 and `x-aws-proxy-error: MICROVM_CONNECT_FAILED`. That request does not resume the MicroVM. The request step retries it, after 250 milliseconds at first, doubling up to 4 seconds. Its 5th retry starts 7.75 seconds after the first request, so the retries reach past that window. With a `retry_window` under about 9 seconds, the step retry strategy covers the rest of that window, at the cost of one or two more step attempts. A job sent right after a suspend can take up to about 10 seconds.
 2. After that window, a request resumes the MicroVM. The endpoint holds the request for about 750 milliseconds, and then the worker answers it.
 3. After each 502 with `MICROVM_CONNECT_FAILED`, the request step checks the state, at most once per 2 seconds. A `SUSPENDING` or `SUSPENDED` MicroVM keeps the job retrying. See [The state check](#the-state-check).
 4. A request that arrives while the MicroVM suspends can get no answer. That request reaches the worker after the next resume. The worker ignores a second request for a callback ID that runs or recently ended. So the job runs once.
 
 The worker reads its idle time once, from the run hook payload of the launch. `RunMicrovm` sets the idle policy once, at the launch. So a deploy that changes `auto_suspend_on_idle` or `idle_policy` does not change what a running MicroVM does.
 
-An earlier release resumed a suspended MicroVM itself, and recorded `resumeBeforeDelivery` in the launch checkpoint. An execution in flight that launched with that release replays its launch checkpoint with `resumeBeforeDelivery: true`. This release ignores the field. So the next job of that execution no longer resumes the MicroVM. That job works only if the MicroVM was launched with `autoResumeEnabled: true`.
+An earlier release resumed a suspended MicroVM itself, and recorded `resumeBeforeDelivery` in the launch checkpoint. An execution in flight that launched with that release replays its launch checkpoint with `resumeBeforeDelivery: true`. This release ignores the field. So the next job of that execution no longer resumes the MicroVM. That job works only if the MicroVM was launched with `autoResumeEnabled: True`. A session that suspended its MicroVM with `suspend_after` and has no `idle_policy` is affected too: its next job after the suspend no longer resumes the MicroVM and fails after its retries with `MicrovmDeliveryError`.
 
 A MicroVM lives at most its `timeout` plus 5 minutes, and never longer than 8 hours. Every job over HTTP, of a session or of `microvm`, reports a MicroVM that ended:
 
@@ -347,7 +348,7 @@ The call is not a durable operation, so these rules are yours to follow. The ses
 
 Use `suspend_after` only on the job before a long wait, such as a durable wait or a callback:
 
-- Not on back-to-back jobs. Each suspend writes a snapshot, and each resume adds about 1 second before the next job.
+- Not on back-to-back jobs. Each suspend writes a snapshot, and each resume adds about 1 second before the next job, or up to about 10 seconds when the job is sent right after the suspend.
 - Not on `map` items or other jobs that run at the same time. The suspend freezes the jobs that still run.
 - Not on the last job. The session terminates the MicroVM after its handler returns, so the snapshot is wasted.
 

@@ -9,8 +9,9 @@ The session does not suspend when idle. The first job sets suspend_after, so
 the durable function calls SuspendMicrovm after that job's result arrives.
 The function's role needs lambda:SuspendMicrovm on the image. The idle
 policy sets autoResumeEnabled, so the service resumes the MicroVM on the
-next request. A callback named gate holds the second job. The caller completes the callback with
-SendDurableExecutionCallbackSuccess to start the second job.
+next request. A callback named gate holds the second job. The caller
+completes the callback with SendDurableExecutionCallbackSuccess to start the
+second job.
 """
 
 import os
@@ -47,8 +48,8 @@ IDLE_POLICY = {
 }
 
 # The second job waits for the resume. The worker can refuse it with HTTP 503
-# for up to 30 seconds before that, and the request step retries for up to
-# 60 seconds. So its heartbeat timeout is longer than both together.
+# for up to 30 seconds after the suspend, and the request step retries for up
+# to 60 seconds. So its heartbeat timeout is longer than both together.
 RESUMED_JOB_HEARTBEAT_TIMEOUT = Duration.from_seconds(120)
 
 

@@ -339,6 +339,13 @@ def send_job(options: SendJobOptions) -> int:
     and backoff rules, and sends the job again to the endpoint that the
     check reports.
 
+    For about 5 seconds after a suspend, the endpoint answers that 502, and
+    a request does not resume the MicroVM. With the default retry window,
+    the retries outlast that window. With a ``retry_window`` under about 9
+    seconds, the step retry strategy covers the rest of that window, at the
+    cost of one or two more step attempts. A job sent right after a suspend
+    can take up to about 10 seconds.
+
     The same job can reach the route more than once:
 
     1. A request reaches the route, and its answer is lost.

@@ -53,7 +53,8 @@ _T = TypeVar("_T")
 DEFAULT_AUTO_SUSPEND_IDLE_SECONDS = 60
 """The default :attr:`MicrovmSessionConfig.auto_suspend_idle_time`, in seconds.
 
-The first job after a suspend took about 1 second longer in us-east-1. So 60
+A job that arrived more than about 5 seconds after a suspend took about 1
+second longer in us-east-1. So 60
 seconds keeps back-to-back jobs from paying for a suspend and a resume that
 they do not need. A long
 wait costs at most 60 seconds of compute before the MicroVM suspends. A

@@ -269,18 +269,22 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
     It needs all three members, for example ``{"autoResumeEnabled": True,
     "maxIdleDurationSeconds": 86400, "suspendedDurationSeconds": 3600}``.
 
-    To suspend a MicroVM, set ``idlePolicy`` with ``autoResumeEnabled: true``.
-    The SDK does not resume a MicroVM; the service resumes it on the next
-    request. This applies to :attr:`auto_suspend_on_idle` and to
+    To suspend a MicroVM, set ``idle_policy`` with ``"autoResumeEnabled":
+    True``. The SDK does not resume a MicroVM; the service resumes it on the
+    next request. This applies to :attr:`auto_suspend_on_idle` and to
     :attr:`MicrovmInvokeOptions.suspend_after`.
 
     Set ``maxIdleDurationSeconds`` above ``maximumDurationInSeconds`` (the
-    operation timeout plus 5 minutes). The idle timer counts only inbound
+    session ``timeout`` plus 5 minutes). The idle timer counts only inbound
     requests, so a shorter value suspends a running job.
 
+    Set ``suspendedDurationSeconds`` to the session ``timeout`` or more. What
+    happens to a job when that time ends is not verified.
+
     Without ``autoResumeEnabled``, a job after a suspend fails after its
-    retries with ``MicrovmDeliveryError``. The first job after a suspend
-    takes about 1 s longer.
+    retries with ``MicrovmDeliveryError``. A job that arrives more than
+    about 5 seconds after a suspend takes about 1 s longer. A job sent right
+    after a suspend can take up to about 10 seconds.
     """
 
     auto_suspend_on_idle: bool = False
@@ -292,13 +296,14 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
     session asks the worker in the ``run`` hook payload to suspend its own
     MicroVM when idle.
 
-    To suspend a MicroVM, set ``idlePolicy`` with ``autoResumeEnabled: true``.
-    The SDK does not resume a MicroVM; the service resumes it on the next
-    request. Set ``maxIdleDurationSeconds`` above ``maximumDurationInSeconds``
-    (the operation timeout plus 5 minutes). The idle timer counts only
-    inbound requests, so a shorter value suspends a running job. Without
-    ``autoResumeEnabled``, a job after a suspend fails after its retries with
-    ``MicrovmDeliveryError``. See :attr:`idle_policy`.
+    To suspend a MicroVM, set ``idle_policy`` with ``"autoResumeEnabled":
+    True``. The SDK does not resume a MicroVM; the service resumes it on the
+    next request. Set ``maxIdleDurationSeconds`` above
+    ``maximumDurationInSeconds`` (the session ``timeout`` plus 5 minutes).
+    The idle timer counts only inbound requests, so a shorter value suspends
+    a running job. Without ``autoResumeEnabled``, a job after a suspend
+    fails after its retries with ``MicrovmDeliveryError``. See
+    :attr:`idle_policy`.
 
     It is off by default, because it needs more settings and changes what
     the MicroVM does between jobs:
@@ -311,8 +316,10 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
        MicroVM is suspended. "Idle" means only that no job runs in the
        worker.
 
-    The first job after a suspend takes about 1 s longer, and the job's
-    ``timeout`` and ``heartbeat_timeout`` count it. Suspending does
+    A job that arrives more than about 5 seconds after a suspend takes about
+    1 s longer. A job sent right after a suspend can take up to about 10
+    seconds. The job's ``timeout`` and ``heartbeat_timeout`` count this
+    time. Suspending does
     not extend the MicroVM's lifetime.
 
     The worker must be a version that supports the setting. The JavaScript
@@ -364,7 +371,8 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     is then the only way that the job fails soon after the MicroVM ends.
 
     A job after a suspend waits for the service to resume the MicroVM. The
-    worker can refuse it with HTTP 503 for up to 30 seconds before that. So
+    worker can refuse it with HTTP 503 for up to 30 seconds after the
+    suspend. So
     set the heartbeat timeout of such a job to at least the
     ``retry_window`` plus 30 seconds.
     """
@@ -378,13 +386,21 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
     inside the job's child context, before the child context returns. It is
     not a durable operation of its own.
 
-    To suspend a MicroVM, set ``idlePolicy`` with ``autoResumeEnabled: true``.
-    The SDK does not resume a MicroVM; the service resumes it on the next
-    request. Set ``maxIdleDurationSeconds`` above ``maximumDurationInSeconds``
-    (the operation timeout plus 5 minutes). The idle timer counts only
-    inbound requests, so a shorter value suspends a running job. Without
-    ``autoResumeEnabled``, a job after a suspend fails after its retries with
-    ``MicrovmDeliveryError``. See :attr:`MicrovmSessionConfig.idle_policy`.
+    To suspend a MicroVM, set ``idle_policy`` with ``"autoResumeEnabled":
+    True``. The SDK does not resume a MicroVM; the service resumes it on the
+    next request. Set ``maxIdleDurationSeconds`` above
+    ``maximumDurationInSeconds`` (the session ``timeout`` plus 5 minutes).
+    The idle timer counts only inbound requests, so a shorter value suspends
+    a running job. Without ``autoResumeEnabled``, a job after a suspend
+    fails after its retries with ``MicrovmDeliveryError``. See
+    :attr:`MicrovmSessionConfig.idle_policy`.
+
+    For about 5 seconds after a suspend, a request does not resume the
+    MicroVM, and the request step retries it. The retries outlast that
+    window with the default ``retry_window``. With a ``retry_window`` under
+    about 9 seconds, the step retry strategy covers the rest of that window,
+    at the cost of one or two more step attempts. A job sent right after a
+    suspend can take up to about 10 seconds.
 
     Read these rules before you set it:
 
@@ -415,8 +431,9 @@ class MicrovmInvokeOptions(MicrovmRequestConfig):
 
     Set it on the job before a long wait, such as a durable wait or a
     callback. Do not set it on back-to-back jobs or on the last job of the
-    session. Each suspend and resume costs a snapshot, and the first job
-    after a suspend takes about 1 s longer. The session terminates the
+    session. Each suspend and resume costs a snapshot, and a job that
+    arrives more than about 5 seconds after a suspend takes about 1 s
+    longer. The session terminates the
     MicroVM after its last job anyway. The image must enable the ``resume``
     hook.
 
