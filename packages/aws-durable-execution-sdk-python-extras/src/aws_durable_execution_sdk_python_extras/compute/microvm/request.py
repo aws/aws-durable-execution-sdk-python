@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from aws_durable_execution_sdk_python.types import LoggerInterface
 from botocore.exceptions import ClientError
 
-from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.aws_errors import (
     add_request_id,
     error_code,
     with_request_id,
@@ -31,7 +31,7 @@ from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
 
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python_extras.microvm.config import (
+    from aws_durable_execution_sdk_python_extras.compute.microvm.config import (
         LambdaMicrovmsClient,
     )
 

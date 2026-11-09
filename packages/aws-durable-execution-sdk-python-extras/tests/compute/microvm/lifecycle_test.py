@@ -12,16 +12,16 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmEndpointUnavailableError,
 )
-from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle import (
     MicrovmPermissionDeniedError,
     MicrovmStateCheckError,
     MicrovmStateError,
     check_not_ended,
 )
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     INVOCATION_RESERVE_SECONDS,
 )
 

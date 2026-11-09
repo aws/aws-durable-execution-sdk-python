@@ -13,7 +13,7 @@ import os
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_extras.microvm import MicrovmConfig, microvm
+from aws_durable_execution_sdk_python_extras.compute.microvm import MicrovmConfig, microvm
 
 CONFIG = MicrovmConfig(
     image_identifier=os.environ["MICROVM_IMAGE_ARN"],
@@ -53,7 +53,7 @@ An application that already serves HTTP routes can receive every job on its own 
 ```python
 import dataclasses
 
-from aws_durable_execution_sdk_python_extras.microvm import MicrovmRequestConfig
+from aws_durable_execution_sdk_python_extras.compute.microvm import MicrovmRequestConfig
 
 config = dataclasses.replace(CONFIG, request=MicrovmRequestConfig(path="/clone-build"))
 microvm(context, "build", job_input=job_input, config=config)
@@ -107,7 +107,7 @@ After `MicrovmLaunchError`, the delivery decides whether a MicroVM runs the job:
 2. With HTTP delivery, the launch request contains no job. The request step starts only after a successful launch. So when you invoke through a version or an alias, no MicroVM runs the job after an HTTP launch fails.
 
 ```python
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmError,
     MicrovmTimeoutError,
 )
@@ -124,7 +124,7 @@ The class is the same on the first run and on every replay, so code that branche
 
 A failed AWS call keeps its request ID in the error message, in the form `<Operation> request ID: <id>.`, for example `RunMicrovm request ID: <id>.`. A support case can quote it. This applies to `RunMicrovm`, `GetMicrovm`, `CreateMicrovmAuthToken`, and `TerminateMicrovm`. The SDK checkpoints the message of a failed step, and not its `__cause__`. So the request ID is in the message, the handler sees it on the first run and on replay, and the execution history keeps it. A failed `TerminateMicrovm` call does not fail the operation. So a `TerminateMicrovm` request ID appears only in the terminate log entry and in the terminate step record. A message has no request ID when the answer carries none, for example after a connection failure. A message also has no request ID when the error is not the answer of the Lambda MicroVMs call. For example, a `client` with role-assuming credentials calls STS `AssumeRole` inside each call, and an STS error carries the request ID of STS. The operation recognizes such an error by its `operation_name`. The step raises a copy of the botocore error, of the same class, with the same `response`, and with the request ID in its message. So `default_microvm_retry_strategy` decides as before. A custom `retry_strategy` receives the error that botocore raised, without the request ID. So a strategy that matches the message, such as `create_retry_strategy(RetryStrategyConfig(retryable_errors=[...]))`, decides on the message of the service. A `ResourceNotFoundException` from `GetMicrovm` or `CreateMicrovmAuthToken` is the exception. It means that the MicroVM no longer exists. So the operation raises `MicrovmStateError` instead, and the strategy receives that error. Its `__cause__` is the botocore error. An error that the operation creates itself, such as `MicrovmStateError` or "RunMicrovm returned no microvmId", has the request ID in its message when the strategy receives it. A custom client can raise one error object for several calls. Each step message then names only its own call, and the object keeps its message.
 
-When the error escapes the handler, the execution's error type is the class's fully-qualified name, such as `aws_durable_execution_sdk_python_extras.microvm.errors.MicrovmJobFailedError`. The SDK uses that name to rebuild the class on replay. The JavaScript operation reports the short name, `MicrovmJobFailedError`. So a rule that matches the error type of both SDKs, such as a Step Functions `Catch` or a metric filter, must match both forms. For example, match on the suffix.
+When the error escapes the handler, the execution's error type is the class's fully-qualified name, such as `aws_durable_execution_sdk_python_extras.compute.microvm.errors.MicrovmJobFailedError`. The SDK uses that name to rebuild the class on replay. The JavaScript operation reports the short name, `MicrovmJobFailedError`. So a rule that matches the error type of both SDKs, such as a Step Functions `Catch` or a metric filter, must match both forms. For example, match on the suffix.
 
 ### Retries in two tiers
 
@@ -175,7 +175,7 @@ from typing import Any
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmInvokeOptions,
     MicrovmSession,
     MicrovmSessionConfig,

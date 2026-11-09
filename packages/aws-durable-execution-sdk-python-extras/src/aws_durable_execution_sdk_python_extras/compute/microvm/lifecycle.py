@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.aws_errors import (
     add_request_id,
     error_code,
     is_microvms_service_error,
     with_request_id,
 )
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     MicrovmEndpointUnavailableError,
     call_before_deadline,
     reserve_starts_at,
@@ -25,7 +25,7 @@ from aws_durable_execution_sdk_python_extras.microvm.request import (
 
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python_extras.microvm.config import (
+    from aws_durable_execution_sdk_python_extras.compute.microvm.config import (
         LambdaMicrovmsClient,
     )
 

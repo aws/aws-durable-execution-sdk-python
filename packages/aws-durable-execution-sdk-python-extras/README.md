@@ -18,7 +18,7 @@ import os
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_extras.microvm import MicrovmConfig, microvm
+from aws_durable_execution_sdk_python_extras.compute.microvm import MicrovmConfig, microvm
 
 CONFIG = MicrovmConfig(
     image_identifier=os.environ["MICROVM_IMAGE_ARN"],
@@ -52,7 +52,7 @@ from typing import Any
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmInvokeOptions,
     MicrovmSession,
     MicrovmSessionConfig,
@@ -101,7 +101,7 @@ This code runs inside the quick start's `handler`:
 ```python
 import dataclasses
 
-from aws_durable_execution_sdk_python_extras.microvm import MicrovmRequestConfig
+from aws_durable_execution_sdk_python_extras.compute.microvm import MicrovmRequestConfig
 
 config = dataclasses.replace(CONFIG, request=MicrovmRequestConfig(path="/clone-build"))
 result = microvm(context, "build", job_input={"repo": "org/app"}, config=config)
@@ -111,10 +111,10 @@ In a session, set `MicrovmInvokeOptions(path="/clone-build", ...)` instead. Regi
 
 ### Handle a failed job
 
-Every MicroVM failure is a `MicrovmError`. Catch a subclass for one kind of failure. This code runs inside the quick start's `handler`:
+Every MicroVM failure is a `MicrovmError`, and every `MicrovmError` is a `ComputeError`. Catch `ComputeError` for a failure of any compute type, or a subclass for one kind of failure. This code runs inside the quick start's `handler`:
 
 ```python
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmError,
     MicrovmJobFailedError,
     MicrovmTimeoutError,
@@ -225,7 +225,7 @@ The MicroVM's execution role needs `lambda:SendDurableExecutionCallbackSuccess`,
 
 - [docs/microvm.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extras/docs/microvm.md): job delivery, the durable operations each call records, all errors, the retry tiers, the state check, every permission, and best practices.
 - [MicroVM worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-microvm-worker): the code that runs in the MicroVM.
-- [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras/microvm): config fields and docstrings.
+- [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras/compute/microvm): config fields and docstrings.
 - [`@aws/durable-execution-sdk-js-extras`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-extras): the JavaScript counterpart.
 - [Lambda MicroVMs guide](https://docs.aws.amazon.com/lambda/latest/dg/lambda-microvms-guide.html).
 

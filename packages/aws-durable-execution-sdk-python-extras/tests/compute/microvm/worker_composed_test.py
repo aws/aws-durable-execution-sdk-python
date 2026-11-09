@@ -45,7 +45,7 @@ from aws_durable_execution_sdk_python_microvm_worker import (
 from aws_durable_execution_sdk_python_microvm_worker import worker as worker_module
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,

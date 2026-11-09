@@ -39,7 +39,7 @@ from aws_durable_execution_sdk_python_testing.runner import (
 from botocore.exceptions import ClientError, EndpointConnectionError
 from botocore.stub import ANY, Stubber
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,
@@ -50,7 +50,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     microvm,
     operation,
 )
-from aws_durable_execution_sdk_python_extras.microvm.job import RunHookPayload
+from aws_durable_execution_sdk_python_extras.compute.microvm.job import RunHookPayload
 
 
 WAIT = 30
@@ -628,7 +628,7 @@ def test_raises_the_same_class_after_the_handler_stops_catching(
     assert result.status is InvocationStatus.FAILED
     assert result.error is not None
     assert result.error.type == (
-        "aws_durable_execution_sdk_python_extras.microvm.errors.MicrovmJobFailedError"
+        "aws_durable_execution_sdk_python_extras.compute.microvm.errors.MicrovmJobFailedError"
     )
 
 
@@ -1341,7 +1341,7 @@ def test_fails_at_once_when_get_microvm_is_denied(
     step_error = result.get_context("build").get_step("build.request").error
     assert step_error is not None
     assert step_error.type == (
-        "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
+        "aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle."
         "MicrovmPermissionDeniedError"
     )
     assert len(endpoint.requests) == 1

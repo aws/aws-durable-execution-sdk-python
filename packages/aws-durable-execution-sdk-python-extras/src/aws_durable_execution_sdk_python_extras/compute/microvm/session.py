@@ -18,15 +18,15 @@ from aws_durable_execution_sdk_python.exceptions import (
     ValidationError,
 )
 
-from aws_durable_execution_sdk_python_extras.microvm.config import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.config import (
     MicrovmInvokeOptions,
     MicrovmSessionConfig,
 )
-from aws_durable_execution_sdk_python_extras.microvm.errors import MicrovmError
-from aws_durable_execution_sdk_python_extras.microvm.job import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.errors import MicrovmError
+from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
     run_hook_payload_without_job,
 )
-from aws_durable_execution_sdk_python_extras.microvm.operation import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.operation import (
     HTTP_DELIVERY,
     LaunchResult,
     _MicrovmScope,

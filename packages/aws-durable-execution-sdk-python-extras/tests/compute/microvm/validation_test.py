@@ -12,14 +12,14 @@ import pytest
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.exceptions import ValidationError
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MAX_JOB_INPUT_BYTES,
     MicrovmConfig,
     MicrovmInvokeOptions,
     MicrovmRequestConfig,
     microvm,
 )
-from aws_durable_execution_sdk_python_extras.microvm import operation
+from aws_durable_execution_sdk_python_extras.compute.microvm import operation
 
 
 class NoOperations:

@@ -34,20 +34,20 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from botocore.exceptions import ClientError
 
-from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.aws_errors import (
     add_request_id,
     decide_on_original_error,
     error_code,
     with_request_id,
 )
-from aws_durable_execution_sdk_python_extras.microvm.config import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.config import (
     MAX_MICROVM_DURATION_SECONDS,
     LambdaMicrovmsClient,
     MicrovmBaseConfig,
     MicrovmConfig,
     MicrovmRequestConfig,
 )
-from aws_durable_execution_sdk_python_extras.microvm.errors import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.errors import (
     MicrovmDeliveryError,
     MicrovmError,
     MicrovmJobFailedError,
@@ -55,7 +55,7 @@ from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmNotRunningError,
     MicrovmTimeoutError,
 )
-from aws_durable_execution_sdk_python_extras.microvm.job import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
     MAX_JOB_INPUT_BYTES,
     JobRequest,
     RunHookPayload,
@@ -63,13 +63,13 @@ from aws_durable_execution_sdk_python_extras.microvm.job import (
     fits_run_hook,
     run_hook_payload_without_job,
 )
-from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle import (
     MicrovmStateCheckError,
     MicrovmStateError,
     check_not_ended,
     microvm_not_found,
 )
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     DEFAULT_MICROVM_JOB_PATH,
     DEFAULT_MICROVM_PORT,
     DEFAULT_REQUEST_RETRY_WINDOW_SECONDS,
@@ -79,7 +79,7 @@ from aws_durable_execution_sdk_python_extras.microvm.request import (
     reserve_starts_at,
     send_job,
 )
-from aws_durable_execution_sdk_python_extras.microvm.retry import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.retry import (
     default_microvm_retry_strategy,
 )
 
