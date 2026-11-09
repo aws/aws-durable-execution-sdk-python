@@ -252,7 +252,7 @@ def test_raises_what_the_strategy_raises() -> None:
         # The caller matches the code. An error of another operation with the
         # same code gets no request ID.
         (
-            "ResumeMicrovm",
+            "GetMicrovm",
             ClientError(response(code="ResourceNotFoundException"), "AssumeRole"),
             "",
         ),

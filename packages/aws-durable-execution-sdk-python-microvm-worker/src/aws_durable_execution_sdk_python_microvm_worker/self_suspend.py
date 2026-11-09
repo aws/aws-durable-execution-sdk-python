@@ -55,7 +55,8 @@ call whose outcome is unknown, and after the ``suspend`` hook. The call
 returns before the MicroVM freezes, and the worker cannot see the freeze. A
 job accepted in between would freeze with the MicroVM, and nothing would
 resume it. So the worker answers such a job with HTTP 503, and the durable
-function resumes the MicroVM and delivers the job again. The ``resume`` hook
+function delivers the job again. The service resumes the MicroVM on a
+request, when its idle policy sets ``autoResumeEnabled``. The ``resume`` hook
 ends the refusal at once. This period covers an image that does not enable
 that hook, and a suspend that the service did not carry out. It fits inside
 the durable function's default delivery retry window.

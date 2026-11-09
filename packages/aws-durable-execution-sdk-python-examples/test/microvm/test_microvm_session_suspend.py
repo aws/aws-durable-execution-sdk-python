@@ -121,9 +121,9 @@ def test_suspends_the_idle_microvm_and_resumes_it_for_the_next_job(durable_runne
     expect_microvm_terminated(microvm_id)
 
     # The tree is the tree of the session example without suspending, with
-    # the callback named gate in place of that example's wait. The state
-    # check and the resume run inside each request step. So the tree shows
-    # them only as a request step that succeeded after the suspend.
+    # the callback named gate in place of that example's wait. The service
+    # resumes the MicroVM during the second request step. So the tree shows
+    # the resume only as a request step that succeeded after the suspend.
     assert tree(result.operations) == [
         (
             "suspend-session",
@@ -156,14 +156,15 @@ def test_suspends_the_idle_microvm_and_resumes_it_for_the_next_job(durable_runne
         )
     ]
 
-    # With auto_suspend_on_idle, the launch records the resume mode. Each
-    # request step then calls GetMicrovm before it sends the job, and calls
-    # ResumeMicrovm for a suspended MicroVM. No idle policy is set. So only
-    # the request step can have called ResumeMicrovm.
+    # The SDK does not resume a MicroVM, so the launch records no resume
+    # mode. The idle policy sets autoResumeEnabled, so the service resumed
+    # the MicroVM on the second job's request.
     session = result.get_context("suspend-session")
     launch = deserialize_operation_payload(
         session.get_step("suspend-session.launch").result
     )
-    assert launch["delivery"] == "http"
-    assert launch["microvmId"] == microvm_id
-    assert launch["resumeBeforeDelivery"] is True
+    assert launch == {
+        "microvmId": microvm_id,
+        "endpoint": launch["endpoint"],
+        "delivery": "http",
+    }

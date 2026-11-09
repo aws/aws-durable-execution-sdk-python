@@ -23,7 +23,6 @@ from botocore.exceptions import ClientError
 MicrovmApiOperation = Literal[
     "RunMicrovm",
     "GetMicrovm",
-    "ResumeMicrovm",
     "CreateMicrovmAuthToken",
     "TerminateMicrovm",
     "SuspendMicrovm",
