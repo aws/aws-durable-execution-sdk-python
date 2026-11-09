@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import datetime
 import functools
 import json
 import logging
@@ -22,6 +23,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
     DurableServiceClient,
     ErrorObject,
+    ExecutionStatus,
     InvocationStatus,
     LambdaClient,
     Operation,
@@ -545,11 +547,24 @@ def durable_execution(
                     # Every started plugin gets its End hook, including when
                     # cancellation or a thread-control exception escapes. The
                     # handler's original failure wins over an End-hook failure.
+                    # A retry may be the last invocation (stopped/timed out),
+                    # so read the authoritative outcome for plugins.
                     try:
+                        if plugin_executor.has_plugins:
+                            execution_status, execution_end_time = (
+                                _lookup_execution_outcome(
+                                    service_client,
+                                    invocation_input.durable_execution_arn,
+                                )
+                            )
+                        else:
+                            execution_status, execution_end_time = None, None
                         plugin_executor.on_invocation_end(
                             DurableExecutionInvocationOutput.create_retry(
                                 ErrorObject.from_exception(error)
-                            )
+                            ),
+                            execution_status=execution_status,
+                            execution_end_time=execution_end_time,
                         )
                     except BaseException:  # noqa: BLE001 - preserve the original failure
                         logger.exception(
@@ -582,3 +597,48 @@ def handle_checkpoint_error(error: CheckpointError) -> DurableExecutionInvocatio
     return DurableExecutionInvocationOutput(
         status=InvocationStatus.FAILED, error=ErrorObject.from_exception(error)
     )
+
+
+def _lookup_execution_outcome(
+    service_client: DurableServiceClient,
+    durable_execution_arn: str,
+) -> tuple[ExecutionStatus | None, datetime.datetime | None]:
+    """Best-effort read of the execution's authoritative status at finalization.
+
+    A retry disposition does not guarantee another invocation: a stop or an
+    execution timeout leaves the running invocation to reach a checkpoint the
+    service rejects because the execution already ended. This bounded lookup
+    recovers the real outcome so plugins can distinguish termination from a
+    retryable failure. Returns ``(None, None)`` when the lookup fails or the
+    execution is not terminal; finalization never blocks.
+    """
+    try:
+        info = service_client.get_execution(durable_execution_arn)
+    except Exception:  # noqa: BLE001 - unknown outcome must not fail finalization
+        logger.debug(
+            "Failed to read execution outcome for %s; leaving terminal status "
+            "unknown.",
+            durable_execution_arn,
+            exc_info=True,
+        )
+        return None, None
+    status = _coerce_execution_status(getattr(info, "status", None))
+    if status is None or status is ExecutionStatus.RUNNING:
+        return None, None
+    end_timestamp = getattr(info, "end_timestamp", None)
+    if not isinstance(end_timestamp, datetime.datetime):
+        end_timestamp = None
+    return status, end_timestamp
+
+
+def _coerce_execution_status(value: object) -> ExecutionStatus | None:
+    """Return the ``ExecutionStatus`` for a service status, or None if unknown."""
+    if isinstance(value, ExecutionStatus):
+        return value
+    raw = getattr(value, "value", value)
+    if isinstance(raw, str):
+        try:
+            return ExecutionStatus(raw)
+        except ValueError:
+            return None
+    return None
