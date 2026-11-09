@@ -23,7 +23,8 @@ classifiers = [
 ]
 dependencies = [
   "boto3>=1.42.1",
-  "aws-durable-execution-sdk-python>=3.0.0",
+  # Core 3.1.0 preserves empty errors when saved execution state is reloaded.
+  "aws-durable-execution-sdk-python>=3.1.0",
 ]
 
 [project.urls]
@@ -66,7 +67,7 @@ dependencies = [
   "pytest",
   "pytest-cov",
   "ruff",
-  "aws-durable-execution-sdk-python>=3.0.0",
+  "aws-durable-execution-sdk-python>=3.1.0",
 ]
 
 [tool.hatch.envs.test.scripts]
