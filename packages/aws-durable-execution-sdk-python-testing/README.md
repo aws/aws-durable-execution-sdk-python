@@ -2,144 +2,105 @@
 
 [![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python-testing.svg)](https://pypi.org/project/aws-durable-execution-sdk-python-testing)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/aws-durable-execution-sdk-python-testing.svg)](https://pypi.org/project/aws-durable-execution-sdk-python-testing)
-
-
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/aws/aws-durable-execution-sdk-python-testing/badge)](https://scorecard.dev/viewer/?uri=github.com/aws/aws-durable-execution-sdk-python-testing)
 
------
+Test Python durable functions locally, before you deploy them.
 
-## Table of Contents
-
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Testing functions that invoke other functions](#testing-functions-that-invoke-other-functions)
-- [Architecture](#architecture)
-- [Documentation](#documentation)
-- [Developer Guide](#developers)
-- [License](#license)
-
-## Installation
+## Install
 
 ```console
 pip install aws-durable-execution-sdk-python-testing
 ```
 
-## Overview
-
-Use the AWS Durable Execution Testing SDK for Python to test your Python durable functions locally.
-
-The test framework contains a local runner, so you can run and test your durable function locally
-before you deploy it.
-
-## Quick Start
-
-### A durable function under test
+## Quick start
 
 ```python
-from aws_durable_execution_sdk_python.context import (
+from aws_durable_execution_sdk_python import (
     DurableContext,
+    StepContext,
+    durable_execution,
     durable_step,
-    durable_with_child_context,
 )
-from aws_durable_execution_sdk_python.execution import durable_execution
 from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.execution import InvocationStatus
+from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
 
 @durable_step
-def one(a: int, b: int) -> str:
-    return f"{a} {b}"
+def greet(step_ctx: StepContext, name: str) -> str:
+    return f"Hello, {name}"
 
-@durable_step
-def two_1(a: int, b: int) -> str:
-    return f"{a} {b}"
-
-@durable_step
-def two_2(a: int, b: int) -> str:
-    return f"{b} {a}"
-
-@durable_with_child_context
-def two(ctx: DurableContext, a: int, b: int) -> str:
-    two_1_result: str = ctx.step(two_1(a, b))
-    two_2_result: str = ctx.step(two_2(a, b))
-    return f"{two_1_result} {two_2_result}"
-
-@durable_step
-def three(a: int, b: int) -> str:
-    return f"{a} {b}"
 
 @durable_execution
-def function_under_test(event: Any, context: DurableContext) -> list[str]:
-    results: list[str] = []
+def handler(event: dict, context: DurableContext) -> str:
+    greeting = context.step(greet(event["name"]))
+    context.wait(Duration.from_hours(1), name="cool-down")
+    return greeting
 
-    result_one: str = context.step(one(1, 2))
-    results.append(result_one)
 
-    context.wait(Duration.from_seconds(1))
-
-    result_two: str = context.run_in_child_context(two(3, 4))
-    results.append(result_two)
-
-    result_three: str = context.step(three(5, 6))
-    results.append(result_three)
-
-    return results
-```
-
-### Your test code
-
-```python
-from aws_durable_execution_sdk_python.execution import InvocationStatus
-from aws_durable_execution_sdk_python_testing.runner import (
-    ContextOperation,
-    DurableFunctionTestResult,
-    DurableFunctionTestRunner,
-    StepOperation,
-)
-
-def test_my_durable_functions():
-    with DurableFunctionTestRunner(handler=function_under_test) as runner:
-        result: DurableFunctionTestResult = runner.run(input="input str", timeout=10)
+def test_handler():
+    with DurableFunctionTestRunner(handler=handler) as runner:
+        result = runner.run(input='{"name": "Jane"}', execution_timeout=10)
 
     assert result.status is InvocationStatus.SUCCEEDED
-    assert result.result == '["1 2", "3 4 4 3", "5 6"]'
-
-    one_result: StepOperation = result.get_step("one")
-    assert one_result.result == '"1 2"'
-
-    two_result: ContextOperation = result.get_context("two")
-    assert two_result.result == '"3 4 4 3"'
-
-    three_result: StepOperation = result.get_step("three")
-    assert three_result.result == '"5 6"'
+    assert result.result == '"Hello, Jane"'
+    assert result.get_step("greet").result == '"Hello, Jane"'
 ```
-## Testing functions that invoke other functions
 
-A durable function can call another function with `context.invoke`. The
-runner needs to know each target's kind: a durable target runs as a
-child durable execution with its own history, while a plain (non-durable)
-target is one invocation whose return value is the result. An unknown
-target fails the operation with `ResourceNotFoundException`.
+The runner skips waits by default, so the 1-hour wait ends at once. Pass `skip_time=False` to `DurableFunctionTestRunner` to wait in real time.
 
-### In-process runner
+`result.result` and each operation's `result` hold the serialized value. `get_step`, `get_wait`, `get_context`, `get_callback`, and `get_invoke` find an operation by name.
 
-Register each target with the runner. `register_durable_function` marks a
-durable target, and takes its execution timeout and retention;
-`register_function` marks a plain one. The runner has one handler per
-registered name, not versions: an invoke of `child:prod` runs the handler
-registered as `child:prod` if there is one, otherwise the one registered
-as `child`.
+## Common uses
+
+### Complete a callback
+
+Start the execution with `run_async`, then send the callback result:
 
 ```python
-from aws_durable_execution_sdk_python.context import DurableContext
-from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python import DurableContext, durable_execution
+from aws_durable_execution_sdk_python.execution import InvocationStatus
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
+
+
+def notify(callback_id: str, context) -> None:
+    ...  # Send callback_id to the approver.
+
+
+@durable_execution
+def approval(event: dict, context: DurableContext) -> dict:
+    decision = context.wait_for_callback(notify, name="approval")
+    return {"decision": decision}
+
+
+def test_approval():
+    with DurableFunctionTestRunner(handler=approval) as runner:
+        execution_arn = runner.run_async(input="{}", execution_timeout=10)
+        callback_id = runner.wait_for_callback(execution_arn)
+        runner.send_callback_success(callback_id, b"approved")
+        result = runner.wait_for_result(execution_arn, timeout=10)
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.result == '{"decision": "approved"}'
+```
+
+### Test functions that invoke other functions
+
+Register each `context.invoke` target with the runner. `register_durable_function` registers a durable target, which runs as a child durable execution. `register_function` registers a plain function, which runs once. An unregistered target fails the invoke with `ResourceNotFoundException`.
+
+```python
+from aws_durable_execution_sdk_python import DurableContext, durable_execution
+from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
+
 
 @durable_execution
 def process_payment(event: dict, context: DurableContext) -> dict:
     return {"charged": event["amount"]}
 
+
 def lookup_price(event: dict, context) -> dict:
     return {"price": 25}
+
 
 @durable_execution
 def place_order(event: dict, context: DurableContext) -> dict:
@@ -149,7 +110,8 @@ def place_order(event: dict, context: DurableContext) -> dict:
     )
     return {"sku": event["sku"], "charged": payment["charged"]}
 
-def test_place_order_invokes_both_functions():
+
+def test_place_order():
     with DurableFunctionTestRunner(handler=place_order) as runner:
         runner.register_durable_function(
             "process-payment", process_payment, execution_timeout=60
@@ -161,46 +123,20 @@ def test_place_order_invokes_both_functions():
     assert result.get_invoke("payment").status.value == "SUCCEEDED"
 ```
 
-## Architecture
+The runner matches a target by name, not by version. An invoke of `child:prod` runs the handler registered as `child:prod` if there is one, and otherwise the one registered as `child`.
 
-See [docs/architecture.md](docs/architecture.md) for framework
-internals. It covers the components, the worker model, the checkpoint
-flow, pagination, and a map of the code.
+## Advanced
 
+- `DurableFunctionCloudTestRunner(function_name=..., region=...)` runs a test against a deployed function. It returns the same `DurableFunctionTestResult`.
+- The local runner returns errors in the same JSON format as the AWS service, so boto3 error handling works the same way. See [docs/error-responses.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-testing/docs/error-responses.md).
 
-## Documentation
+## Reference
 
-### Error Handling
-
-A callback failure with omitted diagnostics or an empty `ErrorObject` retains an
-empty error object in SDK-facing operation state, in both memory and filesystem
-stores. Detailed callback-failure history preserves `Error.Payload: {}` with
-`Truncated: false`; history requested without execution data omits the payload and
-sets `Truncated: true`. Reconstructing operations from detailed history preserves
-that empty object. Missing or null errors remain `None` when decoded. Present
-diagnostic fields remain intact, including explicit empty strings and empty
-stack-trace lists. The callback still fails and raises the existing
-`CallbackExternalError`, including its default message when diagnostics are absent.
-Plugin operation information omits wholly empty diagnostics without changing the
-stored error. Failed step, child-context, and invoke replay use their existing
-default exception message when the stored error has no fields. Timeout history
-retains the same data-inclusion rules.
-
-The testing framework implements AWS-compliant error responses that match the exact format expected by boto3 and AWS services. For detailed information about error response formats, exception types, and troubleshooting, see:
-
-- [Error Response Documentation](docs/error-responses.md)
-
-Key features:
-- **AWS-compliant JSON format**: Matches boto3 expectations exactly
-- **Smithy model compliance**: Field names follow AWS Smithy definitions  
-- **HTTP status code mapping**: Standard AWS service status codes
-- **Boto3 compatibility**: Seamless integration with boto3 error handling
-
-## Developers
-Please see [CONTRIBUTING.md](CONTRIBUTING.md). It contains the testing guide, sample commands and instructions
-for how to contribute to this package.
-
-tldr; use `hatch` and it will manage virtual envs and dependencies for you, so you don't have to do it manually.
+- [Testing guide](https://docs.aws.amazon.com/durable-execution/testing/) in the AWS Durable Execution documentation.
+- [docs/architecture.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-testing/docs/architecture.md): the components, the worker model, the checkpoint flow, and a map of the code.
+- [docs/error-responses.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-testing/docs/error-responses.md): error formats, and how callback failures without diagnostics are stored.
+- [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing).
+- [Contributing guide](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/CONTRIBUTING.md): the test commands. The repo uses `hatch` to manage virtual environments.
 
 ## License
 
