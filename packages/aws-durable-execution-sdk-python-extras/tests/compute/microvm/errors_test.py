@@ -106,4 +106,7 @@ def test_registers_each_class_with_the_sdk(error_class: type[MicrovmError]) -> N
     )
 
     assert type(rebuilt) is error_class
+    # Replay rebuilds the error from its checkpointed type. So a caller that
+    # catches ComputeError catches it on replay too.
+    assert isinstance(rebuilt, ComputeError)
     assert (rebuilt.message, rebuilt.data, rebuilt.stack_trace) == ("m", "d", ["s"])
