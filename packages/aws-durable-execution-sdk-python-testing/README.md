@@ -12,6 +12,9 @@ Test Python durable functions locally, before you deploy them.
 pip install aws-durable-execution-sdk-python-testing
 ```
 
+Requires Core SDK 3.0.2 or later, which preserves empty errors when saved
+execution state is reloaded.
+
 ## Quick start
 
 ```python
