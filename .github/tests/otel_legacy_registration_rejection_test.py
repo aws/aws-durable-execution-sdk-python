@@ -1,4 +1,8 @@
-"""Verify the factory migration boundary against a real installed OTel 1 wheel."""
+"""Verify the factory migration boundary against a real installed OTel 1 wheel.
+
+Run with ``hatch run test-wheel-otel-legacy:test``. Its installer verifies the
+current core artifact; OTel 1.0.0 is the fixed legacy compatibility fixture.
+"""
 
 from importlib.metadata import version
 from pathlib import Path
@@ -30,7 +34,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 def test_installed_legacy_registration_fails_before_invocation(
     monkeypatch: pytest.MonkeyPatch, view, name: str, registration: str
 ) -> None:
-    assert version("aws-durable-execution-sdk-python") == "3.1.0"
     assert version("aws-durable-execution-sdk-python-otel") == "1.0.0"
     assert "site-packages" in Path(core_execution.__file__).resolve().parts
     assert "site-packages" in Path(installed_otel.__file__).resolve().parts

@@ -1,10 +1,13 @@
-"""Exercise real installed version pairs through the public durable handler."""
+"""Exercise installed wheels through the public durable handler.
+
+Run with ``hatch run test-wheel-otel:test``. Its installer selects the current
+versions from __about__.py and verifies wheel hashes and installed source bytes.
+"""
 
 from __future__ import annotations
 
 import contextvars
 from datetime import UTC, datetime
-from importlib.metadata import version
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -28,7 +31,6 @@ from opentelemetry import baggage, context, trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from packaging.version import Version
 
 
 class NoNetworkClient:
@@ -42,8 +44,6 @@ class NoNetworkClient:
 @pytest.mark.parametrize("order", ["alone", "baggage-first", "baggage-last"])
 @pytest.mark.parametrize("ambient_present", [False, True])
 def test_installed_factory_pair_preserves_worker_context(view, order, ambient_present):
-    assert Version(version("aws-durable-execution-sdk-python")) == Version("3.1.0")
-    assert version("aws-durable-execution-sdk-python-otel") == "2.1.0"
     assert "site-packages" in Path(core_execution.__file__).resolve().parts
     import aws_durable_execution_sdk_python_otel as installed_otel
 
