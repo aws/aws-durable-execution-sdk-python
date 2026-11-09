@@ -23,6 +23,6 @@ def test_core_dependency_requires_empty_error_preservation(
     core = requirements["aws-durable-execution-sdk-python"]
 
     # These are fixed compatibility fixtures, not the current release versions.
-    # Core 3.0.1 loses empty errors on reload; Core 3.1.0 first preserves them.
+    # Core 3.0.1 loses empty errors on reload; Core 3.0.2 first preserves them.
     assert not core.specifier.contains("3.0.1")
-    assert core.specifier.contains("3.1.0")
+    assert core.specifier.contains("3.0.2")
