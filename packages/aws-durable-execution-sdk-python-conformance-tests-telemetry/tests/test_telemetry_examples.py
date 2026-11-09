@@ -7,7 +7,7 @@ The conformance runner reads requirement mappings from
 ``TestingMetadata.TestDescription``. SAM builds each function through
 ``src/Makefile``. A renamed handler or a missing build target fails only when a
 cloud deployment runs. So these tests pin that wiring locally.
-The module also runs both handlers through ``DurableFunctionTestRunner`` and checks
+The module also runs each handler through ``DurableFunctionTestRunner`` and checks
 the exported record.
 """
 
@@ -34,13 +34,14 @@ TEMPLATE_PATH = PKG_DIR / "template.yaml"
 
 SDK_REPOSITORY_URL = "git+https://github.com/aws/aws-durable-execution-sdk-python.git"
 EXPECTED_MODULES: frozenset[str] = frozenset(
-    {"telemetry_1_success", "telemetry_2_failure"}
+    {"telemetry_1_success", "telemetry_2_failure", "telemetry_3_result_select"}
 )
 # Logical ID -> requirement ID. The function name suffix must equal the
 # requirement ID, so the runner can match the deployed function to its test.
 EXPECTED_FUNCTIONS: dict[str, str] = {
     "Telemetry1Success": "telemetry-1",
     "Telemetry2Failure": "telemetry-2",
+    "Telemetry3ResultSelect": "telemetry-3",
 }
 
 
@@ -318,3 +319,34 @@ def test_telemetry_2_handler_fails_with_payment_failed_after_one_attempt(
     assert charge["failedCount"] == 1
     assert charge["maxAttempt"] == 1
     assert charge["error"]["message"] == "card declined"
+
+
+def test_telemetry_3_handler_exports_only_the_selected_result_key(
+    logs_client: FakeLogsClient,
+) -> None:
+    """telemetry-3 pins the three-key execution result and the one-key record result."""
+    module = load_handler_module("telemetry_3_result_select")
+
+    with DurableFunctionTestRunner(
+        handler=module.handler, execution_timeout=15
+    ) as runner:
+        result = runner.run(input='{"userId": "u-123"}')
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.result is not None
+    assert json.loads(result.result) == {
+        "userId": "u-123",
+        "email": "test@example.com",
+        "token": "tok-456",
+    }
+    assert len(logs_client.put_log_events_calls) == 1
+    assert logs_client.put_log_events_calls[0]["logGroupName"] == LOG_GROUP_NAME
+    record = logs_client.records()[0]
+    assert record["status"] == "SUCCEEDED"
+    assert "input" not in record
+    assert "output" not in record
+    fetch_user = record["operationsByName"]["fetch-user"]
+    assert fetch_user["type"] == "STEP"
+    assert fetch_user["status"] == "SUCCEEDED"
+    assert fetch_user["count"] == 1
+    assert fetch_user["result"] == {"userId": "u-123"}
