@@ -16,7 +16,10 @@ import sys
 import threading
 import tomllib
 from datetime import UTC, datetime
+from importlib.metadata import entry_points
 from pathlib import Path
+from typing import Literal, assert_type, cast
+from unittest.mock import patch
 
 import pytest
 from aws_durable_execution_sdk_python.plugin import (
@@ -26,6 +29,7 @@ from aws_durable_execution_sdk_python.plugin import (
 from opentelemetry.sdk.trace import Tracer as SdkTracer
 from opentelemetry.sdk.trace import TracerProvider
 
+from aws_durable_execution_sdk_python_otel import create_otel_plugin_factory
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
 )
@@ -188,6 +192,99 @@ def test_declared_entry_points_resolve_to_factories_that_build_plugins() -> None
         assert callable(create_plugin)
         assert not isinstance(factory, type)
         assert isinstance(create_plugin(_invocation_start_info()), expected[name])
+
+
+def test_default_factory_type_is_execution() -> None:
+    factory = assert_type(create_otel_plugin_factory(), ExecutionOtelPluginFactory)
+    assert type(factory) is ExecutionOtelPluginFactory
+    assert factory.config is None
+
+
+def test_explicit_mode_return_types() -> None:
+    execution = assert_type(
+        create_otel_plugin_factory(mode="execution"), ExecutionOtelPluginFactory
+    )
+    invocation = assert_type(
+        create_otel_plugin_factory(mode="invocation"), InvocationOtelPluginFactory
+    )
+    assert type(execution) is ExecutionOtelPluginFactory
+    assert type(invocation) is InvocationOtelPluginFactory
+
+
+@pytest.mark.parametrize("mode", ["execution", "invocation"])
+@pytest.mark.parametrize("custom_provider", [False, True])
+def test_factory_preserves_configuration_and_registration(
+    mode: Literal["execution", "invocation"], custom_provider: bool
+) -> None:
+    provider = TracerProvider() if custom_provider else None
+    config = OtelPluginConfig(
+        tracer_provider=provider,
+        context_extractor=lambda _: None,
+        instrument_name="custom-scope",
+        workflow_span_name="CustomWorkflow",
+        enrich_logger=False,
+    )
+    try:
+        with patch(
+            "opentelemetry.trace.get_tracer_provider",
+            side_effect=AssertionError("factory selection must not resolve a provider"),
+        ):
+            factory = create_otel_plugin_factory(config, mode=mode)
+        expected = (
+            ExecutionOtelPluginFactory
+            if mode == "execution"
+            else InvocationOtelPluginFactory
+        )
+        assert type(factory) is expected
+        assert factory.config is config
+        assert factory.__durable_registration_api__ == 1
+        # Assert the literal. Comparing the instance attribute to its own
+        # class attribute holds for any value, so it would not catch a wrong
+        # group name. Both views share one group, which is what makes them
+        # mutually exclusive.
+        assert factory.exclusive_group == "aws-durable-execution-otel-view"
+    finally:
+        if provider is not None:
+            provider.shutdown()
+
+
+@pytest.mark.parametrize("mode", [None, "", "EXECUTION", "unknown", 0, False])
+def test_invalid_modes_are_rejected(mode: object) -> None:
+    with pytest.raises(ValueError) as error:
+        create_otel_plugin_factory(mode=cast(Literal["execution", "invocation"], mode))
+    assert str(error.value) == (
+        f"mode must be 'execution' or 'invocation', got {mode!r}"
+    )
+
+
+def test_repeated_calls_are_not_memoized() -> None:
+    """Two selector calls are two objects, which is why only one may be registered."""
+    assert create_otel_plugin_factory() is not create_otel_plugin_factory()
+    assert create_otel_plugin_factory(
+        mode="invocation"
+    ) is not create_otel_plugin_factory(mode="invocation")
+    assert create_otel_plugin_factory() is not EXECUTION_OTEL_PLUGIN_FACTORY
+
+
+def test_runtime_mode_string_selects_a_view() -> None:
+    """A mode read from configuration is a plain str, not a Literal."""
+    configured: str = "invocation"
+    assert (
+        type(create_otel_plugin_factory(mode=configured)) is InvocationOtelPluginFactory
+    )
+
+
+def test_installed_entry_points_preserve_alias_identity() -> None:
+    installed = {
+        entry.name: entry.load()
+        for entry in entry_points(group=PLUGIN_ENTRY_POINT_GROUP)
+        if entry.name in {"otel", "otel-execution", "otel-invocation"}
+    }
+    assert installed == {
+        "otel": EXECUTION_OTEL_PLUGIN_FACTORY,
+        "otel-execution": EXECUTION_OTEL_PLUGIN_FACTORY,
+        "otel-invocation": INVOCATION_OTEL_PLUGIN_FACTORY,
+    }
 
 
 # -- concurrent first invocations sharing one cached tracer --------------------
