@@ -152,7 +152,7 @@ class MicrovmBaseConfig:
     A ``ResourceNotFoundException`` from ``GetMicrovm`` or
     ``CreateMicrovmAuthToken`` is the exception. It means that the
     MicroVM no longer exists. So the operation raises ``MicrovmStateError``
-    of ``aws_durable_execution_sdk_python_extras.microvm.lifecycle``
+    of ``aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle``
     instead, and the strategy receives that error. Its ``__cause__`` is the
     ``ClientError``, and its message ends with the request ID.
     """

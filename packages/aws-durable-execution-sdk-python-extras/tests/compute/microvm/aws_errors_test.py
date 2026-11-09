@@ -16,17 +16,17 @@ from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.exceptions import ClientError
 
-from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.aws_errors import (
     add_request_id,
     decide_on_original_error,
     request_id_sentence,
     with_request_id,
 )
-from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle import (
     MicrovmStateError,
     microvm_not_found,
 )
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     SendJobOptions,
     send_job,
 )

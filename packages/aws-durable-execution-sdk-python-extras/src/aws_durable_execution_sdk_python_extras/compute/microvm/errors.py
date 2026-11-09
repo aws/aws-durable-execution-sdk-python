@@ -33,12 +33,13 @@ from __future__ import annotations
 
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
-    DurableOperationError,
     register_operation_error,
 )
 
+from aws_durable_execution_sdk_python_extras.compute.errors import ComputeError
 
-class MicrovmError(DurableOperationError):
+
+class MicrovmError(ComputeError):
     """The base class of every MicroVM failure.
 
     ``message`` names the operation and keeps the underlying message.

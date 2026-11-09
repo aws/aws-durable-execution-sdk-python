@@ -14,7 +14,7 @@ from aws_durable_execution_sdk_python_microvm_worker import (
     RunHookRequest,
 )
 
-from aws_durable_execution_sdk_python_extras.microvm.job import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
     MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     JobRequest,

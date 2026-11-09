@@ -40,7 +40,7 @@ from botocore.credentials import CredentialProvider, RefreshableCredentials
 from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmConfig,
     MicrovmDeliveryError,
     MicrovmError,
@@ -53,7 +53,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     microvm,
     microvm_session,
 )
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     operation as operation_module,
 )
 
@@ -65,9 +65,7 @@ REMOVED = (
 )
 DELIVERY = 'MicroVM "job": the job could not be delivered: '
 LAUNCH_FAILED = 'MicroVM "job": the launch failed: '
-STATE_ERROR = (
-    "aws_durable_execution_sdk_python_extras.microvm.lifecycle.MicrovmStateError"
-)
+STATE_ERROR = "aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle.MicrovmStateError"
 GET_DENIED = (
     "MicroVM mvm-1 gave a sign that it does not run. GetMicrovm was denied, so "
     "the operation cannot check its state. The function's execution role needs "
@@ -504,7 +502,7 @@ SCENARIOS: dict[str, Scenario] = {
         prefix=DELIVERY,
         step="job.request",
         step_error_type=(
-            "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
+            "aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle."
             "MicrovmPermissionDeniedError"
         ),
         step_message=(GET_DENIED, f"{GET_DENIED} GetMicrovm request ID: req-1."),

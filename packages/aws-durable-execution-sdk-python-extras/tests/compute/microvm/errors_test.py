@@ -12,7 +12,9 @@ from aws_durable_execution_sdk_python.exceptions import (
 )
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras import compute
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
+    ComputeError,
     MicrovmDeliveryError,
     MicrovmError,
     MicrovmJobFailedError,
@@ -70,8 +72,10 @@ def test_wraps_another_error_type_in_a_plain_microvm_error() -> None:
     assert rebuilt.error_type == "RuntimeError"
 
 
-def test_every_microvm_error_is_a_durable_operation_error() -> None:
-    assert issubclass(MicrovmError, DurableOperationError)
+def test_every_microvm_error_is_a_compute_error() -> None:
+    assert issubclass(ComputeError, DurableOperationError)
+    assert issubclass(MicrovmError, ComputeError)
+    assert ComputeError is compute.ComputeError
     for error_class in (
         MicrovmLaunchError,
         MicrovmDeliveryError,

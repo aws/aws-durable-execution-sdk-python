@@ -19,7 +19,7 @@ from botocore.exceptions import (
     SSLError,
 )
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmEndpointUnavailableError,
     MicrovmRequestRejectedError,
     MicrovmRequestUnauthorizedError,

@@ -5,10 +5,11 @@
 
 This module is experimental. Its API can change in any release.
 
-The exports match ``@aws/durable-execution-sdk-js-extras/microvm``.
+The exports match ``@aws/durable-execution-sdk-js-extras/compute/microvm``.
 """
 
-from aws_durable_execution_sdk_python_extras.microvm.config import (
+from aws_durable_execution_sdk_python_extras.compute.errors import ComputeError
+from aws_durable_execution_sdk_python_extras.compute.microvm.config import (
     MAX_MICROVM_DURATION_SECONDS,
     MicrovmBaseConfig,
     MicrovmConfig,
@@ -16,7 +17,7 @@ from aws_durable_execution_sdk_python_extras.microvm.config import (
     MicrovmRequestConfig,
     MicrovmSessionConfig,
 )
-from aws_durable_execution_sdk_python_extras.microvm.errors import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.errors import (
     MicrovmDeliveryError,
     MicrovmError,
     MicrovmJobFailedError,
@@ -24,22 +25,22 @@ from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmNotRunningError,
     MicrovmTimeoutError,
 )
-from aws_durable_execution_sdk_python_extras.microvm.job import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
     MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
 )
-from aws_durable_execution_sdk_python_extras.microvm.operation import microvm
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.operation import microvm
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     DEFAULT_MICROVM_JOB_PATH,
     DEFAULT_MICROVM_PORT,
     MicrovmEndpointUnavailableError,
     MicrovmRequestRejectedError,
     MicrovmRequestUnauthorizedError,
 )
-from aws_durable_execution_sdk_python_extras.microvm.retry import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.retry import (
     default_microvm_retry_strategy,
 )
-from aws_durable_execution_sdk_python_extras.microvm.session import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.session import (
     DEFAULT_AUTO_SUSPEND_IDLE_SECONDS,
     MicrovmSession,
     microvm_session,
@@ -48,6 +49,7 @@ from aws_durable_execution_sdk_python_extras.microvm.session import (
 
 __all__ = [
     "DEFAULT_AUTO_SUSPEND_IDLE_SECONDS",
+    "ComputeError",
     "DEFAULT_MICROVM_JOB_PATH",
     "DEFAULT_MICROVM_PORT",
     "MAX_JOB_INPUT_BYTES",

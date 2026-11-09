@@ -43,7 +43,7 @@ from botocore.exceptions import ClientError, ConnectionClosedError
 from botocore.retries.standard import ExponentialBackoff
 from botocore.stub import ANY, Stubber
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     DEFAULT_MICROVM_JOB_PATH,
     MAX_JOB_INPUT_BYTES,
     MicrovmError,
@@ -56,7 +56,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     microvm_session,
     operation,
 )
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     INVOCATION_RESERVE_SECONDS,
 )
 
@@ -2389,7 +2389,7 @@ def test_fails_at_once_when_the_state_check_is_denied(
     ).error
     assert step_error is not None
     assert step_error.type == (
-        "aws_durable_execution_sdk_python_extras.microvm.lifecycle."
+        "aws_durable_execution_sdk_python_extras.compute.microvm.lifecycle."
         "MicrovmPermissionDeniedError"
     )
     assert len(client.requests("get_microvm")) == 1

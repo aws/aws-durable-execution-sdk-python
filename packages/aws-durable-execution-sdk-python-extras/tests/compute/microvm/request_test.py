@@ -16,14 +16,14 @@ from typing import Any
 import pytest
 from aws_durable_execution_sdk_python_microvm_worker import MICROVM_JOB_PATH
 
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     DEFAULT_MICROVM_JOB_PATH,
     MicrovmEndpointUnavailableError,
     MicrovmRequestRejectedError,
     MicrovmRequestUnauthorizedError,
     request,
 )
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     SendJobOptions,
     call_before_deadline,
     send_job,

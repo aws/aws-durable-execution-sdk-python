@@ -10,7 +10,7 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.exceptions import ClientError, HTTPClientError
 from botocore.exceptions import ConnectionError as BotocoreConnectionError
 
-from aws_durable_execution_sdk_python_extras.microvm.request import (
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     MicrovmEndpointUnavailableError,
     MicrovmRequestUnauthorizedError,
 )
