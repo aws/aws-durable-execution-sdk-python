@@ -27,7 +27,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, ConnectionClosedError, NoCredentialsError
 from botocore.retries.standard import ExponentialBackoff
 
-from aws_durable_execution_sdk_python_microvm_worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
     HOOK_PATH_PREFIX,
     MicrovmJobContext,
     MicrovmTerminatedError,
@@ -35,7 +35,9 @@ from aws_durable_execution_sdk_python_microvm_worker import (
     MicrovmWorkerListener,
     start_microvm_worker,
 )
-from aws_durable_execution_sdk_python_microvm_worker import worker as worker_module
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
+    worker as worker_module,
+)
 
 
 WAIT = 10.0
@@ -178,7 +180,7 @@ def reaches_worker(worker: MicrovmWorker) -> bool:
         return False
     finally:
         connection.close()
-    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+    return server.startswith("aws-durable-execution-sdk-python-compute-worker")
 
 
 def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:

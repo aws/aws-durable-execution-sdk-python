@@ -18,7 +18,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
 
-from aws_durable_execution_sdk_python_microvm_worker.logger import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.logger import (
     MicrovmWorkerLogger,
     safe_get,
     safe_logger,

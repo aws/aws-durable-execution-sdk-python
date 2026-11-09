@@ -1,6 +1,8 @@
-# AWS Durable Execution SDK for Python: MicroVM worker
+# AWS Durable Execution SDK for Python: compute worker
 
 > This package is experimental. Its API can change in any release.
+
+The compute worker runs jobs from durable functions on compute that is defined outside the durable function. Each compute type has its own subpackage. Today the package has one subpackage: `aws_durable_execution_sdk_python_compute_worker.microvm`, the worker for AWS Lambda MicroVMs. The rest of this README describes the MicroVM worker.
 
 Run jobs from a durable function inside an AWS Lambda MicroVM, and report each job's result to the durable function.
 
@@ -9,7 +11,7 @@ The worker runs in the MicroVM image, not in the durable function. It does not d
 ## Install
 
 ```console
-pip install aws-durable-execution-sdk-python-microvm-worker
+pip install aws-durable-execution-sdk-python-compute-worker
 ```
 
 ## Quick start
@@ -17,7 +19,7 @@ pip install aws-durable-execution-sdk-python-microvm-worker
 ```python
 import logging
 
-from aws_durable_execution_sdk_python_microvm_worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
     MicrovmJobContext,
     start_microvm_worker,
 )
@@ -42,7 +44,7 @@ The handler's return value becomes the durable function's result. An exception f
 ### Serve named routes
 
 ```python
-from aws_durable_execution_sdk_python_microvm_worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
     MicrovmJobContext,
     start_microvm_worker,
 )
@@ -73,7 +75,7 @@ The durable function sends a job to a route with `MicrovmRequestConfig(path=...)
 ```python
 import subprocess
 
-from aws_durable_execution_sdk_python_microvm_worker import MicrovmJobContext
+from aws_durable_execution_sdk_python_compute_worker.microvm import MicrovmJobContext
 
 
 def run_build(job_input: dict, context: MicrovmJobContext) -> dict:
@@ -91,7 +93,7 @@ A handler must be a plain function. An `async def` handler raises `TypeError`. C
 ```python
 import asyncio
 
-from aws_durable_execution_sdk_python_microvm_worker import MicrovmJobContext
+from aws_durable_execution_sdk_python_compute_worker.microvm import MicrovmJobContext
 
 
 async def build(job_input: dict) -> dict:
@@ -149,7 +151,7 @@ With `suspend_after`, the durable function suspends the MicroVM itself. The work
 
 ### Logging
 
-The worker logs to the standard library logger `aws_durable_execution_sdk_python_microvm_worker`. Pass `logger=` to replace it. Configure `logging` in the image to see its INFO lines.
+The worker logs to the standard library logger `aws_durable_execution_sdk_python_compute_worker.microvm`. Pass `logger=` to replace it. Configure `logging` in the image to see its INFO lines.
 
 ### Permissions
 
@@ -161,9 +163,9 @@ The worker needs boto3 1.43.35 or later.
 
 ## Reference
 
-- [docs/worker.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-microvm-worker/docs/worker.md): the request flow, the lifecycle hooks, idle suspend outcomes, the job documents, reporting, heartbeats, logging fields, and best practices.
+- [docs/worker.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-compute-worker/docs/worker.md): the request flow, the lifecycle hooks, idle suspend outcomes, the job documents, reporting, heartbeats, logging fields, and best practices.
 - [extras](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras): the `microvm` and `microvm_session` operations that send jobs.
-- [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-microvm-worker/src/aws_durable_execution_sdk_python_microvm_worker): lower-level building blocks such as `MicrovmWorkerListener` and `CallbackReporter`.
+- [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-compute-worker/src/aws_durable_execution_sdk_python_compute_worker/microvm): lower-level building blocks such as `MicrovmWorkerListener` and `CallbackReporter`.
 
 ## License
 

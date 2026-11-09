@@ -16,8 +16,8 @@ import pytest
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from botocore.stub import Stubber
 
-from aws_durable_execution_sdk_python_microvm_worker import callback_reporter
-from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import callback_reporter
+from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     CLOSED_CALLBACK_CODE,
     MAX_CALLBACK_RESULT_BYTES,
     CallbackReporter,

@@ -4,8 +4,8 @@
 """The job document that the operation sends to the MicroVM.
 
 The worker in the MicroVM reads the same document in every SDK language. The
-Python worker in ``aws-durable-execution-sdk-python-microvm-worker`` and the
-JavaScript worker in ``@aws/durable-execution-sdk-js-microvm-worker`` parse
+Python worker in ``aws-durable-execution-sdk-python-compute-worker`` and the
+JavaScript worker in ``@aws/durable-execution-sdk-js-compute-worker`` parse
 it. A change to the document must be made in every language.
 """
 

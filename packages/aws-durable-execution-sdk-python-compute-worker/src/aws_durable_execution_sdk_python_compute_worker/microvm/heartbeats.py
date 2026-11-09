@@ -14,7 +14,7 @@ import hashlib
 import threading
 from collections.abc import Callable
 
-from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     CLOSED_CALLBACK_CODE,
     CallbackReporter,
     CancelScope,
@@ -22,12 +22,14 @@ from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
     is_permanent_error,
     is_terminal_callback_error,
 )
-from aws_durable_execution_sdk_python_microvm_worker.logger import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.logger import (
     MicrovmWorkerLogger,
     describe,
     safe_logger,
 )
-from aws_durable_execution_sdk_python_microvm_worker.payload import is_finite_number
+from aws_durable_execution_sdk_python_compute_worker.microvm.payload import (
+    is_finite_number,
+)
 
 
 MAX_HEARTBEAT_INTERVAL_SECONDS = 15 * 60.0

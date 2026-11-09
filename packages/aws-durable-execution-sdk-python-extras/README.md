@@ -37,7 +37,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 `job_input` and `config` are keyword-only. Inside a child context or a `map` item, pass that context as the first argument.
 
-The image runs the [MicroVM worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-microvm-worker). The worker receives the job and reports its result.
+The image runs the [MicroVM worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-compute-worker). The worker receives the job and reports its result.
 
 ## Common uses
 
@@ -224,7 +224,7 @@ The MicroVM's execution role needs `lambda:SendDurableExecutionCallbackSuccess`,
 ## Reference
 
 - [docs/microvm.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extras/docs/microvm.md): job delivery, the durable operations each call records, all errors, the retry tiers, the state check, every permission, and best practices.
-- [MicroVM worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-microvm-worker): the code that runs in the MicroVM.
+- [MicroVM worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-compute-worker): the code that runs in the MicroVM.
 - [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras/compute/microvm): config fields and docstrings.
 - [`@aws/durable-execution-sdk-js-extras`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-extras): the JavaScript counterpart.
 - [Lambda MicroVMs guide](https://docs.aws.amazon.com/lambda/latest/dg/lambda-microvms-guide.html).

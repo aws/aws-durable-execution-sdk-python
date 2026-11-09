@@ -11,8 +11,8 @@ extra, because the public ``heartbeat()`` signature needs them, and Python
 has no ``AbortSignal``.
 """
 
-from aws_durable_execution_sdk_python_microvm_worker.__about__ import __version__
-from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+from aws_durable_execution_sdk_python_compute_worker.__about__ import __version__
+from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     MAX_CALLBACK_RESULT_BYTES,
     CallbackReporter,
     CallCancelledError,
@@ -21,10 +21,10 @@ from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
     ResultTooLargeError,
     is_terminal_callback_error,
 )
-from aws_durable_execution_sdk_python_microvm_worker.logger import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.logger import (
     MicrovmWorkerLogger,
 )
-from aws_durable_execution_sdk_python_microvm_worker.payload import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.payload import (
     SUPPORTED_PAYLOAD_VERSION,
     InvalidRunHookPayloadError,
     MicrovmJobDocument,
@@ -32,7 +32,7 @@ from aws_durable_execution_sdk_python_microvm_worker.payload import (
     MicrovmRunHookPayload,
     RunHookRequest,
 )
-from aws_durable_execution_sdk_python_microvm_worker.worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.worker import (
     HOOK_PATH_PREFIX,
     MICROVM_JOB_PATH,
     MicrovmJobContext,

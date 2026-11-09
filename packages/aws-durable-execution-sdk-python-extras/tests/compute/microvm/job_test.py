@@ -9,7 +9,7 @@ import json
 import math
 
 import pytest
-from aws_durable_execution_sdk_python_microvm_worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
     MicrovmJobRequest,
     RunHookRequest,
 )

@@ -30,7 +30,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 The first argument is the context that the call runs in. Inside a child context or a `map` item, pass that context, so the operation's steps belong to it. `job_input` and `config` are keyword-only. A job can be a string, and so is the name. So positional arguments in the wrong order would pass validation and run the wrong job.
 
-The code in the MicroVM receives the job and reports its result. The worker package [`aws-durable-execution-sdk-python-microvm-worker`](../../aws-durable-execution-sdk-python-microvm-worker) does this, and so does the JavaScript worker. The job document is the same in every SDK language.
+The code in the MicroVM receives the job and reports its result. The worker package [`aws-durable-execution-sdk-python-compute-worker`](../../aws-durable-execution-sdk-python-compute-worker) does this, and so does the JavaScript worker. The job document is the same in every SDK language.
 
 ### How the job reaches the MicroVM
 
@@ -297,7 +297,7 @@ Suspending is off by default, because it needs more settings and changes what th
 - With `auto_suspend_on_idle`, the MicroVM's role needs `lambda:SuspendMicrovm` on the image. That permission lets code in any MicroVM of the image suspend any other. So use one image per trust boundary.
 - Background processes that an earlier job started stop while the MicroVM is suspended. The worker counts only its running jobs.
 
-The worker must support `auto_suspend_on_idle`. The JavaScript worker [`@aws/durable-execution-sdk-js-microvm-worker`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-microvm-worker) and the Python worker [`aws-durable-execution-sdk-python-microvm-worker`](../../aws-durable-execution-sdk-python-microvm-worker) both do. Enable the `suspend` and `resume` hooks in the image. The worker then refuses jobs while the MicroVM freezes, and accepts them again as soon as it resumes. Without the `resume` hook, the first job after a resume can wait a little over 30 seconds, until the worker's refusal ends and the request step delivers again.
+The worker must support `auto_suspend_on_idle`. The JavaScript worker [`@aws/durable-execution-sdk-js-compute-worker`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-compute-worker) and the Python worker [`aws-durable-execution-sdk-python-compute-worker`](../../aws-durable-execution-sdk-python-compute-worker) both do. Enable the `suspend` and `resume` hooks in the image. The worker then refuses jobs while the MicroVM freezes, and accepts them again as soon as it resumes. Without the `resume` hook, the first job after a resume can wait a little over 30 seconds, until the worker's refusal ends and the request step delivers again.
 
 ### Suspending after a job
 
@@ -419,7 +419,7 @@ The MicroVM operations handle the network, the service, and the worker lifecycle
 
 ### Job handlers
 
-1. Follow [Best practices for job handlers](../../aws-durable-execution-sdk-python-microvm-worker/docs/worker.md#best-practices-for-job-handlers) in the worker README for the code that runs each job in the MicroVM.
+1. Follow [Best practices for job handlers](../../aws-durable-execution-sdk-python-compute-worker/docs/worker.md#best-practices-for-job-handlers) in the worker README for the code that runs each job in the MicroVM.
 2. Make the side effects of a job safe to repeat.
    - The worker ignores a second delivery of a callback ID. It remembers the callback IDs of its last 1,000 finished jobs, and it forgets them when its process restarts.
    - Each `microvm` call and each `vm.invoke` creates a new callback ID. So when your code runs a job again after a failure, the worker runs it again, also in the same MicroVM.

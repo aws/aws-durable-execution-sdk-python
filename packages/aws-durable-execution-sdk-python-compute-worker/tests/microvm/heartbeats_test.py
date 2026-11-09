@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
-from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     CallbackReporter,
 )
-from aws_durable_execution_sdk_python_microvm_worker.heartbeats import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.heartbeats import (
     MAX_HEARTBEAT_INTERVAL_SECONDS,
     MAX_QUICK_HEARTBEAT_RETRIES,
     Heartbeats,

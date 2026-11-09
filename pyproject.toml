@@ -32,7 +32,7 @@ testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
     "packages/aws-durable-execution-sdk-python-extras/tests",
     "packages/aws-durable-execution-sdk-python-telemetry-exporter/tests",
-    "packages/aws-durable-execution-sdk-python-microvm-worker/tests",
+    "packages/aws-durable-execution-sdk-python-compute-worker/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
     "packages/aws-durable-execution-sdk-python-testing/tests",
     "packages/aws-durable-execution-sdk-python-examples/test",
@@ -104,7 +104,7 @@ typecheck = "mypy --install-types --non-interactive packages/aws-durable-executi
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-extras",
-  "packages/aws-durable-execution-sdk-python-microvm-worker",
+  "packages/aws-durable-execution-sdk-python-compute-worker",
   "packages/aws-durable-execution-sdk-python-testing",
 ]
 dependencies = [
@@ -120,8 +120,8 @@ test = "pytest packages/aws-durable-execution-sdk-python-extras/tests {args}"
 cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-extras/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras packages/aws-durable-execution-sdk-python-extras/tests {args}"
 typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras packages/aws-durable-execution-sdk-python-extras/tests"
 
-[tool.hatch.envs.dev-microvm-worker]
-workspace.members = ["packages/aws-durable-execution-sdk-python-microvm-worker"]
+[tool.hatch.envs.dev-compute-worker]
+workspace.members = ["packages/aws-durable-execution-sdk-python-compute-worker"]
 dependencies = [
   "pytest",
   "pytest-cov",
@@ -130,10 +130,10 @@ dependencies = [
   "boto3-stubs[lambda,lambda-microvms]",
 ]
 
-[tool.hatch.envs.dev-microvm-worker.scripts]
-test = "pytest packages/aws-durable-execution-sdk-python-microvm-worker/tests {args}"
-cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-microvm-worker/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-microvm-worker/src/aws_durable_execution_sdk_python_microvm_worker packages/aws-durable-execution-sdk-python-microvm-worker/tests {args}"
-typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-microvm-worker/src/aws_durable_execution_sdk_python_microvm_worker packages/aws-durable-execution-sdk-python-microvm-worker/tests"
+[tool.hatch.envs.dev-compute-worker.scripts]
+test = "pytest packages/aws-durable-execution-sdk-python-compute-worker/tests {args}"
+cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-compute-worker/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-compute-worker/src/aws_durable_execution_sdk_python_compute_worker packages/aws-durable-execution-sdk-python-compute-worker/tests {args}"
+typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-compute-worker/src/aws_durable_execution_sdk_python_compute_worker packages/aws-durable-execution-sdk-python-compute-worker/tests"
 
 [tool.hatch.envs.dev-testing]
 workspace.members = [
@@ -268,7 +268,7 @@ known-first-party = [
   "aws_durable_execution_sdk_python",
   "aws_durable_execution_sdk_python_extras",
   "aws_durable_execution_sdk_python_telemetry_exporter",
-  "aws_durable_execution_sdk_python_microvm_worker",
+  "aws_durable_execution_sdk_python_compute_worker",
   "aws_durable_execution_sdk_python_otel",
   "aws_durable_execution_sdk_python_testing",
 ]

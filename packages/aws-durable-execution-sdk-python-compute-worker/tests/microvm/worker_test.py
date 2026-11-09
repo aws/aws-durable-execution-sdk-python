@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from aws_durable_execution_sdk_python_microvm_worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
     HOOK_PATH_PREFIX,
     MICROVM_JOB_PATH,
     MicrovmJobContext,
@@ -28,7 +28,9 @@ from aws_durable_execution_sdk_python_microvm_worker import (
     MicrovmWorkerListener,
     start_microvm_worker,
 )
-from aws_durable_execution_sdk_python_microvm_worker import worker as worker_module
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
+    worker as worker_module,
+)
 
 
 RUN = f"{HOOK_PATH_PREFIX}run"
@@ -87,7 +89,7 @@ def reaches_worker(worker: MicrovmWorker) -> bool:
         return False
     finally:
         connection.close()
-    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+    return server.startswith("aws-durable-execution-sdk-python-compute-worker")
 
 
 def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:
@@ -575,7 +577,7 @@ def test_creates_a_default_client_per_job_and_closes_it(
         return client
 
     monkeypatch.setattr(
-        "aws_durable_execution_sdk_python_microvm_worker.callback_reporter._create_client",
+        "aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter._create_client",
         create_client,
     )
     worker = start_microvm_worker(handler=lambda job_input, context: "ok", port=0)
@@ -1053,7 +1055,7 @@ def test_names_no_python_version_in_the_server_header(start: Any) -> None:
         "Content-Length: 2\r\n\r\n{}".encode(),
     )
 
-    assert b"Server: aws-durable-execution-sdk-python-microvm-worker\r\n" in answer
+    assert b"Server: aws-durable-execution-sdk-python-compute-worker\r\n" in answer
     assert b"Python/" not in answer
 
 

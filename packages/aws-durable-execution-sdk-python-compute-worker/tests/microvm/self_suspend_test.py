@@ -26,7 +26,7 @@ from botocore.exceptions import (
 )
 from botocore.retries.standard import ExponentialBackoff
 
-from aws_durable_execution_sdk_python_microvm_worker.self_suspend import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.self_suspend import (
     SUSPEND_CALL_TIMEOUT_SECONDS,
     SuspendDeadlineError,
     SuspendOutcome,

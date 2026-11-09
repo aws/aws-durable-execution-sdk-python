@@ -70,13 +70,18 @@ JS_BUILD_WORKSPACES = (
     "packages/aws-durable-execution-sdk-js-otel",
     "packages/aws-durable-execution-sdk-js-extras",
     "packages/aws-durable-execution-sdk-js-microvm-worker",
+    "packages/aws-durable-execution-sdk-js-compute-worker",
     "packages/aws-durable-execution-sdk-js-examples",
 )
 # Older JS refs predate these packages; their examples do not need them.
+# The worker package was renamed from microvm-worker to compute-worker. A JS
+# ref has at most one of the two. So both are listed, and the build skips the
+# one that the ref does not have.
 OPTIONAL_JS_BUILD_WORKSPACES = frozenset(
     {
         "packages/aws-durable-execution-sdk-js-extras",
         "packages/aws-durable-execution-sdk-js-microvm-worker",
+        "packages/aws-durable-execution-sdk-js-compute-worker",
     }
 )
 # otel examples export spans to an OpenTelemetry collector. The harness does

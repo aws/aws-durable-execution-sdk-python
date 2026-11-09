@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from aws_durable_execution_sdk_python_microvm_worker.logger import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.logger import (
     DEFAULT_LOGGER_NAME,
     default_logger,
     describe,

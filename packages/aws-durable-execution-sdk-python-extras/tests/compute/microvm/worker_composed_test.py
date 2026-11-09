@@ -36,13 +36,15 @@ from aws_durable_execution_sdk_python.execution import (
     durable_execution,
 )
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
-from aws_durable_execution_sdk_python_microvm_worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
     HOOK_PATH_PREFIX,
     MicrovmJobContext,
     MicrovmWorker,
     start_microvm_worker,
 )
-from aws_durable_execution_sdk_python_microvm_worker import worker as worker_module
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
+    worker as worker_module,
+)
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
 from aws_durable_execution_sdk_python_extras.compute.microvm import (
@@ -114,7 +116,7 @@ def reaches_worker(worker: MicrovmWorker) -> bool:
         return False
     finally:
         connection.close()
-    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+    return server.startswith("aws-durable-execution-sdk-python-compute-worker")
 
 
 def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:

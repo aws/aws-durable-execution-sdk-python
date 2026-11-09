@@ -633,7 +633,7 @@ def test_build_produces_example_workspace_dependencies(
     testing = "packages/aws-durable-execution-sdk-js-testing"
     otel = "packages/aws-durable-execution-sdk-js-otel"
     extras = "packages/aws-durable-execution-sdk-js-extras"
-    worker = "packages/aws-durable-execution-sdk-js-microvm-worker"
+    worker = "packages/aws-durable-execution-sdk-js-compute-worker"
     examples_package = "packages/aws-durable-execution-sdk-js-examples"
     packages = [core, testing, otel, examples_package]
     if has_microvm_packages:

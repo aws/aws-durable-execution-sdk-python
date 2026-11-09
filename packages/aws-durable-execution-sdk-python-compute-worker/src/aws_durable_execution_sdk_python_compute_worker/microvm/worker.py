@@ -27,29 +27,29 @@ from functools import cached_property
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any
 
-from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     CallbackReporter,
     ResultSerializationError,
     ResultTooLargeError,
     is_terminal_callback_error,
 )
-from aws_durable_execution_sdk_python_microvm_worker.heartbeats import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.heartbeats import (
     Heartbeats,
     validate_heartbeat_interval,
 )
-from aws_durable_execution_sdk_python_microvm_worker.logger import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.logger import (
     MicrovmWorkerLogger,
     describe,
     safe_logger,
 )
-from aws_durable_execution_sdk_python_microvm_worker.payload import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.payload import (
     InvalidRunHookPayloadError,
     MicrovmJobDocument,
     MicrovmJobRequest,
     RunHookRequest,
     loads_strict,
 )
-from aws_durable_execution_sdk_python_microvm_worker.self_suspend import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.self_suspend import (
     SUSPEND_CALL_TIMEOUT_SECONDS,
     SUSPEND_GRACE_SECONDS,
     SuspendOutcome,
@@ -2064,7 +2064,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         # The base class names the exact Python version in the Server header.
         # Every caller of the MicroVM endpoint would learn it, and no caller
         # needs it.
-        return "aws-durable-execution-sdk-python-microvm-worker"
+        return "aws-durable-execution-sdk-python-compute-worker"
 
 
 class _Exchange:

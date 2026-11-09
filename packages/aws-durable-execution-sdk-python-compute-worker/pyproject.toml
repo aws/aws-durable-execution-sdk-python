@@ -3,7 +3,7 @@ requires = ["hatchling!=1.32.1,<1.33"]
 build-backend = "hatchling.build"
 
 [project]
-name = "aws-durable-execution-sdk-python-microvm-worker"
+name = "aws-durable-execution-sdk-python-compute-worker"
 dynamic = ["version"]
 description = 'Runs jobs from AWS Lambda durable functions inside an AWS Lambda MicroVM'
 readme = "README.md"
@@ -39,23 +39,23 @@ Source = "https://github.com/aws/aws-durable-execution-sdk-python"
 "../../NOTICE" = "NOTICE"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aws_durable_execution_sdk_python_microvm_worker"]
+packages = ["src/aws_durable_execution_sdk_python_compute_worker"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"../../LICENSE" = "aws_durable_execution_sdk_python_microvm_worker/LICENSE"
-"../../NOTICE" = "aws_durable_execution_sdk_python_microvm_worker/NOTICE"
+"../../LICENSE" = "aws_durable_execution_sdk_python_compute_worker/LICENSE"
+"../../NOTICE" = "aws_durable_execution_sdk_python_compute_worker/NOTICE"
 
 [tool.hatch.version]
-path = "src/aws_durable_execution_sdk_python_microvm_worker/__about__.py"
+path = "src/aws_durable_execution_sdk_python_compute_worker/__about__.py"
 
 [tool.hatch.publish.index]
 disable = true
 
 [tool.coverage.run]
-source_pkgs = ["aws_durable_execution_sdk_python_microvm_worker"]
+source_pkgs = ["aws_durable_execution_sdk_python_compute_worker"]
 branch = true
 parallel = true
-omit = ["src/aws_durable_execution_sdk_python_microvm_worker/__about__.py"]
+omit = ["src/aws_durable_execution_sdk_python_compute_worker/__about__.py"]
 
 [tool.coverage.report]
 exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
@@ -69,7 +69,7 @@ preview = true
 select = ["E4", "E7", "E9", "F", "TID252"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aws_durable_execution_sdk_python_microvm_worker"]
+known-first-party = ["aws_durable_execution_sdk_python_compute_worker"]
 force-single-line = false
 lines-after-imports = 2
 

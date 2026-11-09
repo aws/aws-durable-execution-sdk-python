@@ -44,7 +44,7 @@ DEFAULT_MICROVM_JOB_PATH = "/durable-execution/v1/job"
 
 The worker package serves this path with its ``handler``. So the same handler
 receives a job whether it arrives in the ``run`` hook or over HTTP. The value
-must equal ``MICROVM_JOB_PATH`` in ``aws-durable-execution-sdk-python-microvm-worker``
+must equal ``MICROVM_JOB_PATH`` in ``aws-durable-execution-sdk-python-compute-worker``
 and ``DEFAULT_MICROVM_JOB_PATH`` in the JavaScript SDK.
 """
 
