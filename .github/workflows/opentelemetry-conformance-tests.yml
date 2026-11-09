@@ -52,7 +52,7 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@ca2cd02e1fb0dce34c9d81e361c1556a7e3707ee
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@41e034a23b8d12630a8a2d67b9f02c0477fca22d
     with:
       language: python
       runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
