@@ -64,6 +64,14 @@ EXAMPLES_REL = Path("packages/aws-durable-execution-sdk-js-examples")
 # The examples depend on these local workspaces. The root "npm run build"
 # also builds the telemetry tools and the VS Code extension, which the harness
 # does not need, so the script builds only these, in dependency order.
+#
+# The list holds both names of the worker package, microvm-worker and
+# compute-worker. The harness builds a checkout of any JS ref: main by
+# default, or the js_ref input of the workflow. A ref from before the rename
+# in aws/aws-durable-execution-sdk-js#1204 has only microvm-worker, and the
+# examples of that ref import it. A ref from after the rename has only
+# compute-worker. So the list names both, and the build skips the one that
+# the checkout does not have. See OPTIONAL_JS_BUILD_WORKSPACES.
 JS_BUILD_WORKSPACES = (
     "packages/aws-durable-execution-sdk-js",
     "packages/aws-durable-execution-sdk-js-testing",
@@ -73,10 +81,13 @@ JS_BUILD_WORKSPACES = (
     "packages/aws-durable-execution-sdk-js-compute-worker",
     "packages/aws-durable-execution-sdk-js-examples",
 )
-# Older JS refs predate these packages; their examples do not need them.
-# The worker package was renamed from microvm-worker to compute-worker. A JS
-# ref has at most one of the two. So both are listed, and the build skips the
-# one that the ref does not have.
+# The build skips a workspace in this set when the JS checkout does not have
+# it. Older JS refs predate extras, and their examples do not need it. A JS
+# ref has at most one of the two worker names, because of the rename above.
+# Until aws/aws-durable-execution-sdk-js#1204 merges, JS main still has
+# microvm-worker. So removing microvm-worker now would break the default run
+# against main. After the merge, it stays so that a run with an older js_ref
+# still builds.
 OPTIONAL_JS_BUILD_WORKSPACES = frozenset(
     {
         "packages/aws-durable-execution-sdk-js-extras",
