@@ -12,6 +12,8 @@ This monorepo contains the following packages:
 | `aws-durable-execution-sdk-python-otel` | `packages/aws-durable-execution-sdk-python-otel` | `otel` |
 | `aws-durable-execution-sdk-python-testing` | `packages/aws-durable-execution-sdk-python-testing` | `testing` |
 | `aws-durable-execution-sdk-python-telemetry-exporter` | `packages/aws-durable-execution-sdk-python-telemetry-exporter` | `telemetry-exporter` |
+| `aws-durable-execution-sdk-python-extras` | `packages/aws-durable-execution-sdk-python-extras` | `extras` |
+| `aws-durable-execution-sdk-python-compute-worker` | `packages/aws-durable-execution-sdk-python-compute-worker` | `compute-worker` |
 
 ## Versioning
 
@@ -21,6 +23,8 @@ Each package maintains its own version in its respective `__about__.py` file:
 - OTel: `packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py`
 - Testing: `packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing/__about__.py`
 - Telemetry Exporter: `packages/aws-durable-execution-sdk-python-telemetry-exporter/src/aws_durable_execution_sdk_python_telemetry_exporter/__about__.py`
+- Extras: `packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras/__about__.py`
+- Compute Worker: `packages/aws-durable-execution-sdk-python-compute-worker/src/aws_durable_execution_sdk_python_compute_worker/__about__.py`
 
 Set the release version in the appropriate `__about__.py` file(s) and merge to
 `main` before creating a release. Use a new version for an existing distribution,
@@ -34,6 +38,8 @@ The GitHub `pypi` environment permits deployments only from **tags** matching:
 - `otel-v*`
 - `testing-v*`
 - `telemetry-exporter-v*`
+- `extras-v*`
+- `compute-worker-v*`
 
 Branches, including `main` and temporary publishing branches, are not allowed.
 GitHub checks the workflow run's ref; checking out an allowed tag or a merged
@@ -184,6 +190,8 @@ The tag should be the version of the package being bumped, prepended with a desc
 - **OTel only:** `otel-v<version>` (e.g., `otel-v0.3.0`)
 - **Testing only:** `testing-v<version>` (e.g., `testing-v1.2.1`)
 - **Telemetry Exporter only:** `telemetry-exporter-v<version>` (e.g., `telemetry-exporter-v1.0.0`)
+- **Extras only:** `extras-v<version>` (e.g., `extras-v0.1.0`)
+- **Compute Worker only:** `compute-worker-v<version>` (e.g., `compute-worker-v0.0.1`)
 - **Multiple packages in a single release:** comma-separate the sub-tags (e.g., `sdk-v1.6.0,otel-v0.3.0`)
 
 Examples:
@@ -193,6 +201,8 @@ sdk-v1.6.0
 otel-v0.3.0
 testing-v1.2.1
 telemetry-exporter-v1.0.0
+extras-v0.1.0
+compute-worker-v0.0.1
 sdk-v1.6.0,otel-v0.3.0
 ```
 
@@ -360,7 +370,8 @@ Before publishing a release:
       ruleset
 - [ ] Release notes written with separate sections per package
 - [ ] Tag follows the naming convention (`sdk-vX.Y.Z`, `otel-vX.Y.Z`, `testing-vX.Y.Z`,
-      `telemetry-exporter-vX.Y.Z`, or comma-separated)
+      `telemetry-exporter-vX.Y.Z`, `extras-vX.Y.Z`, `compute-worker-vX.Y.Z`,
+      or comma-separated)
 
 After publishing a release:
 
