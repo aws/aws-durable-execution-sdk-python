@@ -345,12 +345,42 @@ def test_js_ref_and_js_dir_are_exclusive(monkeypatch: pytest.MonkeyPatch) -> Non
     assert run.parse_args([]).js_dir == Path("/tmp/js")
 
 
-@pytest.mark.parametrize("option", ["--test-args", "--jest-args"])
-def test_test_args_are_split(monkeypatch: pytest.MonkeyPatch, option: str) -> None:
+def test_jest_args_are_split(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JS_SDK_DIR", raising=False)
-    args = run.parse_args(["invoke", f"{option}=--reporter=verbose --testTimeout=5000"])
+    args = run.parse_args(["invoke", "--jest-args=--verbose --testTimeout=5000"])
     assert args.patterns == ["invoke"]
-    assert args.test_args == ["--reporter=verbose", "--testTimeout=5000"]
+    assert args.jest_args == ["--verbose", "--testTimeout=5000"]
+
+
+@pytest.mark.parametrize(("runner", "has_flag"), [("jest", True), ("vitest", False)])
+def test_only_jest_gets_the_vm_modules_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str, has_flag: bool
+) -> None:
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096")
+    (tmp_path / "function-name-map.json").write_text("{}")
+    results_file = tmp_path / "results.json"
+    seen: dict[str, Any] = {}
+
+    class FakeProc:
+        pid = 0
+
+        def wait(self) -> int:
+            return 0
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> FakeProc:
+        seen["env"] = kwargs["env"]
+        results_file.write_text("{}")
+        return FakeProc()
+
+    monkeypatch.setattr(run.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(run, "stop_group", lambda proc: None)
+    servers = type("FakeServers", (), {"proxy_url": "http://127.0.0.1:1"})()
+
+    run.run_test_runner(runner, tmp_path, [], servers, tmp_path, results_file, 1, [])
+
+    node_options = seen["env"]["NODE_OPTIONS"]
+    assert node_options.startswith("--max-old-space-size=4096")
+    assert ("--experimental-vm-modules" in node_options) is has_flag
 
 
 def test_runner_is_jest_only_with_the_jest_config(examples: Path) -> None:

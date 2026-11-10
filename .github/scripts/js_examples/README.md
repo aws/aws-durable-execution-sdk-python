@@ -66,7 +66,7 @@ Each command below follows `hatch run dev-testing:js-examples`.
 | Skip the JS build for that checkout | `--js-dir ~/github/aws-durable-execution-sdk-js --no-build` |
 | Force a JS rebuild | `--rebuild` |
 | See runner debug logs | `--log-level DEBUG hello-world` |
-| Pass options to vitest | `invoke --test-args='--reporter=verbose'` |
+| Pass options to vitest | `invoke --jest-args='--reporter=verbose'` |
 | All options | `--help` |
 
 `--js-ref` works only with the cloned JS SDK, so it cannot be combined with
@@ -98,7 +98,7 @@ an earlier run. It also refuses a directory that another run is still using.
 To investigate one example, run it alone with debug logs:
 
 ```sh
-hatch run dev-testing:js-examples --log-level DEBUG --retries 0 --test-args='--reporter=verbose' step/interrupted-no-retry
+hatch run dev-testing:js-examples --log-level DEBUG --retries 0 --jest-args='--reporter=verbose' step/interrupted-no-retry
 ```
 
 Add `--dump-dir /tmp/dump` to also save every history, state and checkpoint
@@ -191,7 +191,7 @@ The JS SDK replaced jest with vitest in aws/aws-durable-execution-sdk-js#1167.
 So the harness picks the test runner from the JS checkout. When the examples
 package has `jest.config.integration.js`, the harness runs jest. Otherwise it
 runs vitest. So `--js-ref` works with a commit from before and after that
-change. `--test-args` go to the runner that the harness picks.
+change. `--jest-args` go to the runner that the harness picks.
 
 ## Harness tests
 

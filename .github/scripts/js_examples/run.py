@@ -1003,15 +1003,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="save every history, state and checkpoint response the tests read here",
     )
     parser.add_argument(
-        "--test-args",
-        # --jest-args is the name from before the JS SDK moved to vitest.
         "--jest-args",
-        dest="test_args",
         type=shlex.split,
         default=[],
         metavar="ARGS",
-        help="extra vitest (or jest, for an older JS ref) arguments, as one"
-        " quoted string, e.g. --test-args='--reporter=verbose'",
+        help="extra test runner arguments, as one quoted string: vitest, or"
+        " jest for an older JS ref, e.g. --jest-args='--reporter=verbose'",
     )
     args = parser.parse_args(argv)
     if args.js_dir and args.js_ref:
@@ -1278,7 +1275,7 @@ def run_session(
             maps_dir,
             out / f"{label}.json",
             args.workers,
-            args.test_args,
+            args.jest_args,
         )
     finally:
         servers.stop()
