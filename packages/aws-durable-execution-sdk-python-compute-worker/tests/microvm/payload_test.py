@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from aws_durable_execution_sdk_python_microvm_worker.payload import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.payload import (
     InvalidRunHookPayloadError,
     MicrovmJobDocument,
     MicrovmJobRequest,

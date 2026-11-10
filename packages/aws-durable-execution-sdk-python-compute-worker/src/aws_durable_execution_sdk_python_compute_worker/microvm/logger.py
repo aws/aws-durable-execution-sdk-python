@@ -12,7 +12,7 @@ from typing import Protocol, TypeVar
 
 T = TypeVar("T")
 
-DEFAULT_LOGGER_NAME = "aws_durable_execution_sdk_python_microvm_worker"
+DEFAULT_LOGGER_NAME = "aws_durable_execution_sdk_python_compute_worker.microvm"
 """The name of the standard library logger that the worker uses by default."""
 
 

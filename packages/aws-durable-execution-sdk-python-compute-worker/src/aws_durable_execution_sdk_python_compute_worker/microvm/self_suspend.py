@@ -24,11 +24,11 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
-from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     TRANSIENT_4XX_CODES,
     error_code,
 )
-from aws_durable_execution_sdk_python_microvm_worker.logger import safe_get
+from aws_durable_execution_sdk_python_compute_worker.microvm.logger import safe_get
 
 
 if TYPE_CHECKING:

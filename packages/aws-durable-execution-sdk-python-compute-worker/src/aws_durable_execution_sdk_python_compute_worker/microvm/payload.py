@@ -11,7 +11,7 @@ The durable function sends a job in one of two ways:
 
 Both carry the same job fields. The contract is the same for every SDK
 language, so a durable function in one language can drive a worker in
-another. The JavaScript worker in ``@aws/durable-execution-sdk-js-microvm-worker``
+another. The JavaScript worker in ``@aws/durable-execution-sdk-js-compute-worker``
 defines the same documents. A change to the contract must be made in every
 language.
 """

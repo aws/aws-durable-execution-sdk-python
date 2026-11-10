@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from aws_durable_execution_sdk_python_microvm_worker import MICROVM_JOB_PATH
+from aws_durable_execution_sdk_python_compute_worker.microvm import MICROVM_JOB_PATH
 
 from aws_durable_execution_sdk_python_extras.compute.microvm import (
     DEFAULT_MICROVM_JOB_PATH,

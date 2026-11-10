@@ -88,7 +88,7 @@ class MicrovmBaseConfig:
 
     The image must enable the ``run`` lifecycle hook. The service then also
     requires the ``ready`` image hook. The worker package
-    ``aws-durable-execution-sdk-python-microvm-worker`` answers both.
+    ``aws-durable-execution-sdk-python-compute-worker`` answers both.
     """
 
     execution_role_arn: str
@@ -323,8 +323,8 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
     not extend the MicroVM's lifetime.
 
     The worker must be a version that supports the setting. The JavaScript
-    worker ``@aws/durable-execution-sdk-js-microvm-worker`` and the Python
-    worker ``aws-durable-execution-sdk-python-microvm-worker`` in this
+    worker ``@aws/durable-execution-sdk-js-compute-worker`` and the Python
+    worker ``aws-durable-execution-sdk-python-compute-worker`` in this
     repository both do.
     """
 
