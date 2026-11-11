@@ -2,7 +2,7 @@
 
 > This package is experimental. Its API can change in any release.
 
-The compute worker runs jobs from durable functions on compute that is defined outside the durable function. Each compute type has its own subpackage. Today the package has one subpackage: `aws_durable_execution_sdk_python_compute_worker.microvm`, the worker for AWS Lambda MicroVMs. The rest of this README describes the MicroVM worker.
+The compute worker runs jobs from durable functions on compute that is defined outside the durable function. Each compute type has its own subpackage: `aws_durable_execution_sdk_python_compute_worker.microvm`, the worker for AWS Lambda MicroVMs, and `aws_durable_execution_sdk_python_compute_worker.agentcore`, the worker for Amazon Bedrock AgentCore Runtime. The rest of this README describes the MicroVM worker, except the section [Run a job in AgentCore Runtime](#run-a-job-in-agentcore-runtime).
 
 Run jobs from a durable function inside an AWS Lambda MicroVM, and report each job's result to the durable function.
 
@@ -160,6 +160,44 @@ The MicroVM's execution role needs `lambda:SendDurableExecutionCallbackSuccess`,
 With `auto_suspend_on_idle`, the role also needs `lambda:SuspendMicrovm` on the MicroVM image. That permission lets a MicroVM suspend any MicroVM of the same image. So use one image per trust boundary.
 
 The worker needs boto3 1.43.35 or later.
+
+## Run a job in AgentCore Runtime
+
+> The `agentcore` subpackage is experimental. Its API can change in any release.
+
+`start_agentcore_worker` serves the [AgentCore Runtime HTTP contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-http-protocol-contract.html) in the agent's container. It needs no dependency beyond this package.
+
+```python
+from aws_durable_execution_sdk_python_compute_worker.agentcore import (
+    AgentcoreJobContext,
+    start_agentcore_worker,
+)
+
+
+def review(job_input: dict, context: AgentcoreJobContext) -> dict:
+    context.logger.info("reviewing", extra={"pr": job_input["pr"]})
+    return {"approved": True, "comments": []}
+
+
+if __name__ == "__main__":
+    start_agentcore_worker(handler=review).wait()
+```
+
+The durable function sends the job with the `agentcore` operation of the [extras](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras#run-a-job-in-agentcore-runtime) package:
+
+```python
+review = agentcore(context, "review", job_input={"pr": 7}, config=AGENT)
+```
+
+The worker listens on `0.0.0.0:8080`, because AgentCore Runtime sends its requests to that port of the container. The container publishes no port. Only AgentCore reaches it, after it has authorized the `InvokeAgentRuntime` caller.
+
+- `POST /invocations` reads the job document, starts the handler in a thread, and answers `{"accepted": true}` at once. A callback ID that the worker already accepted gets the same answer, and the job does not run again. A document that does not match the contract gets HTTP 400.
+- `GET /ping` answers `{"status": "HealthyBusy"}` while a job runs, and `{"status": "Healthy"}` otherwise. `time_of_last_update` holds the Unix time, in seconds, of the worker's start or of the last change of the status. It does not change between pings with the same status.
+- The job thread sends heartbeats when the job sets a heartbeat timeout, and then the success or failure callback.
+
+The agent runtime's idle timeout (`idleRuntimeSessionTimeout`) must be longer than the job's silent periods. The `agentcore` operation does not keep a session across jobs.
+
+The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the durable function's ARN. The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN.
 
 ## Reference
 

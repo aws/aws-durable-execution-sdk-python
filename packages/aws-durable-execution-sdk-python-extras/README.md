@@ -2,7 +2,7 @@
 
 > This package is experimental. Its API can change in any release.
 
-Run jobs from a durable function in AWS Lambda MicroVMs, with the `microvm` and `microvm_session` operations.
+Run jobs from a durable function in AWS Lambda MicroVMs, with the `microvm` and `microvm_session` operations. Run a job in an Amazon Bedrock AgentCore Runtime session with the `agentcore` operation.
 
 ## Install
 
@@ -220,6 +220,65 @@ The function's execution role needs:
 The function's role does not need `lambda:ResumeMicrovm`.
 
 The MicroVM's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the function ARN. With `auto_suspend_on_idle`, it also needs `lambda:SuspendMicrovm` on the image.
+
+## Run a job in AgentCore Runtime
+
+> The `compute.agentcore` module is experimental. Its API can change in any release.
+
+`agentcore` sends one job to a new [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html) session, waits for the result, and stops the session. The function invocation ends while the agent works. So no Lambda compute is billed during the wait.
+
+```python
+import os
+
+from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_extras.compute.agentcore import (
+    AgentcoreConfig,
+    agentcore,
+)
+
+AGENT = AgentcoreConfig(
+    agent_runtime_arn=os.environ["AGENT_RUNTIME_ARN"],
+    qualifier="DEFAULT",
+    timeout=Duration.from_hours(1),
+    heartbeat_timeout=Duration.from_minutes(5),
+)
+
+
+@durable_execution
+def handler(event: dict, context: DurableContext) -> bool:
+    review = agentcore(context, "review", job_input={"pr": event["pr"]}, config=AGENT)
+    return review["approved"]
+```
+
+The agent runtime runs the [AgentCore worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-compute-worker#run-a-job-in-agentcore-runtime):
+
+```python
+from aws_durable_execution_sdk_python_compute_worker.agentcore import (
+    AgentcoreJobContext,
+    start_agentcore_worker,
+)
+
+
+def review(job_input: dict, context: AgentcoreJobContext) -> dict:
+    return {"approved": True, "comments": []}
+
+
+if __name__ == "__main__":
+    start_agentcore_worker(handler=review).wait()
+```
+
+The operation records `review.session`, `review.callback`, `review.request`, and `review.stop` in one child context named `review`. `review.stop` calls `StopRuntimeSession` after success, failure, and timeout alike. A failed stop is logged, and does not hide the job's result or error.
+
+The agent runtime's idle timeout (`idleRuntimeSessionTimeout`) must be longer than the job's silent periods. This operation does not keep a session across jobs.
+
+Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.
+
+Permissions:
+
+- The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN.
+- The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the function ARN.
 
 ## Reference
 
