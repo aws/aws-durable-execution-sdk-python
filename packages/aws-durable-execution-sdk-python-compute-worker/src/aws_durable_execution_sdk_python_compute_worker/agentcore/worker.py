@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import socketserver
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -64,15 +66,37 @@ AGENTCORE_PORT = 8080
 unless the agent runtime's ``protocolConfiguration`` sets another port."""
 
 AGENTCORE_HOST = "0.0.0.0"  # noqa: S104
-"""The address that the worker listens on by default.
+"""The address that the worker listens on inside AgentCore Runtime.
 
-The AgentCore Runtime service contract requires the agent's container to
-listen on ``0.0.0.0:8080``. The container publishes no port. Only the
-AgentCore data plane reaches it, after it has authorized the
-``InvokeAgentRuntime`` caller. So the worker listens on all interfaces of
-the container only because the platform requires it. Tests pass
-``127.0.0.1``.
+The AgentCore Runtime service contract requires the agent to listen on
+``0.0.0.0:8080``. The runtime publishes no port. Only the AgentCore data
+plane reaches it, after it has authorized the ``InvokeAgentRuntime`` caller.
+So the worker listens on all interfaces only inside AgentCore Runtime.
 """
+
+LOCAL_HOST = "127.0.0.1"
+"""The address that the worker listens on outside AgentCore Runtime.
+
+The worker has no authentication. On a laptop or a dev host, a bind on all
+interfaces would let any machine on the network send it a job. So outside
+AgentCore Runtime the worker listens on loopback only.
+"""
+
+RUNTIME_URL_ENV = "AGENTCORE_RUNTIME_URL"
+"""The environment variable that marks the AgentCore Runtime environment.
+
+A live run in a runtime with direct code deployment found this variable
+set, and found no ``/.dockerenv`` file and no ``DOCKER_CONTAINER``
+variable. So the worker uses this variable, not the Docker markers, to
+choose the default host.
+"""
+
+
+def default_host() -> str:
+    """The default host: :data:`AGENTCORE_HOST` when
+    :data:`RUNTIME_URL_ENV` is set, and :data:`LOCAL_HOST` otherwise."""
+    return AGENTCORE_HOST if os.environ.get(RUNTIME_URL_ENV) else LOCAL_HOST
+
 
 INVOCATIONS_PATH = "/invocations"
 """The path of the ``InvokeAgentRuntime`` requests."""
@@ -231,8 +255,11 @@ class _JobRunner:
                 daemon=True,
             ).start()
         except BaseException:
-            # The job never ran. The 500 makes the durable function deliver
-            # it again, so the job must not stay known.
+            # The job never ran. AgentCore returns the 500 to the request
+            # step as an error that the default retry strategy does not
+            # retry. So the operation fails with AgentcoreDeliveryError. The
+            # job must not stay known, so that a new run of the durable
+            # function can deliver it.
             self._end_job(job.callback_id, finished=False)
             raise
         exchange.respond(200, {"accepted": True})
@@ -281,13 +308,24 @@ class _JobRunner:
         )
         try:
             cancelled = threading.Event()
-            heartbeats = Heartbeats.start(
-                reporter,
-                heartbeat_timeout_seconds=job.heartbeat_timeout_seconds,
-                on_callback_gone=lambda _error: cancelled.set(),
-                heartbeat_interval_seconds=self._heartbeat_interval_seconds,
-                logger=self._logger,
-            )
+            try:
+                heartbeats = Heartbeats.start(
+                    reporter,
+                    heartbeat_timeout_seconds=job.heartbeat_timeout_seconds,
+                    on_callback_gone=lambda _error: cancelled.set(),
+                    heartbeat_interval_seconds=self._heartbeat_interval_seconds,
+                    logger=self._logger,
+                )
+            except Exception as error:  # noqa: BLE001
+                # The job has its answer, so no later delivery runs it. Fail
+                # the callback, as the MicroVM worker does, instead of leaving
+                # the job to its heartbeat timeout or its timeout.
+                self._logger.error(
+                    "could not start the job's heartbeats",
+                    extra={**fields, "error": describe(error)},
+                )
+                self._report(reporter, None, error, fields)
+                return
             try:
                 self._logger.info("job started", extra=fields)
                 context = AgentcoreJobContext(
@@ -363,7 +401,7 @@ def start_agentcore_worker(
     logger: MicrovmWorkerLogger | None = None,
     create_client: Callable[[str], LambdaClient] | None = None,
     heartbeat_interval_seconds: float | None = None,
-    host: str = AGENTCORE_HOST,
+    host: str | None = None,
     port: int = AGENTCORE_PORT,
 ) -> AgentcoreWorker:
     """Start the HTTP server that AgentCore Runtime sends the jobs to.
@@ -401,9 +439,10 @@ def start_agentcore_worker(
             agent runtime's execution role.
         heartbeat_interval_seconds: An explicit heartbeat interval. It is cut
             to a third of the job's heartbeat timeout.
-        host: The address to listen on. Defaults to ``0.0.0.0``, which the
-            AgentCore Runtime service contract requires. See
-            :data:`AGENTCORE_HOST`.
+        host: The address to listen on. ``None`` picks ``0.0.0.0``, which
+            the AgentCore Runtime service contract requires, when the
+            ``AGENTCORE_RUNTIME_URL`` environment variable is set. Otherwise
+            it picks ``127.0.0.1``. See :func:`default_host`.
         port: The port to listen on. Defaults to 8080, the port that
             AgentCore Runtime sends to. 0 picks a free port.
 
@@ -432,7 +471,7 @@ def start_agentcore_worker(
             logger if logger is not None else logging.getLogger(DEFAULT_LOGGER_NAME)
         ),
     )
-    server = _Server((host, port), runner)
+    server = _Server((default_host() if host is None else host, port), runner)
     threading.Thread(
         target=server.serve_forever,
         kwargs={"poll_interval": _SERVER_POLL_SECONDS},
@@ -519,6 +558,10 @@ class _Server(ThreadingHTTPServer):
     """The worker's HTTP server."""
 
     daemon_threads = True
+    # socketserver listens with a backlog of 5. A connection beyond the
+    # backlog can get a TCP reset. So the worker uses Node's backlog of 511,
+    # as the MicroVM worker does. The kernel caps it at net.core.somaxconn.
+    request_queue_size = 511
 
     def __init__(self, address: tuple[str, int], runner: _JobRunner) -> None:
         self.runner = runner
@@ -531,3 +574,10 @@ class _Server(ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name = "localhost"
         self.server_port = int(self.server_address[1])
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A client that resets the connection while it sends the request
+        # line or the headers ends here. It needs no traceback on stderr.
+        if isinstance(sys.exception(), ConnectionError):
+            return
+        super().handle_error(request, client_address)

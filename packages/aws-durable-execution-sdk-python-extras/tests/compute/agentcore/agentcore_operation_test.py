@@ -642,3 +642,19 @@ def test_passes_an_execution_error_of_the_wait_through(
     assert result.error is not None
     assert "history does not match" in (result.error.message or "")
     assert client.requests("stop_runtime_session") == []
+
+
+def test_reads_only_the_first_64_kib_of_the_answer(
+    run: Any, fake_agentcore_client: Any
+) -> None:
+    # The accepted document starts after 64 KiB of spaces. A read without
+    # the limit would parse it and accept the job.
+    answer = b" " * (64 * 1024) + b'{"accepted":true}'
+    client = fake_agentcore_client(invokes=[answer])
+
+    result = run(catching(config_with(client)), {})
+
+    assert outcome(result)["error"] == "AgentcoreDeliveryError"
+    [stream] = client.streams
+    assert stream.closed
+    assert stream.read() == b'{"accepted":true}'

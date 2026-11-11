@@ -189,15 +189,19 @@ The durable function sends the job with the `agentcore` operation of the [extras
 review = agentcore(context, "review", job_input={"pr": 7}, config=AGENT)
 ```
 
-The worker listens on `0.0.0.0:8080`, because AgentCore Runtime sends its requests to that port of the container. The container publishes no port. Only AgentCore reaches it, after it has authorized the `InvokeAgentRuntime` caller.
+The worker listens on port 8080, because AgentCore Runtime sends its requests to that port. The host depends on where the worker runs:
+
+- Inside AgentCore Runtime, the `AGENTCORE_RUNTIME_URL` environment variable is set. The worker then listens on `0.0.0.0`, as the AgentCore contract requires. The runtime publishes no port, and AgentCore authorizes each `InvokeAgentRuntime` caller before it forwards the request.
+- Anywhere else, such as a laptop, the worker listens on `127.0.0.1`. The worker has no authentication, so it must not be reachable from the network.
+- A `host` argument overrides both.
 
 - `POST /invocations` reads the job document, starts the handler in a thread, and answers `{"accepted": true}` at once. A callback ID that the worker already accepted gets the same answer, and the job does not run again. A document that does not match the contract gets HTTP 400.
 - `GET /ping` answers `{"status": "HealthyBusy"}` while a job runs, and `{"status": "Healthy"}` otherwise. `time_of_last_update` holds the Unix time, in seconds, of the worker's start or of the last change of the status. It does not change between pings with the same status.
 - The job thread sends heartbeats when the job sets a heartbeat timeout, and then the success or failure callback.
 
-The agent runtime's idle timeout (`idleRuntimeSessionTimeout`) must be longer than the job's silent periods. The `agentcore` operation does not keep a session across jobs.
+While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
-The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the durable function's ARN. The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN.
+The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the durable function's ARN. The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN and on `<runtime ARN>/runtime-endpoint/*`.
 
 ## Reference
 

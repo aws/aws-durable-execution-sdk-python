@@ -41,10 +41,21 @@ class AgentcoreConfig:
     ``lambda:SendDurableExecutionCallbackHeartbeat`` on the durable
     function's ARN.
 
-    The agent runtime's ``idleRuntimeSessionTimeout`` must be longer than
-    the longest time in which the job neither receives nor sends a request.
-    The worker answers ``/ping`` with ``HealthyBusy`` while a job runs, so
-    AgentCore keeps the session during the job.
+    The durable function's execution role needs
+    ``bedrock-agentcore:InvokeAgentRuntime`` and
+    ``bedrock-agentcore:StopRuntimeSession`` on two resources: this ARN, and
+    ``<this ARN>/runtime-endpoint/*``. A live run with only the runtime ARN
+    in the policy was denied on ``.../runtime-endpoint/DEFAULT``. To grant
+    one endpoint only, name the endpoint of ``qualifier`` instead of ``*``.
+
+    The worker answers ``/ping`` with ``HealthyBusy`` while a job runs. A
+    live run kept a session through a 180-second job with an idle timeout
+    of 60 seconds. So the agent runtime's ``idleRuntimeSessionTimeout``
+    does not end a running job. After the idle timeout, a session with no
+    running job ends. A later request with the same session ID then gets a
+    new microVM without an error, and the memory and files of the old one
+    are lost. This operation sends one job per session, so it does not
+    depend on state across that gap.
     """
 
     timeout: Duration

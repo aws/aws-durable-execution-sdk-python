@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import http.client
+import inspect
 import json
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -480,3 +482,151 @@ def test_logs_an_outcome_that_could_not_be_reported(
 
     assert client.names() == ["success"]
     assert logger.messages("error") == ["job outcome could not be reported"]
+
+
+def test_the_contract_constants_are_the_agentcore_host_and_port() -> None:
+    assert worker_module.AGENTCORE_HOST == "0.0.0.0"  # noqa: S104
+    assert worker_module.AGENTCORE_PORT == 8080
+    parameters = inspect.signature(start_agentcore_worker).parameters
+    assert parameters["port"].default == 8080
+    assert parameters["host"].default is None
+
+
+def test_default_host_is_loopback_outside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENTCORE_RUNTIME_URL", raising=False)
+
+    assert worker_module.default_host() == "127.0.0.1"
+
+
+def test_default_host_is_all_interfaces_inside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENTCORE_RUNTIME_URL", "http://127.0.0.1:9000")
+
+    assert worker_module.default_host() == "0.0.0.0"  # noqa: S104
+
+
+def test_binds_loopback_without_a_host_outside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENTCORE_RUNTIME_URL", raising=False)
+    worker = start_agentcore_worker(handler=lambda job_input, context: None, port=0)
+    try:
+        assert worker._server.server_address[0] == "127.0.0.1"  # noqa: SLF001
+        assert ping(worker)["status"] == "Healthy"
+    finally:
+        worker.close()
+
+
+def test_binds_the_explicit_host_inside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENTCORE_RUNTIME_URL", "http://127.0.0.1:9000")
+    worker = start_agentcore_worker(
+        handler=lambda job_input, context: None, host="127.0.0.1", port=0
+    )
+    try:
+        assert worker._server.server_address[0] == "127.0.0.1"  # noqa: SLF001
+    finally:
+        worker.close()
+
+
+def test_listens_with_a_backlog_of_511(start: Any) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+
+    assert worker._server.request_queue_size == 511  # noqa: SLF001
+
+
+def test_handle_error_prints_no_traceback_for_a_reset_connection(
+    start: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+    server = worker._server  # noqa: SLF001
+
+    try:
+        raise ConnectionResetError
+    except ConnectionError:
+        server.handle_error(None, ("127.0.0.1", 1))
+    assert capsys.readouterr().err == ""
+    try:
+        raise ValueError("boom")  # noqa: EM101, TRY003
+    except ValueError:
+        server.handle_error(None, ("127.0.0.1", 1))
+    assert "ValueError: boom" in capsys.readouterr().err
+
+
+def test_fails_the_callback_when_the_heartbeats_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs: list[Any] = []
+
+    def fail_start(*args: Any, **kwargs: Any) -> Any:
+        msg = "can't start new thread"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(worker_module.Heartbeats, "start", fail_start)
+    worker, client, _ = start(lambda job_input, context: runs.append(job_input))
+
+    assert request(worker, "POST", "/invocations", job_body())[1] == {"accepted": True}
+    assert worker.idle(WAIT)
+    assert runs == []
+    assert client.calls == [
+        (
+            "failure",
+            {
+                "CallbackId": "cb-1",
+                "Error": {
+                    "ErrorType": "RuntimeError",
+                    "ErrorMessage": "can't start new thread",
+                },
+            },
+        )
+    ]
+    assert logger.messages("error") == ["could not start the job's heartbeats"]
+
+
+class _SlowSet(set[str]):
+    """A set whose membership check reads the set, then waits 0.2 seconds.
+
+    Two requests that check without a lock both read the set before either
+    adds the callback ID. So both would run the job. The worker's lock makes
+    the second check wait for the first add.
+    """
+
+    def __contains__(self, item: object) -> bool:
+        found = super().__contains__(item)
+        time.sleep(0.2)
+        return found
+
+
+def test_two_concurrent_deliveries_of_one_job_run_it_once(start: Any) -> None:
+    runs: list[str] = []
+    release = threading.Event()
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        runs.append(context.callback_id)
+        assert release.wait(WAIT)
+
+    worker, client, _ = start(handler)
+    worker._runner._running = _SlowSet()  # noqa: SLF001
+    answers: list[Any] = []
+    threads = [
+        threading.Thread(
+            target=lambda: answers.append(
+                request(worker, "POST", "/invocations", job_body())
+            )
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(WAIT)
+    release.set()
+    assert worker.idle(WAIT)
+
+    assert answers == [(200, {"accepted": True})] * 2
+    assert runs == ["cb-1"]
+    assert client.names() == ["success"]

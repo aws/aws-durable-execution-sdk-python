@@ -271,13 +271,13 @@ if __name__ == "__main__":
 
 The operation records `review.session`, `review.callback`, `review.request`, and `review.stop` in one child context named `review`. `review.stop` calls `StopRuntimeSession` after success, failure, and timeout alike. A failed stop is logged, and does not hide the job's result or error.
 
-The agent runtime's idle timeout (`idleRuntimeSessionTimeout`) must be longer than the job's silent periods. This operation does not keep a session across jobs.
+While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
 Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.
 
 Permissions:
 
-- The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN.
+- The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on two resources: the agent runtime ARN, and `<runtime ARN>/runtime-endpoint/*`. Without the endpoint resource, both calls are denied on `<runtime ARN>/runtime-endpoint/DEFAULT`. To allow one endpoint only, name the endpoint of `qualifier` instead of `*`.
 - The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the function ARN.
 
 ## Reference

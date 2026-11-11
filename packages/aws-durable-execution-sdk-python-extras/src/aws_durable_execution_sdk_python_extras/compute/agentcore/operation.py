@@ -119,6 +119,11 @@ def agentcore(
     runtime's idle timeout. So the operation logs an error and returns the
     job's outcome.
 
+    The session lives only for this one job. After the idle timeout, the
+    same session ID would get a new microVM without its memory and files.
+    The operation never sends a second job to the session. So that loss
+    cannot affect a job.
+
     ``InvokeAgentRuntime`` has no idempotency token. A retried request step
     can deliver the same job twice to the same session. The worker answers a
     repeated callback ID with ``{"accepted": true}``, and does not run the
@@ -357,7 +362,8 @@ class _AgentcoreScope:
                 f"session {session_id}. The session keeps running until the "
                 "agent runtime's idle timeout or maximum lifetime ends it. A "
                 "missing permission needs bedrock-agentcore:StopRuntimeSession "
-                "in the function's execution role.",
+                "in the function's execution role, on the runtime ARN and on "
+                "<runtime ARN>/runtime-endpoint/*.",
                 extra={"runtimeSessionId": session_id, "error": error.message},
             )
 
@@ -371,8 +377,10 @@ class _AgentcoreScope:
         try:
             self._client().stop_runtime_session(**request)
         except ClientError as error:
-            # A session that has already ended, or that never started, is
-            # not found. Either way, no session runs.
+            # The service answers 404 ResourceNotFoundException for a
+            # session that was stopped or never started, measured live. A
+            # session that the idle timeout ended answers 200. Either way,
+            # no session runs.
             if error.response.get("Error", {}).get("Code") != (
                 "ResourceNotFoundException"
             ):
