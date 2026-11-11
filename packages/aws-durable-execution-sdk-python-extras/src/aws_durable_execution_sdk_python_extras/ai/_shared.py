@@ -213,8 +213,7 @@ def call_before_deadline(call: Callable[[], _T], remaining: float | None) -> _T:
     budget = remaining - INVOCATION_RESERVE_SECONDS
     timeout = AiTimeoutError(
         message=(
-            "The request was stopped 10 seconds before the invocation runs out "
-            "of time."
+            "The request was stopped 10 seconds before the invocation runs out of time."
         )
     )
     if budget <= 0:
