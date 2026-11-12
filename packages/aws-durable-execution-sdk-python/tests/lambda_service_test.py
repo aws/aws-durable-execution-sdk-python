@@ -1,8 +1,10 @@
 """Tests for the service module."""
 
+import dataclasses
 import datetime
 import json
 from datetime import UTC
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -374,6 +376,93 @@ def test_step_details_minimal():
     assert details.next_attempt_timestamp is None
     assert details.result is None
     assert details.error is None
+
+
+@pytest.mark.parametrize(
+    "details_type,required_fields",
+    [
+        (CallbackDetails, {"CallbackId": "callback-id"}),
+        (StepDetails, {}),
+        (ContextDetails, {}),
+        (ChainedInvokeDetails, {}),
+    ],
+)
+@pytest.mark.parametrize(
+    "error_field",
+    [
+        {},
+        {"Error": None},
+        {"Error": {}},
+        {"Error": {"ErrorMessage": ""}},
+        {"Error": {"ErrorType": ""}},
+        {"Error": {"ErrorData": ""}},
+        {"Error": {"StackTrace": []}},
+        {
+            "Error": {
+                "ErrorMessage": "rejected",
+                "ErrorType": "RejectedError",
+                "ErrorData": '{"reason":"test"}',
+                "StackTrace": ["original frame"],
+            }
+        },
+    ],
+)
+def test_operation_details_preserve_error_presence(
+    details_type: type[
+        CallbackDetails | StepDetails | ContextDetails | ChainedInvokeDetails
+    ],
+    required_fields: dict[str, Any],
+    error_field: dict[str, Any],
+) -> None:
+    details = details_type.from_dict({**required_fields, **error_field})
+    payload = error_field.get("Error")
+    if payload is None:
+        assert details.error is None
+    else:
+        assert details.error is not None
+        assert details.error.to_dict() == payload
+
+
+@pytest.mark.parametrize(
+    "operation_type,details_field,details",
+    [
+        (OperationType.CALLBACK, "callback_details", CallbackDetails("callback-id")),
+        (OperationType.STEP, "step_details", StepDetails()),
+        (OperationType.CONTEXT, "context_details", ContextDetails()),
+        (
+            OperationType.CHAINED_INVOKE,
+            "chained_invoke_details",
+            ChainedInvokeDetails(),
+        ),
+    ],
+)
+@pytest.mark.parametrize("json_roundtrip", [False, True])
+def test_operation_roundtrip_preserves_empty_error(
+    operation_type: OperationType,
+    details_field: str,
+    details: CallbackDetails | StepDetails | ContextDetails | ChainedInvokeDetails,
+    json_roundtrip: bool,
+) -> None:
+    error = ErrorObject(message=None, type=None, data=None, stack_trace=None)
+    operation_details: dict[str, Any] = {
+        details_field: dataclasses.replace(details, error=error)
+    }
+    operation = Operation(
+        operation_id="failed-operation",
+        operation_type=operation_type,
+        status=OperationStatus.FAILED,
+        **operation_details,
+    )
+
+    if json_roundtrip:
+        restored = Operation.from_json_dict(
+            json.loads(json.dumps(operation.to_json_dict()))
+        )
+    else:
+        restored = Operation.from_dict(operation.to_dict())
+
+    assert restored == operation
+    assert getattr(restored, details_field).error == error
 
 
 def test_wait_details_from_dict():

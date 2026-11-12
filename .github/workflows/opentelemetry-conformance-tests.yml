@@ -4,7 +4,7 @@ name: OpenTelemetry Conformance Tests
 # aws-durable-execution-conformance-tests and points it at this repo's own handlers and
 # templates (packages/aws-durable-execution-sdk-python-conformance-tests-otel/) through
 # examples_dir, so the handlers run from the commit under test while the orchestration
-# (backend matrix, ADOT layer, collector build, long-running cycle) stays centralized.
+# (backend matrix, ADOT layer, collector build) stays centralized.
 
 on:
   pull_request:
@@ -23,20 +23,6 @@ on:
       - ".github/workflows/opentelemetry-conformance-tests.yml"
   workflow_dispatch:
     inputs:
-      phase:
-        description: Run short tests, launch a long run, or check the active long run
-        required: true
-        default: short
-        type: choice
-        options:
-          - short
-          - launch
-          - check
-      delay_seconds:
-        description: Durable delay in seconds (1-86400, launch only)
-        required: true
-        default: "82800"
-        type: string
       aws_region:
         description: AWS region
         required: true
@@ -59,14 +45,14 @@ permissions: {}
 
 jobs:
   opentelemetry:
-    # 1. Run for non-PR events, such as scheduled runs and manual invocations
+    # 1. Run for pushes and manual invocations
     # 2. For PRs, run only same-repo branches from non-Dependabot actors; forked PRs or Dependabot should not access secrets.
     if: github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@d4b7df927ea7eb7022bcca339d2cddd387d3d650
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@ca2cd02e1fb0dce34c9d81e361c1556a7e3707ee
     with:
       language: python
       runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
@@ -84,8 +70,6 @@ jobs:
       collector_compatible_runtime: python3.13
       collector_otlp_endpoint: http://localhost:4318
       suite_timeout_minutes: 30
-      phase: ${{ inputs.phase || 'short' }}
-      delay_seconds: ${{ inputs.delay_seconds || '82800' }}
       aws_region: ${{ inputs.aws_region || 'us-west-2' }}
     secrets:
       CONFORMANCE_TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}

@@ -12,7 +12,7 @@ language-agnostic OTel conformance runner in
 which invokes each function, collects its spans from the configured backend, and
 asserts they match the shared requirement specification. That repository owns the
 runner, the requirement specifications, and the orchestration (backend matrix,
-ADOT layer resolution, collector build, long-running cycle); this package owns
+ADOT layer resolution, collector build); this package owns
 the Python handlers and SAM templates.
 
 This mirrors the non-OTel
@@ -33,7 +33,7 @@ template-long-running.yaml  # otel-long-running suite
 tests/                      # contract tests for the templates and handlers
 ```
 
-The 20 invocation and 20 execution requirements reuse the same scenario
+The invocation and execution requirements reuse the same scenario
 handlers; the view is selected per function through the `OTEL_PLUGIN_MODE`
 environment variable, which `common.otel_plugin_factory()` reads to pick
 `InvocationOtelPluginFactory` or `ExecutionOtelPluginFactory`. `template.yaml`
@@ -63,6 +63,13 @@ deploys only the view named by its `OtelSuite` parameter.
 | `otel-invocation-18` | `otel_18_chained_invoke_failure.handler` | Verifies failed chained-invoke telemetry. |
 | `otel-invocation-19` | `otel_19_execution_failure.handler` | Verifies telemetry for a direct handler failure. |
 | `otel-invocation-20` | `otel_20_virtual_context.handler` | Verifies a virtual child-context span without context checkpoints. |
+| `otel-invocation-21` | `otel_21_completed_step_replay.handler` | Local coverage verifies completed steps are skipped after wait/resume; cloud coverage is deferred. |
+| `otel-invocation-22` | `otel_22_user_function_context.handler` | Creates ordinary user spans under the active handler, attempt, child, branch, and iteration contexts. |
+| `otel-invocation-23` | `otel_23_callback_function_context.handler` | Verifies retry/check attempts, callback submitter, wrapped retry helper, and virtual-child callback parents. |
+| `otel-invocation-24` | `otel_24_invocation_retry_status.handler` | Raises a retryable invocation error after a completed step, then resumes with its saved result. |
+| `otel-invocation-25` | `otel_25_caught_callback_failure_replay.handler` | Catches a callback failure without diagnostic details, then replays it through two callback barriers. |
+| `otel-invocation-26` | `otel_26_external_callback_completion_replay.handler` | Exports an external callback completion before the observed step and preserves its export count across two later barriers. |
+| `otel-invocation-27` | `otel_27_chained_invoke_suspend.handler` | Verifies caller and child invocation spans when the child suspends for a durable wait and resumes. |
 | `otel-execution-1` | `otel_1_success.handler` | Verifies the execution-view workflow, step, and attempt hierarchy. |
 | `otel-execution-2` | `otel_2_wait_resume.handler` | Verifies the execution view across a resumed invocation. |
 | `otel-execution-3` | `otel_3_retry.handler` | Verifies the execution view across retry attempts. |
@@ -83,13 +90,87 @@ deploys only the view named by its `OtelSuite` parameter.
 | `otel-execution-18` | `otel_18_chained_invoke_failure.handler` | Verifies source and target failed workflow roots. |
 | `otel-execution-19` | `otel_19_execution_failure.handler` | Verifies a failed invocation without a completed workflow. |
 | `otel-execution-20` | `otel_20_virtual_context.handler` | Verifies a virtual child-context span under the workflow root. |
+| `otel-execution-21` | `otel_21_completed_step_replay.handler` | Local coverage verifies completed-operation spans are exported once across replay; cloud coverage is deferred. |
+| `otel-execution-22` | `otel_22_user_function_context.handler` | Observes active execution-view callback contexts without supplying or repairing parents. |
+| `otel-execution-23` | `otel_23_callback_function_context.handler` | Verifies the same SDK-owned callback lifecycle parents in the execution view. |
+| `otel-execution-24` | `otel_24_invocation_retry_status.handler` | Verifies invocation retry status independently of step retry and recovery re-exports. |
+| `otel-execution-25` | `otel_25_caught_callback_failure_replay.handler` | Verifies one failed callback export with ERROR and no exception details while the caught execution succeeds. |
+| `otel-execution-26` | `otel_26_external_callback_completion_replay.handler` | Verifies first-completion export timing and no duplicate export across later callback resumes. |
+| `otel-execution-27` | `otel_27_chained_invoke_suspend.handler` | Verifies caller/child workflow parentage and continuation links across child suspension. |
 | `otel-long-running-1` | `otel_long_running_1_wait.handler` | Verifies wait and resume telemetry across a long durable suspension. |
 | `otel-long-running-2` | `otel_long_running_2_retry.handler` | Verifies retry telemetry across a long durable backoff. |
 | `otel-long-running-3` | `otel_long_running_3_callback.handler` | Verifies callback telemetry when completion arrives after a long delay. |
 | `otel-long-running-4` | `otel_long_running_4_chained_invoke.handler` | Verifies chained-invoke telemetry while the target stays suspended. |
 
-The runner discovers each mapping from `TestingMetadata.TestDescription` on the
-functions in the templates.
+The runner discovers each active cloud mapping from
+`TestingMetadata.TestDescription` on the functions in the templates.
+
+## Deferred cloud coverage
+
+Case 21 is declared `NOT_IMPLEMENTED` in both views until the shared history
+requirement accepts `WaitSucceeded` either before or after
+`InvocationCompleted`. Both catalogs currently require invocation completion
+first, but the wait timer runs independently of invocation cleanup. The
+[execution-view cloud run](https://github.com/aws/aws-durable-execution-sdk-python/actions/runs/40588786563/job/122487525577)
+observed the reverse order while the execution succeeded with `before-after`.
+See the [review finding](https://github.com/aws/aws-durable-execution-sdk-python/pull/796#discussion_r4394770596).
+The handler and local tests remain: they verify one execution of each step
+body, `PENDING`/`SUCCEEDED` invocations, and one export per completed operation
+in the execution view. Re-enable the SAM functions and build targets after the
+shared requirement accepts both history orderings without relaxing those replay
+assertions.
+
+## Callback replay validation
+
+Cases 25 and 26 are active in both views, including their SAM functions, build
+targets, and local integration tests. Their assertions remain merge gates,
+without skips or expected-failure markers.
+
+- Case 25's terminal-status and empty-error fixes are in `main` through
+  [#865](https://github.com/aws/aws-durable-execution-sdk-python/pull/865) and
+  [#870](https://github.com/aws/aws-durable-execution-sdk-python/pull/870).
+- Case 26's callback completion fix is in `main` through
+  [#898](https://github.com/aws/aws-durable-execution-sdk-python/pull/898), which
+  derives updated operations from their touch sequences and fixes
+  [#860](https://github.com/aws/aws-durable-execution-sdk-python/issues/860).
+  [#868](https://github.com/aws/aws-durable-execution-sdk-python/pull/868) is
+  superseded and is no longer a merge prerequisite.
+
+The [case 25 cloud run](https://github.com/aws/aws-durable-execution-sdk-python/actions/runs/40769339007)
+saved `Error: {Payload: {}, Truncated: false}` on the errorless `CallbackFailed`
+event in both views with both ADOT/X-Ray and Community/S3. This verifies the
+detailed-history expectation against AWS Lambda. The metadata-only expectation
+(`Error: {Truncated: true}`) remains **unverified** against the service; it is
+covered by the local runner test. Raw spans record when each export occurs.
+
+Case 26 records the terminal callback's export count inside the observed step
+and asserts afterward that it was already one at that point. This keeps SDK
+step retries from consuming the assertion failure. The test also checks that
+the raw export count remains one at both later barriers and after completion.
+Recorded span timestamps alone are not evidence of export order.
+
+The additional case 17 test remains available for follow-up in
+[commit `6484e577`](https://github.com/aws/aws-durable-execution-sdk-python/commit/6484e577b478aeb6345e346515b40bd516cacb1f).
+Before restoring it, correct its data-inclusion expectations: detailed errors
+are untruncated; metadata-only history omits payloads and cannot reconstruct
+diagnostic details.
+
+Case 24 remains active and covers invocation `RETRY` becoming `RETRYING`/`UNSET`.
+
+## Callback coverage boundary
+
+Cases 22 and 23 create normal user spans from the active context, without an
+explicit parent or a copied execution ARN. They cover handler context, step and
+condition attempts, child and branch bodies, callback submission, wrapped
+`with_retry` body/strategy callbacks, and a virtual child. Case 23 places the
+retry helper and virtual child after callback completion so ordinary successful
+replay does not repeat their probes.
+
+This does not promise an operation/attempt parent for every arbitrary callback.
+General retry/wait policies, serializers, summary generators, and item naming
+have phase-specific caller scopes outside the wrapped user-function lifecycle;
+these cases do not impose a new ownership policy on them. Instrumentation
+extensions and user-created threads are outside this business-callback contract.
 
 ## How a handler maps to a requirement
 
@@ -197,6 +278,18 @@ write access; the runner identity needs list, read, and cleanup access.
 `.github/workflows/opentelemetry-conformance-tests.yml` calls the shared
 orchestrator in the conformance repository and points it at this package with
 `examples_dir`, so orchestration stays centralized while the handlers run from
-the commit under test. Pull requests run the invocation and execution suites plus
-a short (60-second) long-running cycle; the full multi-hour long-running cycle is
-driven by `workflow_dispatch` with `phase: launch` and `phase: check`.
+the commit under test. The shared workflow is pinned to a reviewed commit,
+with Dependabot maintaining the pin. The test catalog defaults to `main`;
+manual runs can override it with the `conformance_test_ref` input. Pull requests
+and manual runs execute the invocation and execution suites, with only case 21
+reported as `NOT_IMPLEMENTED`. Case 26 uses the callback completion fix merged
+in #898.
+The orchestrator no longer runs the legacy long-running suite or provides
+launch/check modes; its templates and local contract tests remain in this
+package.
+
+Case 27 (`chained-invoke-suspend`) invokes a child that performs a one-second
+durable wait and returns the original payload after resuming. Both views
+check two caller invocations, two child invocations and the child wait's
+parentage and continuation links. It replaces the suspended-child scenario
+formerly exercised by the short mode of `otel-long-running-4`.

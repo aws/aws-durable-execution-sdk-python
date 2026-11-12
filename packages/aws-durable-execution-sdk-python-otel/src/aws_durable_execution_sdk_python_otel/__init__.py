@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python_otel.invocation_plugin import (
 from aws_durable_execution_sdk_python_otel.plugin_factory import (
     EXECUTION_OTEL_PLUGIN_FACTORY,
     INVOCATION_OTEL_PLUGIN_FACTORY,
+    create_otel_plugin_factory,
     ExecutionOtelPluginFactory,
     InvocationOtelPluginFactory,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "OtelContextLogFilter",
     "Sampling",
     "ProviderResult",
+    "create_otel_plugin_factory",
     "create_tracer_provider",
     "derive_execution_root_span_id",
     "derive_workflow_span_id",

@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import opentelemetry.context as otel_context
@@ -2059,6 +2059,38 @@ def test_incomplete_attempt_is_marked_when_invocation_ends():
         if span.name == f"step-{operation_id} attempt 1"
     )
     assert attempt.attributes["durable.span.truncated_at_invocation_boundary"] is True
+
+
+def test_invocation_cleanup_keeps_future_attempt_bounded() -> None:
+    """Cleanup remains ordered when an attempt started ahead of the local clock."""
+    plugin, exporter = _create_plugin()
+    start_info = UserFunctionStartInfo(
+        operation_id="future-attempt",
+        operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="future-attempt",
+        parent_id=None,
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        is_replayed=False,
+        status=OperationStatus.STARTED,
+        is_replay_children=False,
+        attempt=1,
+    )
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_user_function_start(start_info)
+    plugin.on_user_function_end(
+        UserFunctionEndInfo.from_start_info(
+            start_info, error=None, outcome=UserFunctionOutcome.INCOMPLETE
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    attempt = spans["future-attempt attempt 1"]
+    invocation = spans["Invocation"]
+    assert attempt.start_time is not None and attempt.end_time is not None
+    assert invocation.end_time is not None
+    assert attempt.start_time < attempt.end_time < invocation.end_time
 
 
 def test_workflow_span_name_is_configurable():

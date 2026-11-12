@@ -1,6 +1,7 @@
 """Shared status regressions through both public plugin lifecycles."""
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -31,9 +32,6 @@ from aws_durable_execution_sdk_python_otel import (
     ExecutionOtelPlugin,
     InvocationOtelPlugin,
     OtelPluginConfig,
-)
-from aws_durable_execution_sdk_python_otel.exception_events import (
-    exception_from_error_object,
 )
 
 
@@ -69,13 +67,7 @@ def instrumented_view(request: pytest.FixtureRequest) -> Iterator[InstrumentedVi
 
 @pytest.mark.parametrize(
     "status",
-    [
-        OperationStatus.SUCCEEDED,
-        OperationStatus.FAILED,
-        OperationStatus.CANCELLED,
-        OperationStatus.TIMED_OUT,
-        OperationStatus.STOPPED,
-    ],
+    list(OperationStatus),
 )
 @pytest.mark.parametrize("with_error", [False, True])
 @pytest.mark.parametrize("started_here", [False, True])
@@ -129,6 +121,8 @@ def test_operation_status_and_exception(
     expected = (
         StatusCode.ERROR
         if with_error
+        or status
+        in {OperationStatus.FAILED, OperationStatus.TIMED_OUT, OperationStatus.STOPPED}
         else (
             StatusCode.OK if status is OperationStatus.SUCCEEDED else StatusCode.UNSET
         )
@@ -140,6 +134,124 @@ def test_operation_status_and_exception(
         assert span.events[0].name == "exception"
         assert span.events[0].attributes is not None
         assert span.events[0].attributes["exception.message"] == "deadline exceeded"
+    else:
+        assert not span.events
+
+
+@pytest.mark.parametrize(
+    ("start_time", "expected_durable_end"),
+    [
+        (None, END + timedelta(microseconds=1)),
+        (START, END),
+        (END, END + timedelta(microseconds=1)),
+        (END + timedelta(seconds=1), END + timedelta(seconds=1, microseconds=1)),
+    ],
+)
+@pytest.mark.parametrize("end_time", [END, None])
+def test_terminal_exception_uses_normalized_span_end(
+    instrumented_view: InstrumentedView,
+    start_time: datetime | None,
+    expected_durable_end: datetime,
+    end_time: datetime | None,
+) -> None:
+    """Execution view preserves durable ends, including delayed completions."""
+    plugin, exporter = instrumented_view
+    _start_invocation(plugin)
+    before_callback = datetime.now(UTC)
+    plugin.on_operation_end(
+        replace(
+            _operation_end_info(
+                ErrorObject("stored failure", "ValueError", None, None)
+            ),
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            start_time=start_time,
+            end_time=end_time,
+        )
+    )
+    after_callback = datetime.now(UTC)
+    _end_invocation(plugin)
+    span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
+    (event,) = span.events
+    assert span.start_time is not None and span.end_time is not None
+    assert span.start_time <= event.timestamp == span.end_time
+    if isinstance(plugin, ExecutionOtelPlugin):
+        if end_time is None:
+            assert (
+                int(before_callback.timestamp() * 1_000_000_000)
+                <= span.end_time
+                <= int(after_callback.timestamp() * 1_000_000_000)
+            )
+        else:
+            assert span.end_time == int(
+                expected_durable_end.timestamp() * 1_000_000_000
+            )
+
+
+@pytest.mark.parametrize("with_error", [False, True])
+@pytest.mark.parametrize(
+    ("end_time", "expected_durable_end"),
+    [
+        (START - timedelta(seconds=1), START + timedelta(microseconds=1)),
+        (START, START + timedelta(microseconds=1)),
+        (END, END),
+        (None, None),
+    ],
+)
+def test_failed_attempt_exception_uses_normalized_span_end(
+    instrumented_view: InstrumentedView,
+    with_error: bool,
+    end_time: datetime | None,
+    expected_durable_end: datetime | None,
+) -> None:
+    """An attempt failure reports its outcome without fabricating diagnostics."""
+    plugin, exporter = instrumented_view
+    _start_invocation(plugin)
+    operation: dict[str, Any] = dict(
+        operation_id="attempt",
+        operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="attempt",
+        parent_id=None,
+        start_time=START,
+        is_replayed=False,
+        status=OperationStatus.STARTED,
+        is_replay_children=False,
+        attempt=1,
+    )
+    plugin.on_user_function_start(UserFunctionStartInfo(**operation))
+    before_callback = datetime.now(UTC)
+    plugin.on_user_function_end(
+        UserFunctionEndInfo(
+            **operation,
+            outcome=UserFunctionOutcome.FAILED,
+            end_time=end_time,
+            error=ErrorObject("stored failure", "ValueError", None, None)
+            if with_error
+            else None,
+        )
+    )
+    after_callback = datetime.now(UTC)
+    _end_invocation(plugin)
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name == "attempt attempt 1"
+    )
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.start_time is not None and span.end_time is not None
+    if isinstance(plugin, ExecutionOtelPlugin):
+        if expected_durable_end is None:
+            assert (
+                int(before_callback.timestamp() * 1_000_000_000)
+                <= span.end_time
+                <= int(after_callback.timestamp() * 1_000_000_000)
+            )
+        else:
+            assert span.end_time == int(
+                expected_durable_end.timestamp() * 1_000_000_000
+            )
+    if with_error:
+        (event,) = span.events
+        assert span.start_time <= event.timestamp == span.end_time
     else:
         assert not span.events
 
@@ -344,45 +456,88 @@ def test_replay_attempt_event_uses_stored_error_metadata(
     assert attributes["exception.stacktrace"] == "\n".join(stack_trace)
 
 
-def test_failed_operation_without_type_falls_back(
+PARTIAL_CASES = [
+    # (message, type, expected attributes)
+    ("no type here", None, {"exception.message": "no type here"}),
+    (None, "ValueError", {"exception.type": "ValueError"}),
+    # An explicitly supplied empty string is data, not absence. It also satisfies
+    # the conventions' requirement that one of the two fields be set.
+    ("", None, {"exception.message": ""}),
+    (None, "", {"exception.type": ""}),
+    ("", "", {"exception.message": "", "exception.type": ""}),
+]
+
+
+@pytest.mark.parametrize(("message", "error_type", "expected"), PARTIAL_CASES)
+def test_failed_operation_omits_absent_error_fields(
     instrumented_view: InstrumentedView,
+    message: str | None,
+    error_type: str | None,
+    expected: dict[str, str],
 ) -> None:
-    """Without type metadata the event still carries the original message."""
+    """A field the checkpoint never stored must not be invented."""
     plugin, exporter = instrumented_view
     _start_invocation(plugin)
     plugin.on_operation_end(
-        _operation_end_info(ErrorObject("no type here", None, None, None))
+        _operation_end_info(ErrorObject(message, error_type, None, None))
     )
     _end_invocation(plugin)
     span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
-    attributes = _exception_attributes(span)
-    assert attributes["exception.message"] == "no type here"
-    assert attributes["exception.type"] == "Exception"
+    assert dict(_exception_attributes(span)) == expected
 
 
-@pytest.mark.parametrize("error_type", [None, ""])
-@pytest.mark.parametrize("message", [None, ""])
-def test_exception_from_error_object_uses_fallback_message(
-    error_type: str | None,
-    message: str | None,
-) -> None:
-    """A missing or empty type with an empty message uses the default."""
-    error = ErrorObject(message, error_type, None, None)
-    assert str(exception_from_error_object(error)) == "Unknown error"
-
-
-def test_failed_operation_without_type_or_message_uses_fallback(
+@pytest.mark.parametrize("is_replayed", [False, True])
+@pytest.mark.parametrize(("message", "error_type", "expected"), PARTIAL_CASES)
+def test_failed_attempt_omits_absent_error_fields(
     instrumented_view: InstrumentedView,
+    message: str | None,
+    error_type: str | None,
+    expected: dict[str, str],
+    is_replayed: bool,
 ) -> None:
-    """Without type or message metadata the event uses the default message."""
+    """The failed-attempt recorder shares the operation recorder's fidelity."""
     plugin, exporter = instrumented_view
     _start_invocation(plugin)
-    plugin.on_operation_end(_operation_end_info(ErrorObject(None, None, None, None)))
+    _run_failed_step_attempt(
+        plugin,
+        ErrorObject(message, error_type, None, None),
+        is_replayed=is_replayed,
+    )
     _end_invocation(plugin)
-    span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
-    attributes = _exception_attributes(span)
-    assert attributes["exception.message"] == "Unknown error"
-    assert attributes["exception.type"] == "Exception"
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name == "step-1 attempt 1"
+    )
+    assert dict(_exception_attributes(span)) == expected
+
+
+# The exception conventions require whichever of type/message the other lacks,
+# so an error supplying neither cannot produce a well-formed event. A stack
+# trace alone does not satisfy the requirement either.
+NO_FIELD_CASES = [None, [], ["Traceback from checkpoint"]]
+
+
+@pytest.mark.parametrize("stack_trace", NO_FIELD_CASES)
+@pytest.mark.parametrize("event_kind", ["operation", "attempt"])
+def test_error_without_type_or_message_records_no_event(
+    instrumented_view: InstrumentedView,
+    stack_trace: list[str] | None,
+    event_kind: str,
+) -> None:
+    """Neither field means no event, rather than an invented or empty one."""
+    plugin, exporter = instrumented_view
+    _start_invocation(plugin)
+    error = ErrorObject(None, None, None, stack_trace)
+    if event_kind == "operation":
+        plugin.on_operation_end(_operation_end_info(error))
+        span_name = "wait"
+    else:
+        _run_failed_step_attempt(plugin, error)
+        span_name = "step-1 attempt 1"
+    _end_invocation(plugin)
+    span = next(s for s in exporter.get_finished_spans() if s.name == span_name)
+    assert not span.events
+    # The failure is still reported through the status, not through an event.
+    assert span.status.status_code is StatusCode.ERROR
 
 
 class ConstructorSideEffectError(Exception):

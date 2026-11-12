@@ -6,7 +6,7 @@ durable function and asserts on its result and history. In the JS repo's CI
 they run against real Lambda. This script runs them against the Python
 testing package's web runner instead, with every process on the loopback:
 
-    jest (CloudDurableTestRunner)
+    vitest (CloudDurableTestRunner)
       -> invoke_proxy.py   Lambda Invoke becomes POST /start-durable-execution;
                            every other request is forwarded unchanged
       -> web runner        the code under test, from this checkout
@@ -64,19 +64,35 @@ EXAMPLES_REL = Path("packages/aws-durable-execution-sdk-js-examples")
 # The examples depend on these local workspaces. The root "npm run build"
 # also builds the telemetry tools and the VS Code extension, which the harness
 # does not need, so the script builds only these, in dependency order.
+#
+# The list holds both names of the worker package, microvm-worker and
+# compute-worker. The harness builds a checkout of any JS ref: main by
+# default, or the js_ref input of the workflow. A ref from before the rename
+# in aws/aws-durable-execution-sdk-js#1204 has only microvm-worker, and the
+# examples of that ref import it. A ref from after the rename has only
+# compute-worker. So the list names both, and the build skips the one that
+# the checkout does not have. See OPTIONAL_JS_BUILD_WORKSPACES.
 JS_BUILD_WORKSPACES = (
     "packages/aws-durable-execution-sdk-js",
     "packages/aws-durable-execution-sdk-js-testing",
     "packages/aws-durable-execution-sdk-js-otel",
     "packages/aws-durable-execution-sdk-js-extras",
     "packages/aws-durable-execution-sdk-js-microvm-worker",
+    "packages/aws-durable-execution-sdk-js-compute-worker",
     "packages/aws-durable-execution-sdk-js-examples",
 )
-# Older JS refs predate these packages; their examples do not need them.
+# The build skips a workspace in this set when the JS checkout does not have
+# it. Older JS refs predate extras, and their examples do not need it. A JS
+# ref has at most one of the two worker names, because of the rename above.
+# Until aws/aws-durable-execution-sdk-js#1204 merges, JS main still has
+# microvm-worker. So removing microvm-worker now would break the default run
+# against main. After the merge, it stays so that a run with an older js_ref
+# still builds.
 OPTIONAL_JS_BUILD_WORKSPACES = frozenset(
     {
         "packages/aws-durable-execution-sdk-js-extras",
         "packages/aws-durable-execution-sdk-js-microvm-worker",
+        "packages/aws-durable-execution-sdk-js-compute-worker",
     }
 )
 # otel examples export spans to an OpenTelemetry collector. The harness does
@@ -268,7 +284,7 @@ def check_node() -> None:
 
 @dataclass(frozen=True)
 class FunctionMaps:
-    # Handler file basename -> FunctionName. jest reads it from FUNCTION_NAME_MAP.
+    # Handler file basename -> FunctionName. The tests read it from FUNCTION_NAME_MAP.
     name_map: dict[str, str]
     # FunctionName -> bundle, export, timeout, environment. The shim reads it.
     shim_map: dict[str, dict[str, Any]]
@@ -333,8 +349,8 @@ def select_tests(
     """Return (tests to run, tests skipped as not deployed).
 
     Paths are relative to the examples package. A pattern is a regular
-    expression matched against the path, as jest matches its positional
-    patterns. With no patterns, every test outside EXCLUDED_DIRS is selected.
+    expression matched against the path. With no patterns, every test
+    outside EXCLUDED_DIRS is selected.
 
     template.yml omits examples marked localOnly in the JS catalog. The JS
     test helper skips the cloud tests of such an example, and the JS repo's
@@ -616,7 +632,7 @@ def stop_group(proc: subprocess.Popen[bytes]) -> None:
 
     Sends SIGTERM to the process group, waits up to 5 seconds, then sends
     SIGKILL. The group is signalled even after the leader exits, because a
-    child such as a jest worker can outlive it.
+    child such as a test worker process can outlive it.
     """
     with contextlib.suppress(ProcessLookupError):
         os.killpg(proc.pid, signal.SIGTERM)
@@ -652,11 +668,77 @@ def harness_env() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# jest
+# Test runner: vitest, or jest for older JS refs
 # ---------------------------------------------------------------------------
 
+# aws/aws-durable-execution-sdk-js#1167 replaced jest with vitest in the
+# examples package. A JS ref from before that change has this jest config,
+# and its examples run with jest. A ref from after it has no jest config, and
+# its examples run with vitest. The harness builds any JS ref, so it supports
+# both runners.
+JEST_CONFIG = "jest.config.integration.js"
 
-def run_jest(
+
+def detect_test_runner(examples: Path) -> str:
+    """Return "jest" when the examples package has the jest config, else "vitest"."""
+    return "jest" if (examples / JEST_CONFIG).is_file() else "vitest"
+
+
+def runner_command(
+    runner: str,
+    tests: list[str],
+    results_file: Path,
+    workers: int,
+    extra: list[str],
+) -> list[str]:
+    """Build the command that runs tests and writes jest-style JSON results.
+
+    Both runners read NODE_ENV=integration from the environment. With it,
+    the examples' config selects only tests named "cloud", sets a 120 s test
+    timeout, and stops at the first failure. The command turns that last
+    setting off, because the harness wants every result.
+    """
+    if runner == "jest":
+        return [
+            "npx",
+            "--no-install",
+            "jest",
+            "--config",
+            JEST_CONFIG,
+            "--bail=0",
+            f"--maxWorkers={workers}",
+            "--json",
+            f"--outputFile={results_file}",
+            *extra,
+            "--runTestsByPath",
+            *tests,
+        ]
+    # vitest finds vitest.config.ts by itself. Its json reporter writes the
+    # same fields as jest --json, so outcomes() reads both. The default
+    # reporter keeps the progress output that jest printed.
+    #
+    # vitest has no --runTestsByPath. It treats each positional argument as a
+    # substring of the test file path. Every selected path starts with
+    # src/examples/, so a selected path matches only itself, unless another
+    # file's path contains it. summarize() reports every file in the results,
+    # so such a match would be visible in the report.
+    return [
+        "npx",
+        "--no-install",
+        "vitest",
+        "run",
+        "--bail=0",
+        f"--maxWorkers={workers}",
+        "--reporter=default",
+        "--reporter=json",
+        f"--outputFile.json={results_file}",
+        *extra,
+        *tests,
+    ]
+
+
+def run_test_runner(
+    runner: str,
     examples: Path,
     tests: list[str],
     servers: Servers,
@@ -671,28 +753,17 @@ def run_jest(
         LAMBDA_ENDPOINT=servers.proxy_url,
         FUNCTION_NAME_MAP=(maps_dir / "function-name-map.json").read_text(),
     )
-    # The AWS SDK client in CloudDurableTestRunner loads modules with a
-    # dynamic import(). jest's CommonJS runtime needs this flag for that.
-    node_options = env.get("NODE_OPTIONS", "")
-    if "--experimental-vm-modules" not in node_options:
-        env["NODE_OPTIONS"] = f"{node_options} --experimental-vm-modules".strip()
-    cmd = [
-        "npx",
-        "--no-install",
-        "jest",
-        "--config",
-        "jest.config.integration.js",
-        # The config sets bail: true. The harness wants every result.
-        "--bail=0",
-        f"--maxWorkers={workers}",
-        "--json",
-        f"--outputFile={results_file}",
-        *extra,
-        "--runTestsByPath",
-        *tests,
-    ]
-    # jest runs in its own process group, like the servers. A Ctrl-C reaches
-    # this script, and the finally block stops jest and all its workers.
+    if runner == "jest":
+        # The AWS SDK client in CloudDurableTestRunner loads modules with a
+        # dynamic import(). jest's CommonJS runtime needs this flag for that.
+        # vitest supports dynamic import() without it.
+        node_options = env.get("NODE_OPTIONS", "")
+        if "--experimental-vm-modules" not in node_options:
+            env["NODE_OPTIONS"] = f"{node_options} --experimental-vm-modules".strip()
+    cmd = runner_command(runner, tests, results_file, workers, extra)
+    # The test runner runs in its own process group, like the servers. A
+    # Ctrl-C reaches this script, and the finally block stops the runner and
+    # all its workers.
     proc = subprocess.Popen(cmd, cwd=examples, env=env, start_new_session=True)
     try:
         status = proc.wait()
@@ -700,11 +771,12 @@ def run_jest(
         stop_group(proc)
     if not results_file.exists():
         raise HarnessError(
-            f"jest wrote no results to {results_file}; see its output above"
+            f"{runner} wrote no results to {results_file}; see its output above"
         )
     results: dict[str, Any] = json.loads(results_file.read_text())
-    # summarize() reads the verdict from the JSON, but jest can also exit
-    # non-zero for an error no suite reports, for example in global teardown.
+    # summarize() reads the verdict from the JSON, but the test runner can
+    # also exit non-zero for an error no suite reports, for example in global
+    # teardown.
     results[EXIT_STATUS_KEY] = status
     return results
 
@@ -718,7 +790,7 @@ EXIT_STATUS_KEY = "jsExamplesExitStatus"
 
 
 def unexplained_exits(results: list[dict[str, Any]]) -> list[int]:
-    """Non-zero jest exit statuses that no failed suite in that run explains."""
+    """Non-zero test runner exit statuses that no failed suite in that run explains."""
     statuses = []
     for result in results:
         status = result.get(EXIT_STATUS_KEY, 0)
@@ -760,7 +832,7 @@ def outcomes(results: list[dict[str, Any]], examples: Path) -> dict[str, str]:
             if suite["status"] == "failed" or "failed" in statuses:
                 outcome[rel] = "failed"
             elif "passed" not in statuses:
-                # The file has no cloud tests: the integration jest config
+                # The file has no cloud tests: the integration test config
                 # runs only tests whose name contains "cloud". The JS repo's
                 # integration run skips these files the same way.
                 outcome.setdefault(rel, "skipped")
@@ -790,9 +862,10 @@ def summarize(
     The run fails when:
       1. a test file fails, after retries, and is not in known-failures.txt,
       2. a listed file passes, so the list is out of date,
-      3. jest reported fewer files than were selected,
+      3. the test runner reported fewer files than were selected,
       4. no test passed or failed at all, or
-      5. jest exited non-zero although every suite in its results passed.
+      5. the test runner exited non-zero although every suite in its
+         results passed.
     Checks 3 and 4 catch a run that silently executed nothing.
     A file that failed and then passed on retry does not fail the run. It is
     reported as flaky.
@@ -806,7 +879,7 @@ def summarize(
     unexpected = [t for t in failed if t not in known]
     stale = [t for t in passed if t in known]
     missing = sorted(set(selected) - set(outcome))
-    jest_errors = unexplained_exits(results)
+    runner_errors = unexplained_exits(results)
 
     (out / "report.json").write_text(
         json.dumps(
@@ -818,7 +891,9 @@ def summarize(
                 "unexpected_failures": unexpected,
                 "known_failures_now_passing": stale,
                 "not_run": missing,
-                "jest_exit_errors": jest_errors,
+                # The key keeps its jest-era name, so readers of
+                # report.json need no change.
+                "jest_exit_errors": runner_errors,
             },
             indent=2,
         )
@@ -840,9 +915,10 @@ def summarize(
         log(f"PASS {t} is listed in known-failures.txt; remove it from the list")
     for t in missing:
         log(f"NOT RUN {t}")
-    for status in jest_errors:
+    for status in runner_errors:
         log(
-            f"jest exited with status {status} although every suite passed; see its output above"
+            f"the test runner exited with status {status} although every suite passed;"
+            " see its output above"
         )
     log(f"logs and report.json: {out}")
     # A run in which no test passed or failed ran nothing, which must not
@@ -850,7 +926,7 @@ def summarize(
     if not passed and not failed:
         log("no test ran; treating the run as failed")
         return 1
-    return 1 if (unexpected or stale or missing or jest_errors) else 0
+    return 1 if (unexpected or stale or missing or runner_errors) else 0
 
 
 # ---------------------------------------------------------------------------
@@ -899,7 +975,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--shard", type=parse_shard, metavar="I/N", help="run only shard I of N"
     )
     parser.add_argument(
-        "--workers", type=int, default=4, help="jest --maxWorkers (default 4)"
+        "--workers", type=int, default=4, help="test runner --maxWorkers (default 4)"
     )
     parser.add_argument(
         "--retries",
@@ -931,7 +1007,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=shlex.split,
         default=[],
         metavar="ARGS",
-        help="extra jest arguments, as one quoted string, e.g. --jest-args='--verbose'",
+        help="extra test runner arguments, as one quoted string: vitest, or"
+        " jest for an older JS ref, e.g. --jest-args='--reporter=verbose'",
     )
     args = parser.parse_args(argv)
     if args.js_dir and args.js_ref:
@@ -1147,12 +1224,13 @@ def run_tests(args: argparse.Namespace, examples: Path, out: Path) -> int:
     if not tests:
         raise HarnessError("no test files match the selection")
     check_bundles_exist(tests, maps, examples / "dist")
+    runner = detect_test_runner(examples)
     log(
-        f"{len(tests)} test files, {args.workers} jest workers"
+        f"{len(tests)} test files, {args.workers} {runner} workers"
         + (", --skip-time" if args.skip_time else "")
     )
 
-    results = [run_session(args, examples, maps_dir, out, tests, "jest")]
+    results = [run_session(args, runner, examples, maps_dir, out, tests, runner)]
     failed = failed_tests(results, examples)
     retried: list[str] = []
     if failed and args.retries > 0:
@@ -1164,7 +1242,9 @@ def run_tests(args: argparse.Namespace, examples: Path, out: Path) -> int:
             log(f"retrying {len(failed)} failed test file(s), attempt {attempt}")
             retried = sorted(set(retried) | set(failed))
             results.append(
-                run_session(args, examples, maps_dir, out, failed, f"retry{attempt}")
+                run_session(
+                    args, runner, examples, maps_dir, out, failed, f"retry{attempt}"
+                )
             )
             failed = failed_tests(results, examples)
             if not failed:
@@ -1174,19 +1254,21 @@ def run_tests(args: argparse.Namespace, examples: Path, out: Path) -> int:
 
 def run_session(
     args: argparse.Namespace,
+    runner: str,
     examples: Path,
     maps_dir: Path,
     out: Path,
     tests: list[str],
     label: str,
 ) -> dict[str, Any]:
-    """Start fresh servers, run tests with jest, and stop the servers."""
+    """Start fresh servers, run tests with the test runner, and stop the servers."""
     servers = Servers(
         out, maps_dir, examples, args.skip_time, args.log_level, args.dump_dir
     )
     try:
         servers.start()
-        return run_jest(
+        return run_test_runner(
+            runner,
             examples,
             tests,
             servers,
@@ -1201,7 +1283,7 @@ def run_session(
 
 if __name__ == "__main__":
     # SIGTERM (for example a cancelled CI job) raises SystemExit, so the
-    # finally blocks stop the servers and jest.
+    # finally blocks stop the servers and the test runner.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     # A shell starts background jobs with SIGINT ignored. Restore the default
     # so Ctrl-C and kill -INT always stop the run.

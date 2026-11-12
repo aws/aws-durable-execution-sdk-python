@@ -143,7 +143,7 @@ def test_my_example(durable_runner):
 ### MicroVM Image
 `microvm-image/` holds the app, the Dockerfile, and the dependency pins of the MicroVM image that the MicroVM examples run. `hatch run examples:ensure-microvm-image --output image.json` builds the image or reuses it. It needs `TEST_ACCOUNT_ID`, `AWS_REGION`, and AWS credentials for the test account.
 
-1. The script builds the worker wheel from `packages/aws-durable-execution-sdk-python-microvm-worker`, and zips it with the files in `microvm-image/`.
+1. The script builds the worker wheel from `packages/aws-durable-execution-sdk-python-compute-worker`, and zips it with the files in `microvm-image/`.
 2. The image name is `sdk-python-examples-<hash>`. The hash covers the worker's source and `pyproject.toml`, the files in `microvm-image/`, and the `CreateMicrovmImage` settings.
 3. So a run with unchanged inputs reuses the image. A change to any input builds a new image.
 4. The script writes `{"imageArn": ..., "executionRoleArn": ...}` to `--output`. CI passes both to `sam deploy` as `MicrovmImageArn` and `MicrovmExecutionRoleArn`, in the Python 3.13 job only.
@@ -154,8 +154,8 @@ def test_my_example(durable_runner):
 - Deploy the MicroVM examples with the SAM template, with `MicrovmImageArn` and `MicrovmExecutionRoleArn` set. `cli.py deploy` sets neither `MICROVM_IMAGE_ARN` nor `MICROVM_EXECUTION_ROLE_ARN`. So the example raises `RuntimeError` when it runs. When `build/` is missing, `cli.py` also builds it without the extras. So the example then fails at import.
 - Pass a cloud-test input as an object, such as a `dict`. The cloud runner encodes the input with `json.dumps`. So a string that already holds JSON is encoded again, and the handler receives a `str` instead of a `dict`.
 - Start a MicroVM test with `run_async`, and read its result with `wait_for_result`. The synchronous `run` uses botocore's 60-second read timeout, and botocore sends the Invoke again after a read timeout. Each resend starts a new execution, which launches its own MicroVM.
-- `test_microvm_session_suspend.py` checks that an idle session MicroVM suspends and resumes. The function's role needs `lambda:GetMicrovm` and `lambda:ResumeMicrovm`, and the MicroVM execution role needs `lambda:SuspendMicrovm` on the image.
-- `test_microvm_session_suspend_after.py` checks that the worker suspends a session MicroVM after a job with `suspend_after=True`, in a session without auto-suspend, and that the next job resumes it. It needs the same permissions as `test_microvm_session_suspend.py`.
+- `test_microvm_session_suspend.py` checks that an idle session MicroVM suspends, and that the service resumes it on the next job's request. The example sets an idle policy with `autoResumeEnabled`. The function's role needs `lambda:GetMicrovm`, and the MicroVM execution role needs `lambda:SuspendMicrovm` on the image.
+- `test_microvm_session_suspend_after.py` checks that the durable function suspends a session MicroVM after a job with `suspend_after=True`, in a session without auto-suspend, and that the service resumes it on the next job's request. The example sets an idle policy with `autoResumeEnabled`. The function's role needs `lambda:GetMicrovm` and `lambda:SuspendMicrovm` on the image. The MicroVM execution role needs no suspend permission.
 
 ### Cloud-Only Tests
 `@pytest.mark.durable_execution(..., cloud_only=True)` marks a test that needs a service the local runner cannot provide, such as a MicroVM. Local mode skips the test with the reason `cloud_only: runs only against the deployed function`. Cloud mode runs it.

@@ -19,17 +19,21 @@ This package holds the SDK-specific part: the handler and the SAM template that 
 | Suite       | Requirements  | What it pins down                                                                                                                              |
 | ----------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `telemetry` | `telemetry-1` | One successful single-step execution emits one `SUCCEEDED` record with `input`, `output`, ARN-derived identity fields, and `operationsByName`. |
+| `telemetry` | `telemetry-2` | One failed execution emits one `FAILED` record with an `error` on the execution and on `operationsByName.charge`.                             |
+| `telemetry` | `telemetry-3` | An `OperationOverride.result` transform exports exactly `{userId}` of a three-key step result; the record has no `input` or `output`.          |
 
 ## Layout
 
 ```
 src/
-  telemetry_1_success.py     # single step "increment"; plugin + CloudWatchLogsExporter
-  Makefile                   # build-Telemetry1Success target used by `sam build`
-  requirements.txt           # core SDK + telemetry exporter, pinned to ${PYTHON_SDK_REF}
-template.yaml                # declares TelemetryLogGroupName and creates the group
+  telemetry_1_success.py       # single step "increment"; plugin + CloudWatchLogsExporter
+  telemetry_2_failure.py       # step "charge" fails; handler raises "payment failed" from the step error
+  telemetry_3_result_select.py # step "fetch-user"; override transform keeps only userId in the record
+  Makefile                     # one build-<LogicalId> target per function, used by `sam build`
+  requirements.txt             # core SDK + telemetry exporter, pinned to ${PYTHON_SDK_REF}
+template.yaml                  # declares TelemetryLogGroupName and creates the group
 tests/
-  test_telemetry_examples.py # guards template -> handler wiring and the parameter contract
+  test_telemetry_examples.py   # guards template -> handler wiring; runs each handler locally
 ```
 
 The handler uses the real SDK API only.
@@ -59,7 +63,10 @@ export PYTHON_SDK_REF=$(git rev-parse HEAD)   # must already be pushed
 sam build --template packages/aws-durable-execution-sdk-python-conformance-tests-telemetry/template.yaml
 ```
 
-Run the wiring tests from the repository root:
+Run the package tests from the repository root. They check the template wiring, and
+they run each handler through `DurableFunctionTestRunner` with `boto3.client` replaced
+by a fake `logs` client that records `PutLogEvents` calls, so a handler that stops
+producing its requirement's record fails here before a cloud run:
 
 ```bash
 hatch run test:all packages/aws-durable-execution-sdk-python-conformance-tests-telemetry/tests

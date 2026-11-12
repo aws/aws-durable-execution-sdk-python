@@ -4,7 +4,7 @@ The JS test runner (CloudDurableTestRunner) starts an execution by calling
 Lambda Invoke on the function. It reads the execution ARN from the
 X-Amz-Durable-Execution-Arn response header. The local runner has no Invoke
 route. It starts executions with POST /start-durable-execution. So this
-proxy sits between jest and the runner:
+proxy sits between the JS tests and the runner:
 
 * POST /2015-03-31/functions/{name}/invocations: the proxy calls
   POST /start-durable-execution on the runner, then answers with the new

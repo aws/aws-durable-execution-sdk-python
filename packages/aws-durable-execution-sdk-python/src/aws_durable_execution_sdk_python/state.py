@@ -335,7 +335,7 @@ class CheckpointedResult:
         ensures async operations whose checkpoint carries a downstream error type
         (invoke/callback) still surface as the correct per-operation error.
         """
-        if self.error is None:
+        if self.error is None or not self.error.to_dict():
             err_msg: str = (
                 msg
                 or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
@@ -682,11 +682,15 @@ class ExecutionState:
         )
 
     def is_operation_updated_since_last_invocation(self, operation_id: str) -> bool:
-        """Return True if an operation changed while this execution was suspended."""
+        """Return True if the invocation input lists the operation as updated.
+
+        ``UpdatedOperationIds`` names the operations that changed since the
+        last successful invocation.
+        """
         return operation_id in self._updated_operation_ids
 
     def emit_operation_update_hook(self, operation: Operation) -> None:
-        """Fire the plugin update hook for an operation changed during suspend.
+        """Fire the plugin update hook for an operation the input lists as updated.
 
         This method is safe to call for any operation. It emits only for
         operations listed in UpdatedOperationIds.

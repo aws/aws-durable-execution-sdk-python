@@ -675,7 +675,8 @@ class EventError:
     @classmethod
     def from_dict(cls, data: dict) -> EventError:
         payload = None
-        if payload_data := data.get("Payload"):
+        payload_data = data.get("Payload")
+        if payload_data is not None:
             payload = ErrorObject.from_dict(payload_data)
 
         return cls(

@@ -13,6 +13,8 @@ cannot resolve from the number of open invocations alone.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from functools import partial
 import logging
 import threading
 from dataclasses import replace
@@ -20,6 +22,10 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock, patch
 
+import pytest
+
+from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPluginFactory
+from aws_durable_execution_sdk_python_otel import create_otel_plugin_factory
 from aws_durable_execution_sdk_python.context import DurableContext, durable_step
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
@@ -37,9 +43,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python_otel.log_filter import OtelContextLogFilter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
-from aws_durable_execution_sdk_python_otel.plugin_factory import (
-    InvocationOtelPluginFactory,
-)
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -180,7 +183,17 @@ def _remove_otel_filters(handler: logging.Handler) -> None:
         handler.removeFilter(installed)
 
 
-def test_overlapping_invocations_stamp_top_level_logs_with_their_own_span() -> None:
+@pytest.mark.parametrize(
+    ("create_factory", "parent_name"),
+    [
+        (create_otel_plugin_factory, "Workflow"),
+        (partial(create_otel_plugin_factory, mode="invocation"), "Invocation"),
+    ],
+)
+def test_overlapping_invocations_stamp_top_level_logs_with_their_own_span(
+    create_factory: Callable[[OtelPluginConfig], DurableInstrumentationPluginFactory],
+    parent_name: str,
+) -> None:
     """A handler's first log carries its own invocation's trace and span ids.
 
     Both invocations are open when either record is emitted, and neither record
@@ -201,7 +214,7 @@ def test_overlapping_invocations_stamp_top_level_logs_with_their_own_span() -> N
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     # enrich_logger is the documented default: the plugin installs the filter on
     # the root logger's handlers, including the collector added above.
-    factory = InvocationOtelPluginFactory(
+    factory = create_factory(
         OtelPluginConfig(tracer_provider=provider, enrich_logger=True)
     )
 
@@ -283,6 +296,20 @@ def test_overlapping_invocations_stamp_top_level_logs_with_their_own_span() -> N
         assert stamped == {
             owner: expected[_execution_arn(owner)] for owner in OWNERS
         }, f"records carried {stamped}"
+        # Log correlation keeps its existing Invocation fallback in both views;
+        # durable operation parenting distinguishes the selected view.
+        parents = {
+            str(span.attributes["durable.execution.arn"]): span.context
+            for span in exporter.get_finished_spans()
+            if span.name == parent_name and span.attributes is not None
+        }
+        for owner in OWNERS:
+            operation = next(
+                span
+                for span in exporter.get_finished_spans()
+                if span.name == f"after-log-{owner}"
+            )
+            assert operation.parent == parents[_execution_arn(owner)]
     finally:
         for installed_on in list(root.handlers):
             _remove_otel_filters(installed_on)
