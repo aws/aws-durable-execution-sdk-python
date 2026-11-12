@@ -1,4 +1,13 @@
-# Python LMI end-to-end tests
+# Python LMI shared conformance adapter
+
+The cloud entry point is now the shared runner from
+[conformance PR #186](https://github.com/aws/aws-durable-execution-conformance-tests/pull/186),
+pinned to `6f899679c7eb6ede836c737acb9816e6fd7072fd`. The Python adapter runs
+`python-lifecycle` (76 cells) and `export-lifecycle` (24 cells) against the same
+persistent c1/c2 functions. The latter covers both OTel views with synchronous
+export and asynchronous export with a bounded flush wait. Shared requirements,
+validation, JSON/JUnit reports and ownership journals come from that pinned
+checkout; the conformance packages are installed on the driver only.
 
 This suite implements [#742](https://github.com/aws/aws-durable-execution-sdk-python/issues/742)
 and asserts the invocation-lifetime behavior requested by
@@ -18,7 +27,11 @@ ordinary local test suite remains usable while the fix is designed.
 Use Python 3.14 and Hatch from the repository root:
 
 ```sh
-hatch run lmi:unit
+# Check out the exact shared runner revision first.
+gh repo clone aws/aws-durable-execution-conformance-tests .conformance
+git -C .conformance checkout 6f899679c7eb6ede836c737acb9816e6fd7072fd
+hatch run lmi:shared-setup
+hatch run lmi:shared-tests
 hatch run lmi:lint
 hatch run lmi:regressions --junitxml=lmi_tests/artifacts/regressions.xml
 ```
@@ -68,15 +81,15 @@ is substituted. The artifact hash, SDK wheel version, and commit are retained.
 hatch run lmi:build
 hatch run lmi:python -m lmi_tests.deploy deploy \
   --stack-name python-lmi-e2e --run-id local-20260923-a --runtime python3.14
-hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
+hatch run lmi:shared
 # Run both commands below even when a scenario fails:
 hatch run lmi:python -m lmi_tests.deploy collect
-hatch run lmi:python -m lmi_tests.deploy cleanup
+hatch run lmi:shared-cleanup
 python -m lmi_tests.summary
 ```
 
 For unattended local runs, install a shell `EXIT`/`INT`/`TERM` trap that calls
-`collect` followed by `cleanup`; the workflow already has unconditional steps.
+`collect` followed by `shared-cleanup`; the workflow already has unconditional steps.
 Use a fresh run ID for each run and reuse the same stack name. Before build or
 deployment preflight, the driver removes prior run metadata and reports from
 `lmi_tests/artifacts`, preserving `build.json` for artifact verification. Archive
@@ -84,9 +97,39 @@ any evidence you need before starting another run. The run manifest is invalidat
 first, so a failed build, invalid configuration, or account/provider check cannot
 make an exit trap collect or clean up the preceding run. This deployment supplies both native
 environment-concurrency settings, `1` and `2`, on Python 3.14. The single cloud
-command runs 14 lifecycle and 24 observability cases for each setting (76 cases), sequentially, without
-redeploying or changing function configuration between cases. Independent SDK
+command runs 100 shared coverage cells. The shared coordinator reserves native
+capacity for each case and serializes exclusive cases, without redeploying or
+changing function configuration between cases. Independent SDK
 branch-concurrency settings include 1, 2, and 3.
+
+To launch the same cloud workflow from an SDK branch:
+
+```sh
+gh workflow run lmi-e2e-tests.yml --repo aws/aws-durable-execution-sdk-python \
+  --ref YOUR_BRANCH -f region=us-west-2
+```
+
+CI first runs the local harness, then assumes the repository's configured test
+role and deploys the checked-out SDK and OTel wheels. It uploads the raw S3/service
+records, shared manifests, attempt journals, coverage inventories, and JSON/JUnit
+reports under `lmi_tests/artifacts/shared/`. Missing placement or source evidence
+is a failure, not an accepted skip. Local integration checks exercise the real
+public SDK and local checkpoint service; they do not establish LMI recovery.
+
+A non-expiring conditional S3 ownership record under `ownership/<stack>/` fences
+updates to the shared functions. Case controls live under separate run/case
+prefixes. Normal completion releases ownership only when both profiles prove
+quiescence. Interrupted or unproven retirement retains ownership for reconciliation;
+`shared-cleanup` releases only that run's recorded controls and executions and
+cannot turn an unknown retirement into success. Do not delete the record merely
+to bypass a blocked deployment.
+
+The fixture's asynchronous processor waits up to five seconds through the real
+provider flush API; shared acceptance allows ten seconds for that wait boundary.
+Export completion is tracked separately and remains owned after wrapper return.
+These are declared test budgets, not SDK SLAs. See
+[shared telemetry observations](shared-telemetry.md) for capture/publication
+ordering and [the adapter design](shared-suite-design.md) for ownership details.
 
 The first run creates the persistent `python-lmi-e2e` stack, one private bucket,
 and two functions/log groups (`python-lmi-e2e-c1`, `python-lmi-e2e-c2`). Later runs
@@ -114,7 +157,7 @@ The handler mappings are saved under `c1` and `c2` in
 `DurableFunctionCloudTestRunner` for async invocation, callback completion, and
 waiting for results, with finite boto transport timeouts.
 
-## Evidence and regression contracts
+## SDK fixture and regression contracts
 
 | Scenario | Evidence required |
 | --- | --- |
@@ -125,6 +168,11 @@ waiting for results, with finite boto transport timeouts.
 | Checkpoint settlement | Real synchronous service checkpoint is acknowledged but response delivery to the SDK waiter is externally held; wrapper cannot return before settlement; releasing the response must unblock branch cleanup |
 | Invocation deadline (#741) | A real short function timeout, service invocation-completed error for the exact request, external side effects, full original-environment worker capacity recovery, and healthy concurrent work on another process for c2 |
 | Timeout/retry | A second service invocation of the **same** durable execution, completed step skipped, original attempt effects cease; repeated interrupted at-least-once work is recorded separately and is not called exactly-once |
+
+The following sections describe the retained SDK-local fixtures and legacy
+pytest regression entry points. Cloud acceptance uses the shared manifests and
+validators described above. Java-specific executor, handler-owner and Context/MDC
+assertions remain the Java SDK's responsibility.
 
 ### Java lifecycle coverage in Python
 

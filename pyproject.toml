@@ -46,6 +46,10 @@ cloud = "pytest lmi_tests/tests/e2e --lmi-cloud {args}"
 regressions = "pytest lmi_tests/tests/regressions --run-lmi-regressions {args}"
 lint = "ruff check lmi_tests && ruff format --check lmi_tests"
 build = "python -m lmi_tests.deploy build {args}"
+shared-setup = "python -m lmi_tests.shared setup {args}"
+shared = "python -m lmi_tests.shared run {args}"
+shared-cleanup = "python -m lmi_tests.shared cleanup {args}"
+shared-tests = "python -m pytest lmi_tests/tests/unit lmi_tests/tests/e2e --ignore=lmi_tests/tests/e2e/test_lifecycle.py --ignore=lmi_tests/tests/e2e/test_observability.py {args}"
 
 [tool.pytest.ini_options]
 # Declare custom markers to avoid warnings with --strict-markers

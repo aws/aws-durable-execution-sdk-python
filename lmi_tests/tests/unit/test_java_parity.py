@@ -46,8 +46,11 @@ class Controls:
 
     def trace(self, marker, scenario):
         trace = Trace.__new__(Trace)
+        trace.capture_lock, trace.capture_sequence = threading.Lock(), 0
         trace.s3, trace.bucket = self, "unit"
         trace.payload = {"marker": marker, "scenario": scenario}
+        trace.shared = False
+        trace.control_prefix = "runs/unit/control/"
         trace.identity = {
             "run": "unit",
             "marker": marker,
@@ -186,6 +189,9 @@ def run_shared_roots(nested):
     rendezvous = threading.Barrier(2, timeout=3)
 
     class QuietTrace:
+        def __init__(self):
+            self.payload = {}
+
         def emit(self, *_args, **_kwargs):
             pass
 

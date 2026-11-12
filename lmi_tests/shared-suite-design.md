@@ -66,11 +66,27 @@ claim to fix the open runtime deadline/cleanup defects tracked by Python #741.
 
 ## Reviewable decisions and limits
 
-- This PR is stacked on Python #743 and does not modify that PR's branch.
-- Conformance is pinned to PR #186's exact revision, not a moving branch.
+- This PR targets current main, reuses the Python #743 harness, and does not modify that PR's branch.
+- Conformance is pinned to PR #186 revision `6f899679c7eb6ede836c737acb9816e6fd7072fd`.
 - The default target is the Python-specific 76-cell matrix plus the portable
   24-cell exporter matrix; it does not imply ordinary SDK/OTel suite acceptance
   on LMI or acceptance against the separate standard profile.
 - Fixture budgets are declared before a run and kept distinct from product SLAs.
 - SDK bugs stay failures. No cloud success or bounded arbitrary user-I/O
   termination is inferred from local harness tests.
+
+## Observation boundaries
+
+The public SDK does not emit a root user-function hook. The fixture observes its
+actual root entry/finally using the root operation ID supplied by public invocation
+metadata. Operation names may be null. A Workflow span may start at the real
+service execution start, before the current native invocation begins; history
+retains that timestamp separately from invocation admission.
+
+The source ledger reserves capture order at each actual SDK boundary independently
+of later S3 publication. Export release receipts record when the SDK observed the
+control; driver release intent and acknowledgement remain separate observations.
+Native timeout and wrapper return are independent outcomes. Deadline measurements
+are frozen before cleanup releases the held step; cleanup cannot repair failed
+behavior assertions. The shared error expectations explicitly enumerate allowed
+service statuses where a measurement may precede execution termination.

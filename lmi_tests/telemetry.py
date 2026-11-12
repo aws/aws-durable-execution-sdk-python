@@ -1,25 +1,21 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Real OTel export into the LMI evidence ledger; no runtime carrier injection."""
+"""Real public OTel plugins with immutable runtime and invocation ownership."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from contextvars import ContextVar
+from collections.abc import Callable
 from importlib.metadata import version
 import os
 import threading
+import time
+from typing import Any
 import uuid
 from weakref import WeakKeyDictionary
-from typing import Any, TYPE_CHECKING
 
-from opentelemetry import context as otel_context
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import (
-    SimpleSpanProcessor,
-    SpanExporter,
-    SpanExportResult,
-)
+from opentelemetry import context as otel_context, trace as otel_trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 
 from aws_durable_execution_sdk_python_otel import (
@@ -32,64 +28,57 @@ from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPluginFactory,
     InvocationStartInfo,
 )
+from lmi_tests.shared_exporter import (
+    AsyncSpanProcessor,
+    CURRENT_OWNER,
+    DEFAULT_FLUSH_TIMEOUT_MS,
+    LedgerExporter,
+    Owner,
+    Trace,
+    Tracker,
+    owned,
+)
 
-if TYPE_CHECKING:
-    from lmi_tests.fixture import Trace
-
-_CURRENT_TRACE: ContextVar[Trace | None] = ContextVar("lmi_otel_evidence", default=None)
-_RUNTIMES: dict[str, Runtime] = {}
+_RUNTIMES: dict[tuple[str, str], Runtime] = {}
 _RUNTIME_LOCK = threading.Lock()
 
 
-class LedgerExporter(SpanExporter):
-    """Capture the actual exported data, independently of expected attribution."""
+class ObservedPlugin(DurableInstrumentationPlugin):
+    """Forward the real public hooks, binding their immutable invocation owner."""
 
-    def __init__(self, view: str) -> None:
-        self.view = view
-        self.shutdown_calls = 0
-        self.active_trace: Trace | None = None
+    def __init__(self, delegate: DurableInstrumentationPlugin, owner: Owner) -> None:
+        self.delegate, self.owner = delegate, owner
 
-    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        # The checkpoint batcher may export outside the caller's ContextVar.
-        # Native Python LMI has one request per process. Keep its independently
-        # observed current invocation as a fallback; never infer ownership from
-        # the span's potentially corrupted execution attributes.
-        diagnostic = _CURRENT_TRACE.get() or self.active_trace
-        if diagnostic is None:
-            raise RuntimeError("OTel export lost the invocation evidence context")
-        mode = diagnostic.payload.get("otel_export", "success")
-        if mode == "held":
-            diagnostic.emit("OTEL_EXPORT_HELD", view=self.view)
-            diagnostic.gate(diagnostic.payload["otel_export_gate"])
-        for span in spans:
-            context = span.context
-            if context is None:
-                raise ValueError("Exported span has no span context")
-            data = {
-                "name": span.name,
-                "trace_id": format(context.trace_id, "032x"),
-                "span_id": format(context.span_id, "016x"),
-                "parent_id": format(span.parent.span_id, "016x")
-                if span.parent
-                else None,
-                "sampled": context.trace_flags.sampled,
-                "start_ns": span.start_time,
-                "end_ns": span.end_time,
-                "status": span.status.status_code.name,
-                "attributes": dict(span.attributes or {}),
-            }
-            diagnostic.emit("OTEL_EXPORT", view=self.view, outcome=mode, span=data)
-        return (
-            SpanExportResult.FAILURE if mode == "failure" else SpanExportResult.SUCCESS
-        )
+    def _call(self, name: str, info: Any) -> Any:
+        with owned(self.owner):
+            return getattr(self.delegate, name)(info)
 
-    def shutdown(self) -> None:
-        self.shutdown_calls += 1
+    def on_invocation_start(self, info) -> None:
+        self._call("on_invocation_start", info)
+
+    def on_invocation_end(self, info) -> None:
+        self._call("on_invocation_end", info)
+
+    def on_operation_start(self, info) -> None:
+        self._call("on_operation_start", info)
+
+    def on_operation_end(self, info) -> None:
+        self._call("on_operation_end", info)
+
+    def on_operation_change(self, info) -> None:
+        self._call("on_operation_change", info)
+
+    def on_user_function_start(self, info) -> None:
+        self._call("on_user_function_start", info)
+
+    def on_user_function_end(self, info) -> None:
+        self._call("on_user_function_end", info)
+
+    def provide_propagation_metadata(self, info):
+        return self._call("provide_propagation_metadata", info)
 
 
 class EvidenceFactory:
-    """Observe factory ownership while returning the actual bundled OTel plugin."""
-
     __durable_registration_api__ = 1
     exclusive_group = "aws-durable-execution-otel-view"
 
@@ -108,29 +97,85 @@ class EvidenceFactory:
         self.lock = threading.Lock()
 
     def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
-        trace = _CURRENT_TRACE.get()
-        if trace is None:
-            raise RuntimeError("Factory lost the invocation evidence context")
+        owner = CURRENT_OWNER.get()
+        if owner is None:
+            raise RuntimeError("Factory lost the invocation evidence owner")
         plugin = self.delegate.create_plugin(info)
         with self.lock:
             identity = self.instances.setdefault(plugin, uuid.uuid4().hex)
-        trace.emit(
+        owner.trace.emit(
             "OTEL_FACTORY",
             plugin_instance=identity,
             plugin_execution=info.execution_arn,
         )
-        return plugin
+        owner.tracker.observe(
+            owner,
+            "otel_factory",
+            pluginInstanceId=identity,
+            pluginExecutionArn=info.execution_arn,
+        )
+        return ObservedPlugin(plugin, owner)
 
 
 class Runtime:
-    """A provider/exporter shared within one Python worker, across invocations."""
+    """An immutable provider variant shared across invocations in one process."""
 
-    def __init__(self, view: str) -> None:
+    def __init__(
+        self,
+        view: str,
+        export_mode: str = "sync",
+        *,
+        flush_timeout_ms: float = DEFAULT_FLUSH_TIMEOUT_MS,
+    ) -> None:
+        if view not in {"invocation", "execution"} or export_mode not in {
+            "sync",
+            "async-bounded-flush",
+        }:
+            raise ValueError("Unknown OTel view or exporter mode")
         self.identity = uuid.uuid4().hex
-        self.exporter = LedgerExporter(view)
+        self.created_at_ms = time.time_ns() / 1_000_000
+        self.view, self.export_mode = view, export_mode
+        self.tracker = Tracker(
+            self.identity, uuid.uuid4().hex, view, export_mode, flush_timeout_ms
+        )
+        self.exporter = LedgerExporter(self.tracker)
         self.provider = TracerProvider(sampler=ALWAYS_ON, shutdown_on_exit=False)
-        self.provider.add_span_processor(SimpleSpanProcessor(self.exporter))
+        self.provider.add_span_processor(
+            SimpleSpanProcessor(self.exporter)
+            if export_mode == "sync"
+            else AsyncSpanProcessor(self.exporter)
+        )
         self.factory = EvidenceFactory(view, self.provider)
+
+    def pending_for_case(self, case_id: str) -> dict[str, Any]:
+        return self.tracker.active(case_id)
+
+
+def active_work(trace: Trace) -> dict[str, Any]:
+    """Actual outstanding work/publication across immutable runtime variants."""
+    case_id = str(trace.payload.get("caseId", trace.identity.get("marker", "")))
+    result: dict[str, Any] = {
+        "pendingExportIds": [],
+        "pendingFlushIds": [],
+        "publicationCount": 0,
+        "publicationErrors": [],
+    }
+    with _RUNTIME_LOCK:
+        runtimes = tuple(_RUNTIMES.values())
+    for runtime in runtimes:
+        state = runtime.pending_for_case(case_id)
+        for field in ("pendingExportIds", "pendingFlushIds", "publicationErrors"):
+            result[field].extend(state[field])
+        result["publicationCount"] += state["publicationCount"]
+    return result
+
+
+def _context_snapshot() -> dict[str, str | None]:
+    context = otel_trace.get_current_span().get_span_context()
+    return {
+        "traceId": format(context.trace_id, "032x") if context.is_valid else None,
+        "spanId": format(context.span_id, "016x") if context.is_valid else None,
+    }
 
 
 def invoke(
@@ -139,30 +184,51 @@ def invoke(
         [list[DurableInstrumentationPluginFactory]], dict[str, Any]
     ],
 ) -> dict[str, Any]:
-    """Enter before SDK dispatch so worker-context propagation is also exercised."""
-    view = trace.payload["otel_view"]
-    if view not in {"invocation", "execution"}:
-        raise ValueError("Unknown OTel view")
+    view = trace.payload.get("otel_view", trace.payload.get("otelView"))
+    export_mode = str(trace.payload.get("exportMode", "sync"))
+    if view not in {"invocation", "execution"} or export_mode not in {
+        "sync",
+        "async-bounded-flush",
+    }:
+        raise ValueError("Unknown OTel view or exporter mode")
+    key = (view, export_mode)
     with _RUNTIME_LOCK:
-        if view not in _RUNTIMES:
-            _RUNTIMES[view] = Runtime(view)
-        runtime = _RUNTIMES[view]
-    token = _CURRENT_TRACE.set(trace)
-    runtime.exporter.active_trace = trace
-    before = otel_context.get_current()
+        if key not in _RUNTIMES:
+            _RUNTIMES[key] = Runtime(view, export_mode)
+        runtime = _RUNTIMES[key]
+    owner = runtime.tracker.owner(trace)
+    before, snapshot = otel_context.get_current(), _context_snapshot()
+    carrier = os.environ.get("_X_AMZN_TRACE_ID")
     trace.emit(
         "OTEL_ENTER",
         view=view,
+        export_mode=runtime.export_mode,
         provider=runtime.identity,
-        carrier=os.environ.get("_X_AMZN_TRACE_ID"),
+        carrier=carrier,
         carrier_source="runtime_environment",
         core_version=version("aws-durable-execution-sdk-python"),
         otel_version=version("aws-durable-execution-sdk-python-otel"),
     )
+    runtime.tracker.observe(
+        owner,
+        "provider_observed",
+        createdAtMs=runtime.created_at_ms,
+        environmentId=trace.identity["environment"],
+        processId=trace.identity["process"],
+    )
+    runtime.tracker.observe(
+        owner,
+        "otel_enter",
+        contextBefore=snapshot,
+        carrier=carrier,
+        carrierSource="process-environment",
+    )
     try:
-        return invoke_handler([runtime.factory])
+        with owned(owner):
+            return invoke_handler([runtime.factory])
     finally:
         try:
+            # The SDK caller captures its real return before this diagnostic I/O.
             trace.emit(
                 "OTEL_EXIT",
                 view=view,
@@ -170,5 +236,11 @@ def invoke(
                 context_restored=otel_context.get_current() == before,
                 exporter_shutdowns=runtime.exporter.shutdown_calls,
             )
+            runtime.tracker.observe(
+                owner,
+                "otel_exit",
+                contextAfter=_context_snapshot(),
+                exporterShutdowns=runtime.exporter.shutdown_calls,
+            )
         finally:
-            _CURRENT_TRACE.reset(token)
+            runtime.tracker.close_invocation(owner)

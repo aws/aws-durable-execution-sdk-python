@@ -18,7 +18,9 @@ def manifest():
         "stack": "python-lmi-e2e",
         "bucket": "test-bucket",
         "role": "role",
-        "provider": "provider",
+        "provider": "arn:aws:lambda:us-west-2:123456789012:capacity-provider:provider",
+        "region": "us-west-2",
+        "account": "123456789012",
         "runtime": "python3.14",
         "concurrencies": deploy.CONCURRENCIES,
         "functions": {},
@@ -84,6 +86,8 @@ def test_verify_rejects_standard_lambda_wrong_artifact_and_unbounded_placement(
         "Timeout",
         "DurableConfig",
         "Environment",
+        "Role",
+        "Handler",
     ):
         bad = copy.deepcopy(config)
         del bad[field]
@@ -134,6 +138,25 @@ def apis(monkeypatch, tmp_path):
     clients = {name: Mock() for name in ("cloudformation", "s3", "lambda")}
     monkeypatch.setattr(deploy, "client", clients.__getitem__)
     monkeypatch.setattr(deploy, "ARTIFACTS", tmp_path)
+    from lmi_tests.tests.unit.test_shared_lock import Store
+
+    lease_store = Store()
+    clients["s3"].get_public_access_block.return_value = {
+        "PublicAccessBlockConfiguration": {
+            "BlockPublicAcls": True,
+            "IgnorePublicAcls": True,
+            "BlockPublicPolicy": True,
+            "RestrictPublicBuckets": True,
+        }
+    }
+    clients["s3"].get_object.side_effect = lease_store.get_object
+
+    def store(**kwargs):
+        if kwargs["Key"].startswith("ownership/"):
+            return lease_store.put_object(**kwargs)
+        return {}
+
+    clients["s3"].put_object.side_effect = store
     return clients
 
 
@@ -150,6 +173,22 @@ def test_later_run_updates_fixed_functions_without_recreating_resources(
     verify = Mock()
     monkeypatch.setattr(deploy, "verify", verify)
     deploy.deploy_stack(manifest, b"first-code")
+    # No SDK work is launched by this deployment-only test. Retire its ownership
+    # window before testing a second revision against the same persistent targets.
+    from lmi_tests.shared_lock import RunLease
+
+    record = manifest["sharedLease"]
+    lease = RunLease(
+        record["bucket"],
+        record["key"],
+        record["runId"],
+        record["token"],
+        tuple(record["resources"]),
+        apis["s3"],
+    )
+    for resource in lease.resources:
+        lease.finish_profile(resource, True)
+    lease.release()
     second = {
         **manifest,
         "run": "second",
@@ -273,7 +312,10 @@ def test_busy_or_incompletely_listed_functions_block_updates(
     with pytest.raises(ProvisioningError, match="code was not updated"):
         deploy.deploy_stack(manifest, b"code")
     cfn.update_stack.assert_not_called()
-    apis["s3"].put_object.assert_not_called()
+    assert not any(
+        call.kwargs["Key"] == manifest["codeKey"]
+        for call in apis["s3"].put_object.call_args_list
+    )
     apis["lambda"].stop_durable_execution.assert_not_called()
 
 

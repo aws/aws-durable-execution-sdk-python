@@ -22,6 +22,7 @@ from aws_durable_execution_sdk_python import durable_execution
 @pytest.fixture
 def trace():
     value = Trace.__new__(Trace)
+    value.capture_lock, value.capture_sequence = threading.Lock(), 0
     value.s3 = boto3.client(
         "s3",
         region_name="us-west-2",
@@ -30,6 +31,9 @@ def trace():
     )
     value.bucket = "test-bucket"
     value.identity = {"run": "unit"}
+    value.payload = {"scenario": "control"}
+    value.shared = False
+    value.control_prefix = "runs/unit/control/"
     value.emit = Mock()
     return value
 
@@ -79,7 +83,12 @@ def test_fault_gate_outlives_invocation_deadline_but_remains_bounded(
     monkeypatch.setattr(
         fixture,
         "time",
-        SimpleNamespace(monotonic=lambda: next(times), sleep=lambda _: None),
+        SimpleNamespace(
+            monotonic=lambda: next(times),
+            sleep=lambda _: None,
+            time=time.time,
+            time_ns=time.time_ns,
+        ),
     )
     if escaped:
         with pytest.raises(TimeoutError, match="emergency release"):
@@ -159,10 +168,13 @@ def test_full_fixture_establishes_a_real_blocked_loser(scenario):
             return {"Body": io.BytesIO(objects[kwargs["Key"]])}
 
     trace = Trace.__new__(Trace)
+    trace.capture_lock, trace.capture_sequence = threading.Lock(), 0
     trace.s3, trace.bucket = Mock(), "test-bucket"
     trace.s3.put_object.side_effect, trace.s3.get_object.side_effect = put, get
     trace.identity = {"run": "unit", "marker": "local", "request": "request"}
     trace.lock, trace.sequence, trace.deadline = threading.Lock(), 0, time.time() + 30
+    trace.payload, trace.shared = {"scenario": scenario}, False
+    trace.control_prefix = "runs/unit/control/"
     handler = durable_execution(
         lambda _e, c: workflow({"marker": "local", "scenario": scenario}, c, trace)
     )

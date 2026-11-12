@@ -20,6 +20,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from lmi_tests.evidence import ProvisioningError
+from lmi_tests.shared_lock import RunLease
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,7 +130,13 @@ def build():
         check=True,
     )
     (target / "lmi_tests").mkdir()
-    for name in ("__init__.py", "fixture.py", "telemetry.py"):
+    for name in (
+        "__init__.py",
+        "fixture.py",
+        "telemetry.py",
+        "shared_observations.py",
+        "shared_exporter.py",
+    ):
         shutil.copy(ROOT / "lmi_tests" / name, target / "lmi_tests" / name)
     artifact = directory / "function.zip"
     resolved = json.loads((directory / "dependencies.json").read_text())
@@ -327,6 +334,11 @@ def verify(config, scaling, manifest, key):
         actual.get("PerExecutionEnvironmentMaxConcurrency")
         == manifest["concurrencies"][key],
         config.get("Runtime") == manifest["runtime"],
+        config.get("Role") == manifest["role"],
+        config.get("Handler") == "lmi_tests.fixture.handler",
+        not config.get("Layers", []),
+        config.get("Environment", {}).get("Variables", {}).get("LMI_BUCKET")
+        == manifest["bucket"],
         config.get("Architectures") == ["arm64"],
         config.get("Version") == QUALIFIER,
         config.get("CodeSha256") == manifest["codeSha256"],
@@ -444,6 +456,42 @@ def deploy_stack(manifest, data):
             raise ProvisioningError(
                 f"Persistent stack requires recovery from {stack['StackStatus']}; it was retained"
             )
+    storage = client("s3")
+    storage.put_public_access_block(
+        Bucket=manifest["bucket"],
+        PublicAccessBlockConfiguration={
+            "BlockPublicAcls": True,
+            "IgnorePublicAcls": True,
+            "BlockPublicPolicy": True,
+            "RestrictPublicBuckets": True,
+        },
+    )
+    protection = storage.get_public_access_block(Bucket=manifest["bucket"])[
+        "PublicAccessBlockConfiguration"
+    ]
+    if not all(
+        protection.get(name) is True
+        for name in (
+            "BlockPublicAcls",
+            "IgnorePublicAcls",
+            "BlockPublicPolicy",
+            "RestrictPublicBuckets",
+        )
+    ):
+        raise ProvisioningError(
+            "Evidence bucket must be private before uploading the tested artifact"
+        )
+    partition = manifest["provider"].split(":")[1]
+    targets = tuple(
+        f"arn:{partition}:lambda:{manifest['region']}:{manifest['account']}:function:{manifest['stack']}-{key}:{QUALIFIER}"
+        for key in CONCURRENCIES
+    )
+    lease = RunLease.acquire(
+        manifest["bucket"], manifest["stack"], manifest["run"], targets, s3=storage
+    )
+    manifest["sharedLease"] = lease.to_manifest()
+    save(ARTIFACTS / "manifest.json", manifest)
+    if stack is not None:
         wait_for_idle_functions(stack)
     manifest["owned"] = True
     save(ARTIFACTS / "manifest.json", manifest)
