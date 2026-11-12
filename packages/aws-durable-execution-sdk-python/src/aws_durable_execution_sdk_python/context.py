@@ -520,8 +520,17 @@ class DurableContext(DurableContextProtocol):
         )
 
     def _next_operation_exists(self) -> bool:
-        """True if a checkpoint exists for this context's next operation."""
-        return self._peek_next_checkpoint().is_existent()
+        """True if the next operation or its first inner operation has a checkpoint."""
+        if self._peek_next_checkpoint().is_existent():
+            return True
+        # A virtual child never checkpoints itself, so its history starts at its
+        # first inner operation.
+        first_child_id: str = OperationIdNamespace(
+            self._peek_next_operation_id()
+        ).create_id_for_step(1)
+        return self.state.get_checkpoint_result(
+            first_child_id, claim_end_hook=False
+        ).is_existent()
 
     @contextmanager
     def _replay_aware(
@@ -542,14 +551,20 @@ class DurableContext(DurableContextProtocol):
 
         - Existence flip (before the op): if we are replaying and the next
           operation has no checkpoint at all, it is brand-new code, so flip to
-          NEW immediately so the operation and its logs count as new.
+          NEW immediately so the operation and its logs count as new. A virtual
+          child never checkpoints itself, so a missing checkpoint at its id is
+          not this flip: with `is_virtual=True` the context stays in replay and
+          the child refines against its inner operation ids.
         - Deferred status flip (after the op): a non-terminal next operation is
           a pure resume point with no user body. We keep replay status through the
           operation and flip to NEW afterwards, so the resuming operation's own
           logs stay de-duplicated but subsequent code counts as new.
         - Post-op existence flip (after the op): if we are still replaying once
           the operation completes and the *following* operation does not exist
-          yet, we have reached the replay boundary.
+          yet, we have reached the replay boundary. Existence includes a
+          checkpoint at the following operation's own id or, when that is
+          missing, at its first inner operation id. Virtual children never
+          checkpoint themselves, so their history starts at that inner id.
         """
         was_replaying: bool = self.is_replaying()
         # Only look up a checkpoint when replaying. Operation call sites pass
@@ -606,10 +621,17 @@ class DurableContext(DurableContextProtocol):
             was_replaying and next_exists and not next_terminal and not next_is_step
         )
         # Before-the-op flips:
-        # - brand-new next op (no checkpoint): always flip to NEW.
+        # - brand-new next op (no checkpoint): flip to NEW, unless the operation
+        #   is virtual. A virtual container never checkpoints itself, so the
+        #   absence of a checkpoint at its id is by design and is not evidence
+        #   of new work; its inner operations may still have history to replay.
+        #   Keep replay status and let the child refine to NEW via its own
+        #   look-ahead against its inner step ids.
         # - non-terminal STEP-type op (brand-new or retrying): the user function
         #   is about to run real work, so flip to NEW before it.
-        if was_replaying and (not next_exists or (next_is_step and not next_terminal)):
+        if was_replaying and (
+            (not next_exists and not is_virtual) or (next_is_step and not next_terminal)
+        ):
             self._set_replay_status_new()
         try:
             yield
