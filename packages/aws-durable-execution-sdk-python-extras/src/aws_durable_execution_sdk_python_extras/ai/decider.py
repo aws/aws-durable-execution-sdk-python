@@ -70,6 +70,19 @@ def _number_field(answer: Any, kind: str, field: str) -> float:
     return float(value)
 
 
+def _probability(answer: Any) -> float:
+    """Return the model's probability of yes, from 0 to 1.
+
+    A probability within :data:`_SCORE_TOLERANCE` outside 0 to 1 is rounding,
+    and is clamped. One farther out is an invalid reply. Otherwise a reply such
+    as 7 or -3 would become a confident answer.
+    """
+    p = _number_field(answer, "noul", "noul")
+    if p < -_SCORE_TOLERANCE or p > 1 + _SCORE_TOLERANCE:
+        raise invalid(f"The decision model's probability {p} is outside 0 to 1.")
+    return min(1.0, max(0.0, p))
+
+
 def _threshold(value: float | None) -> float:
     if value is None:
         return 0.5
@@ -181,9 +194,7 @@ class Decider:
                 {_ANSWER: {"type": "noul", "instructions": question}},
                 remaining,
             )
-            return (
-                _number_field(answers.get(_ANSWER), "noul", "noul") >= self._threshold
-            )
+            return _probability(answers.get(_ANSWER)) >= self._threshold
 
         return bool(
             self._run(context, "check", AiOperationSubType.DECIDER_CHECK, name, body)
@@ -295,8 +306,7 @@ class Decider:
             return [
                 option
                 for i, option in enumerate(options)
-                if _number_field(answers.get(f"o{i}"), "noul", "noul")
-                >= self._threshold
+                if _probability(answers.get(f"o{i}")) >= self._threshold
             ]
 
         return list(
@@ -425,7 +435,8 @@ def decider(
             :func:`default_ai_retry_strategy`.
 
     Raises:
-        TypeError: When both ``endpoint`` and ``transport`` are set, or neither
+        TypeError: When both ``endpoint`` and ``transport`` are set, when
+            ``headers`` is set with ``transport``, or when neither
             is set and ``STRANDS_DECIDER_ENDPOINT`` is not set, or when the
             endpoint is not an absolute ``http:`` or ``https:`` URL or contains
             a user name or password.
@@ -433,6 +444,11 @@ def decider(
     """
     if transport is not None and endpoint is not None:
         msg = "decider() takes only one of transport and endpoint."
+        raise TypeError(msg)
+    if transport is not None and headers is not None:
+        # The headers are sent only on the HTTP path. Dropping them silently
+        # could send a request without its authorization header.
+        msg = "decider() takes headers only with endpoint, not with transport."
         raise TypeError(msg)
     url = (
         endpoint if endpoint is not None else os.environ.get("STRANDS_DECIDER_ENDPOINT")

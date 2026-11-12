@@ -35,6 +35,22 @@ from aws_durable_execution_sdk_python.exceptions import (
 )
 
 
+def _with_field(data: str | None, key: str, value: Any) -> str:
+    """Return ``data`` with ``key`` set to ``value``.
+
+    Data that is missing, not JSON, or not an object starts as an empty
+    object. So the field is never dropped.
+    """
+    try:
+        fields = json.loads(data) if data is not None else {}
+    except ValueError:
+        fields = {}
+    if not isinstance(fields, dict):
+        fields = {}
+    fields[key] = value
+    return json.dumps(fields)
+
+
 def _data_field(data: str | None, key: str) -> Any:
     if data is None:
         return None
@@ -72,8 +88,8 @@ class DeciderError(AiError):
         *,
         status: int | None = None,
     ) -> None:
-        if status is not None and data is None:
-            data = json.dumps({"status": status})
+        if status is not None:
+            data = _with_field(data, "status", status)
         super().__init__(
             message=message, error_type=error_type, data=data, stack_trace=stack_trace
         )
@@ -129,7 +145,7 @@ class LlmStoppedError(AiError):
         stop_reason: str | None = None,
     ) -> None:
         if stop_reason is not None:
-            data = data or json.dumps({"stop_reason": stop_reason})
+            data = _with_field(data, "stop_reason", stop_reason)
             message = message or (
                 f'The model stopped with the reason "{stop_reason}". '
                 "The reply is not returned."

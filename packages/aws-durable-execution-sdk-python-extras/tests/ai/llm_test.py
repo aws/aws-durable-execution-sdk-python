@@ -9,6 +9,7 @@ from typing import Any
 
 import boto3
 import pytest
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.stub import Stubber
 
@@ -219,3 +220,21 @@ def test_matches_the_boto3_request_shape() -> None:
     with Stubber(client) as stubber:
         stubber.add_response("converse", reply("ok"))
         assert model._converse(model._config, "Question: Q?") == "ok"
+
+
+def test_a_replay_returns_the_checkpointed_reply_without_calling_the_model(
+    run_ai: Any,
+) -> None:
+    client = FakeBedrock(reply("A short summary."))
+    model = llm(BedrockConfig(client=client))
+
+    def body(context: Any) -> Any:
+        summary = model.ask(context, "Summarize.", "text")
+        # The wait ends the invocation. The next one replays the step.
+        context.wait(Duration.from_seconds(1))
+        return summary
+
+    value, _ = run_ai(body)
+
+    assert value == {"result": "A short summary."}
+    assert len(client.calls) == 1

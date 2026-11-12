@@ -486,3 +486,69 @@ def test_an_unreachable_endpoint_raises_a_retryable_decider_error(run_ai: Any) -
     assert "could not be reached" in value["message"]
     assert "secret" not in value["message"]
     assert default_ai_retry_strategy(DeciderError(message="x"), 1).should_retry
+
+
+@pytest.mark.parametrize("probability", [1.5, -0.5, 7, -3])
+def test_a_probability_outside_zero_to_one_is_an_invalid_reply(
+    run_ai: Any, probability: float
+) -> None:
+    decide = decider(
+        transport=FakeDecider(
+            answers({"answer": noul(probability)}),
+            answers({"o0": noul(0.9), "o1": noul(probability)}),
+        ),
+        retry_strategy=no_retry,
+    )
+
+    value, _ = run_ai(
+        lambda context: [
+            _error_name(lambda: decide.check(context, "Q?", "x")),
+            _error_name(lambda: decide.label(context, "Q?", ["a", "b"], "x")),
+        ]
+    )
+
+    assert value == {
+        "result": ["DeciderInvalidResponseError", "DeciderInvalidResponseError"]
+    }
+
+
+@pytest.mark.parametrize(("probability", "expected"), [(1.005, True), (-0.005, False)])
+def test_a_probability_within_rounding_of_the_range_is_clamped(
+    run_ai: Any, probability: float, expected: bool
+) -> None:
+    decide = decider(transport=FakeDecider(answers({"answer": noul(probability)})))
+
+    value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
+
+    assert value == {"result": expected}
+
+
+def test_headers_with_a_transport_raise() -> None:
+    with pytest.raises(TypeError, match="headers only with endpoint"):
+        decider(transport=FakeDecider(), headers={"authorization": "Bearer t"})
+
+
+def test_a_replay_returns_the_checkpointed_answer_without_calling_the_model(
+    run_ai: Any,
+) -> None:
+    fake = FakeDecider(answers({"answer": noul(0.9)}))
+    decide = decider(transport=fake)
+
+    def body(context: Any) -> Any:
+        answer = decide.check(context, "Q?", "x")
+        # The wait ends the invocation. The next one replays the step.
+        context.wait(Duration.from_seconds(1))
+        return answer
+
+    value, _ = run_ai(body)
+
+    assert value == {"result": True}
+    assert len(fake.requests) == 1
+
+
+def _error_name(call: Any) -> str:
+    try:
+        call()
+    except Exception as error:  # noqa: BLE001 - the test inspects it
+        return type(error).__name__
+    return "ok"

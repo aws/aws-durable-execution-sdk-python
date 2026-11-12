@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -126,3 +127,25 @@ def test_retries_a_transient_failure_with_a_growing_delay(error: Exception) -> N
 )
 def test_does_not_retry_a_failure_that_repeats(error: Exception) -> None:
     assert not default_ai_retry_strategy(error, 1).should_retry
+
+
+@pytest.mark.parametrize("data", [None, "{}", '{"other": 1}', "not json", "[1]"])
+def test_status_is_kept_when_data_is_also_given(data: str | None) -> None:
+    error = DeciderError(message="x", data=data, status=422)
+
+    assert error.status == 422
+    assert not default_ai_retry_strategy(error, 1).should_retry
+
+
+def test_status_keeps_the_other_data_fields() -> None:
+    error = DeciderError(message="x", data='{"other": 1}', status=422)
+
+    assert error.data is not None
+    assert json.loads(error.data) == {"other": 1, "status": 422}
+
+
+@pytest.mark.parametrize("data", [None, "{}", "not json"])
+def test_stop_reason_is_kept_when_data_is_also_given(data: str | None) -> None:
+    error = LlmStoppedError(data=data, stop_reason="guardrail_intervened")
+
+    assert error.stop_reason == "guardrail_intervened"
