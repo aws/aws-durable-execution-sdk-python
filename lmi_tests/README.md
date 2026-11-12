@@ -17,8 +17,10 @@ It follows the separate cloud-suite approach in
 It changes no production SDK code. The deadline and early-completion regressions
 are **expected to fail on the current SDK**. They are ordinary failing assertions,
 with no `xfail`, swallowed failure, or expected-failure success status. CI runs the
-non-cloud harness automatically on PR updates and main pushes. The cloud suite
-requires `workflow_dispatch` until the #741 implementation satisfies its contract.
+non-cloud harness automatically on PR updates and main pushes. Same-repository
+PRs from non-Dependabot actors also run the complete cloud suite automatically,
+and `workflow_dispatch` remains available. The #741 assertions remain strict
+failures in those PR runs.
 Local cloud runs and local red regressions also require explicit commands; the
 ordinary local test suite remains usable while the fix is designed.
 
@@ -109,8 +111,12 @@ gh workflow run lmi-e2e-tests.yml --repo aws/aws-durable-execution-sdk-python \
   --ref YOUR_BRANCH -f region=us-west-2
 ```
 
-CI first runs the local harness, then assumes the repository's configured test
-role and deploys the checked-out SDK and OTel wheels. It uploads the raw S3/service
+CI runs same-repository and manually dispatched jobs on the existing
+`github-actions-runner` CodeBuild project. Fork and Dependabot PR harness checks
+use GitHub-hosted runners. Python 3.14 comes from `setup-uv`; the runner image's
+shared pip target and Python search path are disabled so Hatch environments stay
+isolated. CI first runs the local harness, then assumes the repository's configured
+test role and deploys the checked-out SDK and OTel wheels. It uploads the raw S3/service
 records, shared manifests, attempt journals, coverage inventories, and JSON/JUnit
 reports under `lmi_tests/artifacts/shared/`. Missing placement or source evidence
 is a failure, not an accepted skip. Local integration checks exercise the real
@@ -288,14 +294,14 @@ An unexecuted scenario is never summarized as passing.
 
 The dedicated workflow runs the non-cloud harness when a PR is opened,
 updated, or reopened (including Draft PRs), and on every push to `main`. There
-are no path filters or ready-for-review requirements for that harness. The cloud
-job runs only with explicit `workflow_dispatch`; there are no scheduled jobs.
-This keeps the deliberately failing #741 assertions from blocking every unrelated
-PR/main build. Enable automatic cloud execution only after the implementation
-satisfies those assertions; the manual cloud job still reports real failures.
+are no path filters or ready-for-review requirements. After the harness passes,
+same-repository PRs from non-Dependabot actors automatically run the cloud job.
+Manual `workflow_dispatch` runs also execute both jobs; main pushes run only the
+harness. There are no scheduled jobs. The #741 regressions stay ordinary failures,
+so an affected SDK can produce a failing PR check.
 
-Each manual workflow run has one harness job and one cloud job using the persistent
-resources. All cloud jobs share the repository-wide
+Each eligible PR or manual workflow run has one harness job and one cloud job
+using the persistent resources. All cloud jobs share the repository-wide
 `lmi-e2e-shared-capacity-provider` concurrency group. Only one cloud job can
 deploy, test, or clean up at a time; the slot is held until the entire job finishes.
 Harness jobs can run
@@ -308,9 +314,8 @@ cancels additional arrivals when that queue is full. This repository-wide group
 does not coordinate manual local deployments or jobs in other repositories using
 the same provider; those consumers must also leave sufficient capacity available.
 
-PR events, including forks and Dependabot, run only the harness. A cloud run must
-be dispatched explicitly by a trusted repository actor; Dependabot remains excluded.
-Cloud jobs reuse
+Fork and Dependabot PRs run only the harness on GitHub-hosted runners. Other PRs
+and manual runs use CodeBuild. Cloud jobs reuse
 `TEST_ROLE_ARN`, `TEST_ACCOUNT_ID`, and `TEST_LAMBDA_EXECUTION_ROLE_ARN` with OIDC.
 The #741 regression assertions remain visibly failing until its fix lands; they
 are not skipped or converted into expected-success results to keep CI green.

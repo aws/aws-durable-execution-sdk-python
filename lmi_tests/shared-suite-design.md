@@ -50,8 +50,11 @@ its own controls and executions. Persistent ownership uses conditional S3 writes
 outside the expiring run prefix and is retained after unproven retirement. S3
 stays private and uses native SigV4/IAM authentication.
 
-CI retains the existing opt-in cloud policy and SDK-local unit/regression tests,
-but invokes the shared runner for cloud acceptance. Reports and all attempted
+CI runs the shared cloud suite automatically for same-repository PRs from
+non-Dependabot actors and retains manual dispatch. Both jobs use the existing
+CodeBuild runner; fork and Dependabot PRs run only the GitHub-hosted harness.
+SDK-local unit/regression tests remain available, while cloud acceptance uses the
+shared runner. Reports and all attempted
 case evidence are retained. The implementation and tests use the real public SDK
 handler/plugin paths against the local service where practical; real-LMI
 placement/recovery and deployed acceptance remain explicitly unverified until a
