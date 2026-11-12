@@ -22,6 +22,23 @@ differently passes its own ``measure`` (``LambdaLogExporter`` does, because it
 escapes some characters in the printed line). A value that cannot be measured
 (for example one holding a lone surrogate, which has no UTF-8 encoding) is
 returned unchanged, never raised.
+
+Cost. The candidate rendering used to be measured once per operation, so both
+the result phase and the operation phase grew with the square of the operation
+count (the issue's ``LambdaLogExporter`` repro took ~58 s for 4,000 operations).
+Two changes remove the quadratic work without changing the returned record:
+
+* the result phase measures the candidate once after the causes are dropped and
+  then only after an operation actually loses its ``result`` — an operation
+  without a result can never shrink the record, so the repeated measurements
+  only ever repeated the same answer;
+* when dropping whole operations is guaranteed to only shrink the rendering, the
+  operation phase binary-searches the smallest fitting drop count instead of
+  measuring after every drop. That guarantee holds for the lossless
+  ``operations`` array and the identity rendering always, and for the name-keyed
+  summary while every operation name is unique; a repeated name can make the
+  summary grow when the older occurrence is dropped, so that case keeps the
+  exact per-drop check, and so does a custom ``render``/``measure``.
 """
 
 from __future__ import annotations
@@ -56,6 +73,57 @@ def _drop_cause(holder: dict[str, Any]) -> None:
         }
 
 
+# Rendering tag the built-in exporters stamp on their ``render`` callable (or
+# bound method), so ``truncate_record`` can tell whether dropping whole
+# operations is monotonic without inspecting the rendered value. An exporter
+# that renders the lossless ``operations`` array uses ``"array"``; one that
+# renders the name-keyed ``operationsByName`` summary (or both) uses ``"by-name"``
+# / ``"both"``. An untagged render is a custom rendering whose behavior is
+# unknown, so it keeps the exact per-drop check.
+_OPS_RENDERING_ATTR = "ops_rendering"
+
+
+def _names_are_distinct(ops: list[dict[str, Any]]) -> bool:
+    """True when no non-empty operation name occurs more than once.
+
+    When every name is unique, dropping whole operations can only shrink a
+    name-keyed summary: the dropped operation's name had a single entry, and no
+    surviving name's representative can change, so the summary never grows. With
+    a repeated name, dropping the older occurrence can make the newer one the
+    representative; a newer failed occurrence then adds its ``error`` and the
+    record can grow (the JS/Go SDK note the same hazard).
+    """
+    seen: set[str] = set()
+    for op in ops:
+        name = op.get("name")
+        if not name:
+            continue
+        if name in seen:
+            return False
+        seen.add(name)
+    return True
+
+
+def _ops_drop_is_monotonic(
+    rendered: Any, record: dict[str, Any], render: Callable[[dict[str, Any]], Any]
+) -> bool:
+    """Whether dropping whole operations is guaranteed to only shrink ``render``.
+
+    The identity rendering and the lossless ``operations`` array only lose the
+    dropped operation's own bytes, so they are always monotonic. A by-name
+    rendering is monotonic only while every name is unique. Anything else keeps
+    the exact check.
+    """
+    if rendered is record:
+        return True  # identity rendering: no derived content can grow
+    rendering = getattr(render, _OPS_RENDERING_ATTR, None)
+    if rendering == "array":
+        return True
+    if rendering in ("by-name", "both"):
+        return _names_are_distinct(record.get("operations", []))
+    return False
+
+
 def truncate_record(
     record: dict[str, Any],
     max_bytes: int | None,
@@ -67,9 +135,12 @@ def truncate_record(
     if max_bytes is None or max_bytes <= 0:
         return record
 
-    initial = measure(render(record))
+    initial_rendered = render(record)
+    initial = measure(initial_rendered)
     if initial is None or initial <= max_bytes:
         return record
+
+    ops_monotonic = _ops_drop_is_monotonic(initial_rendered, record, render)
 
     ops: list[dict[str, Any]] = [dict(op) for op in record.get("operations", [])]
     kept = [True] * len(ops)
@@ -108,32 +179,79 @@ def truncate_record(
             out["droppedOutput"] = True
         return out
 
+    # ``candidate()`` is the value the exporter serializes, so the cached size is
+    # the size of what is actually emitted. It is recomputed only after the
+    # candidate changes; every phase below relies on the invariant that
+    # ``fits()`` was evaluated since the last change.
+    cached_size: list[int | None] = [None]
+
+    def measured() -> int | None:
+        if cached_size[0] is None:
+            cached_size[0] = measure(render(candidate()))
+        return cached_size[0]
+
+    def invalidate() -> None:
+        cached_size[0] = None
+
     def fits() -> bool:
-        size = measure(render(candidate()))
+        size = measured()
         return size is not None and size <= max_bytes
 
-    # Phase 1: drop operation results oldest-first.
-    for idx in order:
-        if fits():
-            break
-        if kept[idx] and ops[idx].get("result") is not None:
+    # Phase 1: drop operation results oldest-first. Measuring the candidate once
+    # after the causes are removed (the only change before this phase) is enough:
+    # an operation without a result cannot shrink the record, so the per-drop
+    # measurement that used to run for every operation only ever repeats the
+    # same answer. Measure again solely after a result is actually dropped.
+    if not fits():
+        for idx in order:
+            if not kept[idx] or ops[idx].get("result") is None:
+                continue
             trimmed = dict(ops[idx])
             trimmed.pop("result", None)
             trimmed["truncated"] = True
             ops[idx] = trimmed
             any_result = True
+            invalidate()
+            if fits():
+                break
 
     # Phase 2: drop whole operations oldest-first.
-    for idx in order:
-        if fits():
-            break
-        if kept[idx]:
-            kept[idx] = False
-            dropped_ops += 1
+    if not fits():
+        remaining = [idx for idx in order if kept[idx]]
+        if ops_monotonic:
+            # The rendered size is monotonic in the number of dropped
+            # operations, so binary-search the smallest count that fits.
+            # ``remaining`` is oldest-first, matching the drop order.
+            def drop_first(count: int) -> bool:
+                nonlocal dropped_ops
+                for position, idx in enumerate(remaining):
+                    kept[idx] = position >= count
+                dropped_ops = count
+                invalidate()
+                return fits()
+
+            if drop_first(len(remaining)):
+                low, high = 1, len(remaining)
+                while low < high:
+                    mid = (low + high) // 2
+                    if drop_first(mid):
+                        high = mid
+                    else:
+                        low = mid + 1
+                drop_first(low)
+        else:
+            for idx in order:
+                if fits():
+                    break
+                if kept[idx]:
+                    kept[idx] = False
+                    dropped_ops += 1
+                    invalidate()
 
     # Phase 3 (last resort): drop input then output.
     if not fits() and record.get("input") is not None:
         dropped_input = True
+        invalidate()
     if not fits() and record.get("output") is not None:
         dropped_output = True
 

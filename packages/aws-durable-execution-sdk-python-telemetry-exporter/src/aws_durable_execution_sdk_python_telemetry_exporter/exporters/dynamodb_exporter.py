@@ -64,8 +64,12 @@ class DynamoDBExporter:
         self._serializer = TypeSerializer()
         self._context = DYNAMODB_CONTEXT
 
+    # Tells ``truncate_record`` that operations are rendered by name, so it may
+    # binary-search the whole-operation drop count while names are unique.
     def render(self, record: dict[str, Any]) -> dict[str, Any]:
         return with_operations_by_name(record)
+
+    render.ops_rendering = "by-name"
 
     def export(self, record: dict[str, Any]) -> None:
         item = self.render(record)

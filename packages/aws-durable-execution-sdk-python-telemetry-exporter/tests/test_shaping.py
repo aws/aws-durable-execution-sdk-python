@@ -224,3 +224,137 @@ def test_truncate_record_uses_the_given_measure():
     assert sizes and out["truncated"] is True
     # The default measure would keep this small record unchanged.
     assert truncate_record(record, 1000, render=lambda r: r) is record
+
+
+def _counting_measure(inner):
+    """Wrap ``inner`` so the test can count how many renderings were measured."""
+    calls = [0]
+
+    def measure(value):
+        calls[0] += 1
+        return inner(value)
+
+    return measure, calls
+
+
+def _many_ops(count):
+    # Distinct names, oldest-first startTimes, no results: the issue's repro.
+    import datetime
+
+    from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
+        json_byte_size,
+    )
+
+    base = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    ops = []
+    for i in range(count):
+        start = (base + datetime.timedelta(milliseconds=i)).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        ops.append(_op(f"step-{i}", id=f"op-{i}", startTime=start))
+    record = {
+        "recordType": "DurableExecutionTelemetry",
+        "schemaVersion": "1.0",
+        "executionArn": "arn:aws:lambda:us-east-1:123456789012:function:f:$LATEST/durable-execution/e/inv",
+        "status": "SUCCEEDED",
+        "operations": ops,
+    }
+    return record, json_byte_size
+
+
+def test_truncate_record_renders_far_fewer_times_than_operations():
+    # The original rendered the whole record once per operation (squared work):
+    # phase 1 measured once per operation that has no result, and phase 2
+    # measured once per drop. The fix measures once in phase 1 and binary-searches
+    # phase 2, so the render count stays tiny for 2,000 operations.
+    record, json_byte_size = _many_ops(2000)
+    measure, calls = _counting_measure(json_byte_size)
+
+    out = truncate_record(record, 20_000, lambda r: r, measure)
+
+    assert out["truncated"] is True
+    assert out["droppedOperations"] > 0
+    assert calls[0] <= 40, f"rendered {calls[0]} times for 2000 operations"
+
+
+def test_truncate_record_by_name_exporter_path_binary_searches():
+    # Same, through the exporter's own render/measure as in the issue's repro.
+    from aws_durable_execution_sdk_python_telemetry_exporter.exporters import (
+        LambdaLogExporter,
+    )
+
+    exporter = LambdaLogExporter()
+    record, _ = _many_ops(2000)
+    measure, calls = _counting_measure(exporter.measure)
+
+    out = truncate_record(record, 20_000, exporter.render, measure)
+
+    assert out["truncated"] is True
+    assert out["droppedOperations"] > 0
+    assert calls[0] <= 40, f"rendered {calls[0]} times through LambdaLogExporter"
+
+
+def test_truncate_record_keeps_the_smallest_fitting_drop_count():
+    # The binary search must return the same record the exact per-drop check
+    # returns: only the oldest operations that do not fit are dropped.
+    record, json_byte_size = _many_ops(300)
+    limit = 30_000
+    out = truncate_record(record, limit, lambda r: r, json_byte_size)
+
+    def size_with_kept(k):
+        candidate = dict(record, operations=record["operations"][k:])
+        candidate["truncated"] = True
+        candidate["droppedOperations"] = k
+        return json_byte_size(candidate)
+
+    smallest = next(
+        k for k in range(len(record["operations"]) + 1) if size_with_kept(k) <= limit
+    )
+    assert out["droppedOperations"] == smallest
+    assert [op["name"] for op in out["operations"]] == [
+        op["name"] for op in record["operations"][smallest:]
+    ]
+
+
+def test_truncate_record_duplicate_names_keep_exact_per_drop_checks():
+    # Dropping the older of two same-named operations can make the newer failed
+    # one the representative and grow the summary, so the size is not monotonic;
+    # the exact check must still return a record that fits.
+    from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
+        json_byte_size,
+    )
+
+    record = {
+        "executionArn": "arn",
+        "operations": [
+            _op("task", id="a", result="r" * 20),
+            _op("task", id="b", status="FAILED", error={"message": "x" * 60}),
+            _op("other", id="c"),
+        ],
+    }
+    out = truncate_record(record, 120, render=with_operations_by_name)
+
+    assert out["truncated"] is True
+    assert json_byte_size(with_operations_by_name(out)) <= 120
+
+
+def test_truncate_record_custom_render_keeps_exact_per_drop_checks():
+    # A custom render whose size is not monotonic in the drop count keeps the
+    # exact per-drop check. Dropping two operations balloons the rendering while
+    # dropping one fits, so exactly one operation is dropped.
+    def render(rec):
+        sizes = {3: 1000, 2: 10, 1: 1000, 0: 10}
+        return {"blob": "z" * sizes[len(rec["operations"])]}
+
+    record = {
+        "executionArn": "arn",
+        "operations": [
+            _op("a", id="a", startTime="2026-01-01T00:00:00.000Z"),
+            _op("b", id="b", startTime="2026-01-01T00:00:00.001Z"),
+            _op("c", id="c", startTime="2026-01-01T00:00:00.002Z"),
+        ],
+    }
+    out = truncate_record(record, 50, render, lambda v: len(v["blob"]))
+
+    assert out["droppedOperations"] == 1
+    assert [op["name"] for op in out["operations"]] == ["b", "c"]
