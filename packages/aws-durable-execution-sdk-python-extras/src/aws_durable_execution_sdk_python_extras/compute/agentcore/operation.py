@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import boto3
 from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
+    ChildConfig,
     Duration,
     StepConfig,
 )
@@ -50,6 +51,9 @@ from aws_durable_execution_sdk_python_extras.compute.agentcore.job import (
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore.retry import (
     default_agentcore_retry_strategy,
+)
+from aws_durable_execution_sdk_python_extras.compute.agentcore.subtypes import (
+    AgentcoreOperationSubType,
 )
 from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
     MAX_JOB_INPUT_BYTES,
@@ -169,7 +173,11 @@ def agentcore(
         return scope.run_job(child, job_input)
 
     try:
-        return context.run_in_child_context(run, name=name)
+        return context.run_in_child_context(
+            run,
+            name=name,
+            config=ChildConfig(sub_type=AgentcoreOperationSubType.AGENTCORE),
+        )
     except ChildContextError as error:
         raise AgentcoreError.from_child_context_error(name, error) from error
 
@@ -251,7 +259,9 @@ class _AgentcoreScope:
             name=f"{name}.session",
             # Plain JSON, so a reader of the execution history finds the
             # session ID.
-            config=StepConfig(serdes=JsonSerDes()),
+            config=StepConfig(
+                serdes=JsonSerDes(), sub_type=AgentcoreOperationSubType.SESSION_ID
+            ),
         )
         callback = child.create_callback(
             name=f"{name}.callback",
@@ -263,6 +273,7 @@ class _AgentcoreScope:
                 # The worker sends the result as a JSON string. The default
                 # callback serdes would return that string unparsed.
                 serdes=JsonSerDes(),
+                sub_type=AgentcoreOperationSubType.CALLBACK,
             ),
         )
         try:
@@ -341,7 +352,10 @@ class _AgentcoreScope:
             child.step(
                 attempt,
                 name=f"{self.name}.request",
-                config=StepConfig(retry_strategy=self.retry_strategy),
+                config=StepConfig(
+                    retry_strategy=self.retry_strategy,
+                    sub_type=AgentcoreOperationSubType.REQUEST,
+                ),
             )
         except StepError as error:
             msg = (
@@ -375,7 +389,10 @@ class _AgentcoreScope:
                     remaining_seconds,
                 ),
                 name=f"{self.name}.stop",
-                config=StepConfig(retry_strategy=self.retry_strategy),
+                config=StepConfig(
+                    retry_strategy=self.retry_strategy,
+                    sub_type=AgentcoreOperationSubType.STOP,
+                ),
             )
         except StepError as error:
             # The session keeps running, and is billed, until AgentCore ends

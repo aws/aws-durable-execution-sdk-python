@@ -24,6 +24,9 @@ from aws_durable_execution_sdk_python_extras.compute.agentcore.operation import 
 from aws_durable_execution_sdk_python_extras.compute.agentcore.retry import (
     default_agentcore_retry_strategy,
 )
+from aws_durable_execution_sdk_python_extras.compute.agentcore.subtypes import (
+    AgentcoreOperationSubType,
+)
 from aws_durable_execution_sdk_python_extras.compute.errors import ComputeError
 from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
     MAX_JOB_INPUT_BYTES,
@@ -37,6 +40,7 @@ __all__ = [
     "AgentcoreError",
     "AgentcoreJobFailedError",
     "AgentcoreNotAcceptedError",
+    "AgentcoreOperationSubType",
     "AgentcoreTimeoutError",
     "ComputeError",
     "agentcore",

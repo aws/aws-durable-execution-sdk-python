@@ -269,7 +269,7 @@ if __name__ == "__main__":
     start_agentcore_worker(handler=review).wait()
 ```
 
-The operation records `review.session`, `review.callback`, `review.request`, and `review.stop` in one child context named `review`. `review.stop` calls `StopRuntimeSession` after success, failure, and timeout alike. A failed stop is logged, and does not hide the job's result or error.
+The operation records `review.session`, `review.callback`, `review.request`, and `review.stop` in one child context named `review`. Each operation records a subtype from `AgentcoreOperationSubType`: `Agentcore` on the child context, then `AgentcoreSessionId`, `AgentcoreCallback`, `AgentcoreRequest`, and `AgentcoreStop`, the same values as the JavaScript SDK. Execution history and plugins can filter on them. `review.stop` calls `StopRuntimeSession` after success, failure, and timeout alike. A failed stop is logged, and does not hide the job's result or error.
 
 Each `InvokeAgentRuntime` and `StopRuntimeSession` call must end 10 seconds before the Lambda invocation times out, as the MicroVM calls must. A Lambda timeout during a step attempt records no outcome for the attempt. So a call that has not ended by then fails its attempt with a `TimeoutError`, and the default retry strategy retries it in a later invocation.
 

@@ -21,11 +21,13 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
-  # 2.0.0 is the first release with the graded callback errors
+  # 3.0.0 is the first release with custom subtypes (the sub_type field of
+  # StepConfig, CallbackConfig, and ChildConfig), which the agentcore
+  # operation records. 2.0.0 added the graded callback errors
   # (CallbackTimeoutError and CallbackExternalError) and register_operation_error.
   # The upper bound guards one read of the SDK's internal ExecutionState, for
   # the error type that a MicroVM reports. See _reported_error_type.
-  "aws-durable-execution-sdk-python>=2.0.0,<4",
+  "aws-durable-execution-sdk-python>=3.0.0,<4",
   # botocore 1.43.35 is the first release with the lambda-microvms client.
   # The bedrock-agentcore client has StopRuntimeSession since botocore
   # 1.40.46, so this bound covers the agentcore operation too.

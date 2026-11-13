@@ -42,6 +42,7 @@ from aws_durable_execution_sdk_python_extras.compute.agentcore import (
     AgentcoreDeliveryError,
     AgentcoreError,
     AgentcoreNotAcceptedError,
+    AgentcoreOperationSubType,
     ComputeError,
     agentcore,
     default_agentcore_retry_strategy,
@@ -756,3 +757,44 @@ def test_calls_without_a_deadline_outside_lambda() -> None:
 
     # Without a deadline, the call runs in the calling thread.
     assert calls == [threading.current_thread().name]
+
+
+def test_labels_every_operation_with_its_subtype(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client()
+    runner = DurableFunctionTestRunner(
+        handler=catching(config_with(client)), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        callback_id = runner.wait_for_callback(
+            arn, name="review.callback", timeout=WAIT
+        )
+        runner.send_callback_success(callback_id, b'"done"')
+        result = runner.wait_for_result(arn, timeout=WAIT)
+        history = runner.get_execution_history(arn)
+    finally:
+        runner.close()
+
+    assert outcome(result) == {"result": "done"}
+    expected = {
+        "review": "Agentcore",
+        "review.session": "AgentcoreSessionId",
+        "review.callback": "AgentcoreCallback",
+        "review.request": "AgentcoreRequest",
+        "review.stop": "AgentcoreStop",
+    }
+    context = result.get_context("review")
+    assert {
+        "review": context.sub_type,
+        **{child.name: child.sub_type for child in context.child_operations},
+    } == expected
+    # The execution history carries the subtype on every event of each
+    # operation.
+    recorded: dict[str, set[str | None]] = {}
+    for event in history.events:
+        if event.name in expected:
+            recorded.setdefault(event.name, set()).add(event.sub_type)
+    assert recorded == {name: {sub_type} for name, sub_type in expected.items()}
+    assert {member.value for member in AgentcoreOperationSubType} == set(
+        expected.values()
+    )
