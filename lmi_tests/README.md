@@ -96,8 +96,10 @@ that event requires the original request's service `InvocationCompleted` history
 The recovery victim first waits in a checkpointed preparation step. The driver
 starts the peer halfway through the victim's native timeout, verifies the original
 cohort and the peer's remaining recovery window, then releases preparation to
-admit the fault. Recovery overlap excludes expired original requests and their
-retries. The original peer remains held until recovery completes. A still-running
+admit the fault. Preparation checkpoints the original native request ID, so
+service retries keep the same durable sequence without reinjecting the victim's
+fault or admission probes. Recovery overlap excludes expired original requests
+and their retries. The original peer remains held until recovery completes. A still-running
 durable execution is collected as such; terminal-state waiting and stops belong
 to retirement after assertions. Releasing a victim fault cannot establish the
 preceding cleanup or recovery assertion.

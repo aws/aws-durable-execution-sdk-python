@@ -458,19 +458,35 @@ def run_workflow(event, context, trace):
         if scenario == "failure":
             raise ValueError("expected:" + marker)
         if scenario in {"barrier", "deadline"}:
+            original_request = None
             if preparation_gate := event.get("preparation_gate"):
-                context.step(
-                    lambda _: trace.gate(preparation_gate, preparation=True),
-                    name="prepare-recovery",
-                    config=NO_RETRY,
+
+                def prepare(_):
+                    trace.gate(preparation_gate, preparation=True)
+                    return trace.identity["request"]
+
+                original_request = context.step(
+                    prepare, name="prepare-recovery", config=NO_RETRY
                 )
-            context.step(
-                lambda step: trace.gate(
+                trace.recovery_original_request = original_request
+
+            def controlled_io(step):
+                # Fault injection belongs to the selected native invocation.
+                # This decision is inside the step; replay still consumes the
+                # same preparation checkpoint and durable operation sequence.
+                if (
+                    original_request is not None
+                    and trace.identity["request"] != original_request
+                ):
+                    observe(
+                        trace, "fault_not_reapplied", originalRequestId=original_request
+                    )
+                    return None
+                return trace.gate(
                     event["gate"], effects=scenario == "deadline", attempt=step.attempt
-                ),
-                name="controlled-io",
-                config=NO_RETRY,
-            )
+                )
+
+            context.step(controlled_io, name="controlled-io", config=NO_RETRY)
             context.step(lambda s: trace.body("after-io", marker, s), name="after-io")
         elif scenario == "warm-owner":
             context.step(
@@ -753,6 +769,11 @@ def handler(event, context):
                 "peer-recovery",
             }
             and payload.get("role") == "victim"
+            and (
+                payload.get("sharedScenario") != "peer-recovery"
+                or trace.identity["request"]
+                == getattr(trace, "recovery_original_request", None)
+            )
         ):
             start_admission_probes(trace)
         return result

@@ -54,3 +54,48 @@ def test_preparation_gate_precedes_fault_and_keeps_one_original_barrier(monkeypa
     )
     assert prepared["atMs"] < checkpoint["atMs"] <= fault["atMs"]
     assert not [event for event in observations if event["kind"] == "observation_error"]
+
+
+def test_service_retry_replays_preparation_without_reinjecting_the_original_fault(
+    monkeypatch,
+):
+    from aws_durable_execution_sdk_python.exceptions import RetryableSerDesError
+
+    ledger = install_ledger(monkeypatch)
+    payload = shared_payload("deadline")
+    payload.update(
+        sharedScenario="peer-recovery", preparation_gate="prepare", gate="fault"
+    )
+    prefix = payload["controlPrefix"]
+    ledger.objects[prefix + "prepare"] = b"release"
+    ledger.objects[prefix + "fault"] = b"hold"
+    ledger.objects[prefix + "release-all"] = b"hold"
+    gate = fixture.Trace.gate
+    fault_requests = []
+
+    def interrupted(trace, name, **options):
+        if name == "fault":
+            fault_requests.append(trace.identity["request"])
+            # Trigger the SDK's actual invocation-retry path after preparation
+            # checkpointed, leaving controlled-io incomplete for replay.
+            raise RetryableSerDesError("transient interruption")
+        return gate(trace, name, **options)
+
+    monkeypatch.setattr(fixture.Trace, "gate", interrupted)
+    with DurableFunctionTestRunner(handler=fixture.handler) as runner:
+        result = runner.run(input=json.dumps(payload), execution_timeout=20)
+    assert result.result == '"marker"'
+    assert len(fault_requests) == 1
+    observations = ledger.observations()
+    skipped = [
+        e for e in observations if e["observation"]["kind"] == "fault_not_reapplied"
+    ]
+    assert len(skipped) == 1
+    assert skipped[0]["request"] != fault_requests[0]
+    assert skipped[0]["observation"]["originalRequestId"] == fault_requests[0]
+    assert not [
+        e
+        for e in observations
+        if e["request"] == skipped[0]["request"]
+        and e["observation"]["kind"] == "admission_probe"
+    ]
