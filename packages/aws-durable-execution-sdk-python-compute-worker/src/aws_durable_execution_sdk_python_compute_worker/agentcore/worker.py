@@ -439,7 +439,10 @@ def start_agentcore_worker(
     2. Answers ``{"accepted": true}`` for a callback ID that it has already
        accepted, and does nothing else. ``InvokeAgentRuntime`` has no
        idempotency token, so a retried request can deliver the same job
-       again. The worker remembers the last 1,000 finished callback IDs.
+       again. The worker remembers the last 1,000 finished callback IDs,
+       in process memory only. So a job runs once per process. A new
+       process after the idle timeout runs a repeated job again, so the
+       handler's side effects must be idempotent.
     3. Otherwise registers the callback ID and starts the job's thread, as
        one step under a lock. A thread that cannot start gets HTTP 500, and
        the callback ID is forgotten. A duplicate request that arrives

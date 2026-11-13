@@ -195,9 +195,11 @@ The worker listens on port 8080, because AgentCore Runtime sends its requests to
 - Anywhere else, such as a laptop, the worker listens on `127.0.0.1`. The worker has no authentication, so it must not be reachable from the network.
 - A `host` argument overrides both.
 
-- `POST /invocations` reads the job document, starts the handler in a thread, and answers `{"accepted": true}` at once. A callback ID that the worker already accepted gets the same answer, and the job does not run again. A document that does not match the contract gets HTTP 400.
+- `POST /invocations` reads the job document, starts the job's thread, and answers `{"accepted": true}` at once. The thread runs the handler only after the answer is written. A callback ID that the worker already accepted gets the same answer, and the job does not run again. A document that does not match the contract gets HTTP 400.
 - `GET /ping` answers `{"status": "HealthyBusy"}` while a job runs, and `{"status": "Healthy"}` otherwise. `time_of_last_update` holds the Unix time, in seconds, of the worker's start or of the last change of the status. It does not change between pings with the same status.
 - The job thread sends heartbeats when the job sets a heartbeat timeout, and then the success or failure callback.
+
+The worker remembers the callback IDs of accepted jobs only in its process memory. So it runs a job once per process. An answer can be lost after the job finished, and the retry can arrive after the idle timeout replaced the session's process. The new process then runs the same job again. So delivery is at-least-once across process replacement. Make the handler's side effects safe to repeat.
 
 While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 

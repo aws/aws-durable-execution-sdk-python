@@ -275,6 +275,12 @@ Each `InvokeAgentRuntime` and `StopRuntimeSession` call must end 10 seconds befo
 
 While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
+Delivery is at-least-once, so make the job handler's side effects idempotent:
+
+1. `InvokeAgentRuntime` has no idempotency token. So a retried request step can deliver the same job twice.
+2. The worker ignores a second delivery of a job that it already accepted. It remembers the callback IDs only in its process memory. So the worker runs a job once per process.
+3. An answer can be lost after the job finished. The retry can then arrive after the idle timeout replaced the session's process. The new process runs the same job again.
+
 Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.
 
 Permissions:

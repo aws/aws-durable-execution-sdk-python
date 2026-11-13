@@ -98,7 +98,9 @@ class AgentcoreConfig:
     ``InvokeAgentRuntime`` has no idempotency token. So a retried request
     step can deliver the same job twice. The worker answers a second
     delivery of a callback ID that it already accepted without running the
-    job again.
+    job again. It remembers callback IDs only in its process memory. A new
+    process after the idle timeout runs a repeated job again. So the job
+    handler's side effects must be idempotent.
     """
 
     client: BedrockAgentcoreClient | None = None

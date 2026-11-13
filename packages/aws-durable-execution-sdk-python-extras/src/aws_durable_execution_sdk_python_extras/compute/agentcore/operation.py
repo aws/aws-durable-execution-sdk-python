@@ -138,7 +138,12 @@ def agentcore(
     ``InvokeAgentRuntime`` has no idempotency token. A retried request step
     can deliver the same job twice to the same session. The worker answers a
     repeated callback ID with ``{"accepted": true}``, and does not run the
-    job again.
+    job again. The worker remembers callback IDs only in its process
+    memory. So this guarantee holds per worker process. A retry can arrive
+    after the idle timeout has replaced the session's process, for example
+    when an answer was lost after the job finished. The new process then
+    runs the same job again. So delivery is at-least-once across process
+    replacement, and the job handler's side effects must be idempotent.
 
     ``job_input`` and ``config`` are keyword-only, as in ``microvm``.
 
