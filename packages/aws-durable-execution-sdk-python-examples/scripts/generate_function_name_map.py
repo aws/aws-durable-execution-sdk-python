@@ -4,35 +4,49 @@ import argparse
 import json
 from typing import Any
 
-from generate_sam_template import load_catalog, to_logical_id, uses_microvm
+from generate_sam_template import (
+    load_catalog,
+    to_logical_id,
+    uses_agentcore,
+    uses_microvm,
+)
 
 
 def build_function_name_map(
     examples: list[dict[str, Any]],
     function_name_prefix: str,
     include_microvm: bool = False,
+    include_agentcore: bool = False,
 ) -> dict[str, str]:
     """Map each example name to its qualified Lambda function name.
 
     The stack deploys a MicroVM example only when CI passes an image. So the
     map leaves a MicroVM example out unless ``include_microvm`` is true. The
-    conftest skips a test whose example is missing from the map.
+    conftest skips a test whose example is missing from the map. The same
+    holds for an AgentCore example, an agent runtime, and
+    ``include_agentcore``.
     """
     return {
         example["name"]: (
             f"{function_name_prefix}{to_logical_id(example['handler'])}:$LATEST"
         )
         for example in examples
-        if include_microvm or not uses_microvm(example)
+        if (include_microvm or not uses_microvm(example))
+        and (include_agentcore or not uses_agentcore(example))
     }
 
 
 def generate_function_name_map(
-    function_name_prefix: str, include_microvm: bool = False
+    function_name_prefix: str,
+    include_microvm: bool = False,
+    include_agentcore: bool = False,
 ) -> dict[str, str]:
     """Generate a test-name to qualified Lambda function-name map."""
     return build_function_name_map(
-        load_catalog()["examples"], function_name_prefix, include_microvm
+        load_catalog()["examples"],
+        function_name_prefix,
+        include_microvm,
+        include_agentcore,
     )
 
 
@@ -53,12 +67,22 @@ def main() -> int:
             "the stack was deployed with MicrovmImageArn."
         ),
     )
+    parser.add_argument(
+        "--include-agentcore",
+        action="store_true",
+        help=(
+            'Include the examples with "usesAgentcore": true. Pass it only '
+            "when the stack was deployed with AgentRuntimeArn."
+        ),
+    )
     args = parser.parse_args()
 
     print(
         json.dumps(
             generate_function_name_map(
-                args.function_name_prefix, include_microvm=args.include_microvm
+                args.function_name_prefix,
+                include_microvm=args.include_microvm,
+                include_agentcore=args.include_agentcore,
             ),
             separators=(",", ":"),
         )
