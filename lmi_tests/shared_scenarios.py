@@ -69,7 +69,7 @@ class ScenarioDriver:
 
     def gate(self, label: str) -> str:
         owner = hashlib.sha256(
-            f"{self.context.run_id}:{self.context.scenario.case_id}:{self.context.scenario.cohort_id}".encode()
+            f"{self.context.run_id}:{self.context.scenario.case_id}".encode()
         ).hexdigest()[:20]
         return f"case-{owner}-{label}"
 

@@ -19,7 +19,7 @@ env:
   # Ignore the CodeBuild image's shared pip target and Python search path.
   PIP_CONFIG_FILE: /dev/null
   PYTHONPATH: ""
-  CONFORMANCE_REVISION: cc1eae152d9d0a49ecb777db140339f290b43567
+  CONFORMANCE_REVISION: 15ea7714de3c06b6552c4bd33fd036272a7e800b
   LMI_SHARED_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:

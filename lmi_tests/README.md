@@ -29,7 +29,7 @@ and check out the exact `CONFORMANCE_REVISION` from `shared_contract.py`:
 
 ```bash
 git clone https://github.com/aws/aws-durable-execution-conformance-tests.git .conformance
-git -C .conformance checkout --detach cc1eae152d9d0a49ecb777db140339f290b43567
+git -C .conformance checkout --detach 15ea7714de3c06b6552c4bd33fd036272a7e800b
 hatch run lmi:shared-setup
 hatch run lmi:lint
 hatch run lmi:shared-tests
@@ -65,7 +65,10 @@ control. Direct CLI calls do not acquire a lock and are not serialized with CI.
 `shared plan` writes the seven-case manifest without invoking functions. `shared
 run` writes under `lmi_tests/artifacts/shared/standard/`: the manifest, coverage,
 JSON/JUnit reports, launch journal and retained case evidence. Each invocation
-uses a case-owned control/evidence prefix. A service resume is journaled under
+uses a case-owned control/evidence prefix derived from `runId` and `caseId`.
+The case hash uses only `caseId` within the run prefix. Plans, payloads and evidence
+have no additional cohort identifier. Generate new run artifacts with this pinned
+revision; inspect or clean up older artifacts with their original adapter revision. A service resume is journaled under
 the same durable execution; it is not another driver Invoke.
 
 Trusted same-repository pull requests and manual workflow runs exercise the cloud

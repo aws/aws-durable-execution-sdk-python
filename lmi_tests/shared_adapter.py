@@ -127,9 +127,7 @@ class SharedAdapter:
         )
         if key is None:
             raise ProvisioningError("Case target is outside the owned deployment")
-        owner = hashlib.sha256(
-            f"{context.scenario.case_id}:{context.scenario.cohort_id}".encode()
-        ).hexdigest()[:20]
+        owner = hashlib.sha256(context.scenario.case_id.encode()).hexdigest()[:20]
         cloud = await asyncio.to_thread(
             self.cloud_factory,
             self.deployment,

@@ -83,9 +83,9 @@ class Cloud:
         self.callback_records: list[dict[str, Any]] = []
         self.control_prefix = f"runs/{manifest['run']}/control/"
         if case_context is not None:
-            owner = hashlib.sha256(
-                f"{case_context.scenario.case_id}:{case_context.scenario.cohort_id}".encode()
-            ).hexdigest()[:20]
+            owner = hashlib.sha256(case_context.scenario.case_id.encode()).hexdigest()[
+                :20
+            ]
             self.control_prefix = f"runs/{manifest['run']}/cases/{owner}/control/"
 
     def check_active(self) -> None:

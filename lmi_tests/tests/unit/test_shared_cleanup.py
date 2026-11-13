@@ -33,7 +33,7 @@ def test_case_identity_is_checked_before_control_release(
         "region": "us-west-2",
         "functions": {"c1": target},
     }
-    case = {"case_id": "case", "cohort_id": "cohort", "profile_id": "c1"}
+    case = {"case_id": "case", "profile_id": "c1"}
     plan = {
         "runId": "run",
         "profiles": [{"profile_id": "c1", "resource_id": target}],
@@ -42,7 +42,7 @@ def test_case_identity_is_checked_before_control_release(
     output = tmp_path / "standard"
     output.mkdir()
     (output / "manifest.json").write_text(json.dumps(plan))
-    identity = hashlib.sha256(b"case:cohort").hexdigest()[:20]
+    identity = hashlib.sha256(b"case").hexdigest()[:20]
     invocations = output / "source/cases" / identity / "invocations"
     invocations.mkdir(parents=True)
     (invocations / "intent.json").write_text(
@@ -137,7 +137,7 @@ def test_one_identified_execution_does_not_hide_another_unreconciled_invoke(
             }
         )
     )
-    owner = hashlib.sha256(b"case:cohort-1").hexdigest()[:20]
+    owner = hashlib.sha256(b"case").hexdigest()[:20]
     intents = output / "source/cases" / owner / "invocations"
     intents.mkdir(parents=True)
     known, missing = intents / "known.json", intents / "missing.json"

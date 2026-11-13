@@ -86,7 +86,6 @@ class Trace:
             for key in (
                 "runId",
                 "caseId",
-                "cohortId",
                 "role",
                 "sharedScenario",
                 "controlPrefix",
@@ -128,7 +127,6 @@ class Trace:
                     for key in (
                         "runId",
                         "caseId",
-                        "cohortId",
                         "role",
                         "coverageProfile",
                         "sharedScenario",

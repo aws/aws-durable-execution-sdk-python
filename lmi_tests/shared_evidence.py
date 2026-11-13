@@ -103,7 +103,6 @@ class CaseSources:
                 raw.get("run") != self.context.run_id
                 or raw.get("commit") != self.cloud.manifest["commit"]
                 or raw.get("caseId") != self.context.scenario.case_id
-                or raw.get("cohortId") != self.context.scenario.cohort_id
             ):
                 errors.append(
                     "Raw evidence does not belong to the admitted run/artifact/case"
@@ -605,7 +604,6 @@ def build_evidence(
         "schemaVersion": 1,
         "runId": context.run_id,
         "caseId": context.scenario.case_id,
-        "cohortId": context.scenario.cohort_id,
         "coverageProfile": context.scenario.coverage_profile,
         "scenario": context.scenario.scenario,
         "requirementId": context.scenario.requirement_id,

@@ -95,7 +95,6 @@ def shared_payload(scenario: str = "success") -> dict[str, Any]:
     return {
         "runId": "unit",
         "caseId": "case",
-        "cohortId": "cohort-1",
         "role": "victim",
         "coverageProfile": "standard",
         "sharedScenario": scenario,

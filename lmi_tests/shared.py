@@ -101,7 +101,6 @@ def make_manifest(
         scenarios.append(
             {
                 "case_id": case_id,
-                "cohort_id": "cohort-1",
                 "requirement_id": required.requirement_id,
                 "profile_id": f"c{concurrency}",
                 "scenario": required.scenario,
@@ -227,9 +226,7 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
             target = profiles[case["profile_id"]]["resource_id"]
             if target not in deployment["functions"].values():
                 raise CollectionError("Cleanup target is outside the owned deployment")
-            owner = hashlib.sha256(
-                f"{case['case_id']}:{case.get('cohort_id', 'cohort-1')}".encode()
-            ).hexdigest()[:20]
+            owner = hashlib.sha256(case["case_id"].encode()).hexdigest()[:20]
             prefix = f"runs/{deployment['run']}/cases/{owner}/control/"
             case_dir = directory / coverage / "source" / "cases" / owner
             try:
