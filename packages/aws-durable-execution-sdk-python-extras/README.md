@@ -281,6 +281,14 @@ Delivery is at-least-once, so make the job handler's side effects idempotent:
 2. The worker ignores a second delivery of a job that it already accepted. It remembers the callback IDs only in its process memory. So the worker runs a job once per process.
 3. An answer can be lost after the job finished. The retry can then arrive after the idle timeout replaced the session's process. The new process runs the same job again.
 
+### Rules for AgentCore jobs
+
+1. Set `heartbeat_timeout` to at least 1 second. It ends the job when the worker crashes or stops reporting.
+2. `timeout` must fit the agent runtime's configured `maxLifetime`.
+3. A job can run more than once when AgentCore replaces the worker process. Make handler side effects safe to repeat.
+4. Your logger must not throw.
+5. The runtime's idle timeout applies only while no job is running. One `agentcore()` call runs one job, so it does not lose state between jobs.
+
 Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.
 
 Permissions:

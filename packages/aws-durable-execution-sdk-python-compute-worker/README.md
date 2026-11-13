@@ -203,6 +203,14 @@ The worker remembers the callback IDs of accepted jobs only in its process memor
 
 While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
+### Rules for AgentCore jobs
+
+1. Set `heartbeat_timeout` to at least 1 second. It ends the job when the worker crashes or stops reporting.
+2. `timeout` must fit the agent runtime's configured `maxLifetime`.
+3. A job can run more than once when AgentCore replaces the worker process. Make handler side effects safe to repeat.
+4. Your logger must not throw.
+5. The runtime's idle timeout applies only while no job is running. One `agentcore()` call runs one job, so it does not lose state between jobs.
+
 The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the durable function's ARN. The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN and on `<runtime ARN>/runtime-endpoint/*`.
 
 ## Reference
