@@ -62,6 +62,7 @@ from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
 from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     INVOCATION_RESERVE_SECONDS,
     call_before_deadline,
+    require_time_for_call,
     reserve_starts_at,
 )
 
@@ -402,14 +403,24 @@ class _AgentcoreScope:
         except StepError as error:
             # The session keeps running, and is billed, until AgentCore ends
             # it. A missing permission fails every stop this way. This log
-            # is the only sign of it. So it is an error, not a warning.
+            # is the only sign of it. So it is an error, not a warning. The
+            # permission hint is added only for an AccessDenied answer. A
+            # stop that never ran, for example for lack of invocation time,
+            # names its own cause in the error.
+            detail = error.message or error.error_type
+            hint = (
+                " A missing permission needs "
+                "bedrock-agentcore:StopRuntimeSession in the function's "
+                "execution role, on the runtime ARN and on "
+                "<runtime ARN>/runtime-endpoint/*."
+                if "AccessDenied" in (detail or "")
+                else ""
+            )
             child.logger.error(
                 f'AgentCore "{self.name}": StopRuntimeSession failed for '
                 f"session {session_id}. The session keeps running until the "
-                "agent runtime's idle timeout or maximum lifetime ends it. A "
-                "missing permission needs bedrock-agentcore:StopRuntimeSession "
-                "in the function's execution role, on the runtime ARN and on "
-                "<runtime ARN>/runtime-endpoint/*.",
+                "agent runtime's idle timeout or maximum lifetime ends it."
+                f"{hint} Error: {detail}",
                 extra={"runtimeSessionId": session_id, "error": error.message},
             )
 
@@ -566,15 +577,21 @@ def _call_before_reserve(
     2. The MicroVM operation keeps an invocation reserve of
        :data:`INVOCATION_RESERVE_SECONDS` for that reason. This function
        uses the same reserve and the same helper, ``call_before_deadline``.
-    3. A call that has not ended at the reserve fails the attempt with
+    3. A call needs at least 11 seconds left in the invocation: the 10
+       seconds of the reserve, and 1 second for the call. With less, the
+       MicroVM preflight ``require_time_for_call`` fails the attempt before
+       any API call, and its message asks for a longer function timeout.
+    4. A call that has not ended at the reserve fails the attempt with
        ``TimeoutError``. The default retry strategy retries it, in a later
        invocation. boto3 cannot cancel a call, so the call's thread keeps
        running, and its result is discarded.
 
     Raises:
+        MicrovmEndpointUnavailableError: When less than 11 seconds remain.
         TimeoutError: When the call does not end before the reserve.
         Exception: The error of the call.
     """
+    require_time_for_call(remaining_seconds)
     started = time.monotonic()
 
     def expired() -> Exception:

@@ -78,8 +78,9 @@ class AgentcoreConfig:
     heartbeat_timeout: Duration | None = None
     """The longest time between two heartbeats from the agent.
 
-    Set it to at least 1 second. It ends the job when the worker crashes or
-    stops reporting.
+    Set it. It ends the job when the worker crashes or stops reporting. The
+    first period must cover the request step with its retries and a cold
+    session start, so 30 seconds or more is a safe value. See below.
 
     When it is set, an agent session that crashes fails the operation after
     this time, instead of after ``timeout``. The agent receives the value in

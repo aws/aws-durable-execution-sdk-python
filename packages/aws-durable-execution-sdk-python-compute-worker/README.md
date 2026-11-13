@@ -205,11 +205,12 @@ While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent ru
 
 ### Rules for AgentCore jobs
 
-1. Set `heartbeat_timeout` to at least 1 second. It ends the job when the worker crashes or stops reporting.
+1. Set `heartbeat_timeout`. It ends the job when the worker crashes or stops reporting. The first heartbeat period starts when the callback is created, before the job is delivered. So it must cover the request step with its retries and a cold session start, which took 1.4 to 3.1 seconds in a live test. 30 seconds or more is a safe value.
 2. `timeout` must fit the agent runtime's configured `maxLifetime`.
 3. A job can run more than once when AgentCore replaces the worker process. Make handler side effects safe to repeat.
 4. Your logger must not throw.
 5. The runtime's idle timeout applies only while no job is running. One `agentcore()` call runs one job, so it does not lose state between jobs.
+6. Give the durable function a timeout of at least 11 seconds. Each AgentCore call needs the 10-second invocation reserve and 1 second for the call.
 
 The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the durable function's ARN. The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN and on `<runtime ARN>/runtime-endpoint/*`.
 

@@ -240,32 +240,38 @@ class _JobRunner:
                 if not self._running:
                     self._last_status_change = _now()
                 self._running.add(job.callback_id)
-        # The answer goes out before the job's thread starts. A handler that
-        # held the GIL would otherwise delay it.
-        exchange.respond(200, {"accepted": True})
         if known:
             self._logger.info(
                 "ignored a repeated job", extra={"callbackId": job.callback_id}
             )
+            exchange.respond(200, {"accepted": True})
             return
         session_id = exchange.header(SESSION_ID_HEADER)
+        # The thread starts before the answer, so a failed start can answer
+        # 500. The thread waits on this event before it runs the handler. So
+        # a handler that holds the GIL does not delay the answer.
+        answered = threading.Event()
         try:
             threading.Thread(
                 target=self._run_job,
-                args=(job, request.region, session_id),
+                args=(job, request.region, session_id, answered),
                 name=f"agentcore-job-{job.callback_id[:16]}",
                 daemon=True,
             ).start()
         except Exception as error:  # noqa: BLE001
-            # The job was already accepted, so the durable function waits
-            # for its callback. It fails at its heartbeat timeout, or at
-            # its timeout without one. The job is forgotten, so that the
-            # session reports Healthy again.
+            # The job never ran. The callback ID is forgotten, so that a
+            # later delivery of the same job can run it.
             self._logger.error(
                 "could not start the job's thread",
                 extra={"callbackId": job.callback_id, "error": describe(error)},
             )
             self._end_job(job.callback_id, finished=False)
+            exchange.respond(500, {"error": "could not start the job"})
+            return
+        try:
+            exchange.respond(200, {"accepted": True})
+        finally:
+            answered.set()
 
     def _end_job(self, callback_id: str, *, finished: bool) -> None:
         with self._changed:
@@ -279,8 +285,13 @@ class _JobRunner:
             self._changed.notify_all()
 
     def _run_job(
-        self, job: MicrovmJobDocument, region: str, session_id: str | None
+        self,
+        job: MicrovmJobDocument,
+        region: str,
+        session_id: str | None,
+        answered: threading.Event,
     ) -> None:
+        answered.wait()
         fields: dict[str, object] = {
             "callbackId": job.callback_id,
             "runtimeSessionId": session_id,
@@ -423,10 +434,11 @@ def start_agentcore_worker(
        in process memory only. So a job runs once per process. A new
        process after the idle timeout runs a repeated job again, so the
        handler's side effects must be idempotent.
-    3. Otherwise answers ``{"accepted": true}``, and then starts the
-       handler in a thread. So a handler that holds the GIL does not delay
-       the answer. A thread that cannot start is logged. The durable
-       function then fails at its heartbeat timeout.
+    3. Otherwise starts the job's thread, and answers
+       ``{"accepted": true}``. The thread runs the handler only after the
+       answer is written. So a handler that holds the GIL does not delay
+       the answer. A thread that cannot start gets HTTP 500, and the
+       callback ID is forgotten, so that a later delivery can run the job.
 
     The job's thread sends heartbeats when the job has a heartbeat timeout,
     and then the success or the failure callback.

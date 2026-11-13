@@ -340,12 +340,12 @@ def test_refuses_an_object_whose_call_is_async() -> None:
         start_agentcore_worker(handler=Handler(), host="127.0.0.1", port=0)  # type: ignore[arg-type]
 
 
-def test_logs_and_forgets_a_job_whose_thread_did_not_start(
+def test_answers_500_and_forgets_a_job_whose_thread_did_not_start(
     start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The answer is already sent when the thread start fails. So the worker
-    # logs the failure, and forgets the job so that the session reports
-    # Healthy again.
+    # The thread starts before the answer. So a failed start answers 500,
+    # and the worker forgets the job. A later delivery of the same job then
+    # runs it.
     runs: list[Any] = []
     worker, client, _ = start(lambda job_input, context: runs.append(job_input))
     original = threading.Thread.start
@@ -357,13 +357,18 @@ def test_logs_and_forgets_a_job_whose_thread_did_not_start(
         original(self)
 
     monkeypatch.setattr(threading.Thread, "start", fail_job_threads)
-    assert request(worker, "POST", "/invocations", job_body())[0] == 200
+    assert request(worker, "POST", "/invocations", job_body())[0] == 500
     monkeypatch.setattr(threading.Thread, "start", original)
 
     assert ping(worker)["status"] == "Healthy"
     assert "could not start the job's thread" in logger.messages("error")
     assert runs == []
     assert client.calls == []
+
+    assert request(worker, "POST", "/invocations", job_body())[0] == 200
+    assert worker.idle(WAIT)
+    assert runs == [{"n": 2}]
+    assert client.names() == ["success"]
 
 
 def test_starts_the_handler_only_after_the_answer_is_written(

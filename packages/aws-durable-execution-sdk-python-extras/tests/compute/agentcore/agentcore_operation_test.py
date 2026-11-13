@@ -50,6 +50,7 @@ from aws_durable_execution_sdk_python_extras.compute.agentcore import (
 from aws_durable_execution_sdk_python_extras.compute.agentcore import operation
 from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
     INVOCATION_RESERVE_SECONDS,
+    MicrovmEndpointUnavailableError,
 )
 
 
@@ -798,3 +799,55 @@ def test_labels_every_operation_with_its_subtype(fake_agentcore_client: Any) -> 
     assert {member.value for member in AgentcoreOperationSubType} == set(
         expected.values()
     )
+
+
+def stop_failure_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if "StopRuntimeSession failed" in record.getMessage()
+    ]
+
+
+def test_makes_no_call_with_less_than_11_seconds_left(
+    run: Any,
+    fake_agentcore_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A function timeout of 3 seconds cannot fit the 10-second reserve and
+    # one call. So neither step calls the API, and the stop log does not
+    # suggest a missing permission.
+    monkeypatch.setattr(operation, "_remaining_seconds", lambda context: lambda: 3.0)
+    client = fake_agentcore_client()
+
+    result = run(catching(config_with(client)), {})
+
+    error = outcome(result)
+    assert error["error"] == "AgentcoreDeliveryError"
+    assert "Raise the function timeout." in error["message"]
+    assert client.calls == []
+    stop = result.get_context("review").get_step("review.stop")
+    assert stop.error is not None
+    assert "Raise the function timeout." in (stop.error.message or "")
+    [log] = stop_failure_logs(caplog)
+    assert "Raise the function timeout." in log
+    assert "permission" not in log
+
+
+def test_names_the_permission_when_stop_is_denied(
+    run: Any, fake_agentcore_client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = fake_agentcore_client(stops=[agentcore_error("AccessDeniedException")])
+
+    result = run(catching(config_with(client)), {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    [log] = stop_failure_logs(caplog)
+    assert "bedrock-agentcore:StopRuntimeSession" in log
+
+
+def test_default_retry_strategy_retries_the_time_preflight() -> None:
+    error = MicrovmEndpointUnavailableError("Raise the function timeout.")
+
+    assert default_agentcore_retry_strategy(error, 1).should_retry

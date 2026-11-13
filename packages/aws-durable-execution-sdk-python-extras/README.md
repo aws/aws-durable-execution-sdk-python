@@ -271,7 +271,7 @@ if __name__ == "__main__":
 
 The operation records `review.session`, `review.callback`, `review.request`, and `review.stop` in one child context named `review`. Each operation records a subtype from `AgentcoreOperationSubType`: `Agentcore` on the child context, then `AgentcoreSessionId`, `AgentcoreCallback`, `AgentcoreRequest`, and `AgentcoreStop`, the same values as the JavaScript SDK. Execution history and plugins can filter on them. `review.stop` calls `StopRuntimeSession` after success, failure, and timeout alike. A failed stop is logged, and does not hide the job's result or error.
 
-Each `InvokeAgentRuntime` and `StopRuntimeSession` call must end 10 seconds before the Lambda invocation times out, as the MicroVM calls must. A Lambda timeout during a step attempt records no outcome for the attempt. So a call that has not ended by then fails its attempt with a `TimeoutError`, and the default retry strategy retries it in a later invocation.
+Each `InvokeAgentRuntime` and `StopRuntimeSession` call must end 10 seconds before the Lambda invocation times out, as the MicroVM calls must. A Lambda timeout during a step attempt records no outcome for the attempt. So a call that has not ended by then fails its attempt with a `TimeoutError`, and the default retry strategy retries it in a later invocation. A step attempt with less than 11 seconds left makes no call. It fails with a message that asks for a longer function timeout.
 
 While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
@@ -283,11 +283,12 @@ Delivery is at-least-once, so make the job handler's side effects idempotent:
 
 ### Rules for AgentCore jobs
 
-1. Set `heartbeat_timeout` to at least 1 second. It ends the job when the worker crashes or stops reporting.
+1. Set `heartbeat_timeout`. It ends the job when the worker crashes or stops reporting. The first heartbeat period starts when the callback is created, before the job is delivered. So it must cover the request step with its retries and a cold session start, which took 1.4 to 3.1 seconds in a live test. 30 seconds or more is a safe value.
 2. `timeout` must fit the agent runtime's configured `maxLifetime`.
 3. A job can run more than once when AgentCore replaces the worker process. Make handler side effects safe to repeat.
 4. Your logger must not throw.
 5. The runtime's idle timeout applies only while no job is running. One `agentcore()` call runs one job, so it does not lose state between jobs.
+6. Give the durable function a timeout of at least 11 seconds. Each AgentCore call needs the 10-second invocation reserve and 1 second for the call.
 
 Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.
 

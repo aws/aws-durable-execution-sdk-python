@@ -10,6 +10,10 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.exceptions import ClientError, HTTPClientError
 from botocore.exceptions import ConnectionError as BotocoreConnectionError
 
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
+    MicrovmEndpointUnavailableError,
+)
+
 
 MAX_ATTEMPTS = 5
 """Attempts of one step, the first one included."""
@@ -39,6 +43,10 @@ _RETRYABLE_ERROR_TYPES: tuple[type[Exception], ...] = (
     # as transient.
     BotocoreConnectionError,
     HTTPClientError,
+    # The preflight before each call raises it when the invocation has less
+    # than 11 seconds left. A retry runs early in a new invocation, as in
+    # the MicroVM operation.
+    MicrovmEndpointUnavailableError,
 )
 
 
