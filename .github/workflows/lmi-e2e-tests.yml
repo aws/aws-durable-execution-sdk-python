@@ -130,8 +130,6 @@ jobs:
           allowed-account-ids: ${{ secrets.TEST_ACCOUNT_ID }}
       - name: Run seven shared lifecycle requirements
         timeout-minutes: 60
-        env:
-          LMI_SKIP_CASE_2: "1"
         run: hatch run lmi:shared
       - name: Refresh credentials for evidence and cleanup
         if: always() && hashFiles('lmi_tests/artifacts/manifest.json') != ''
