@@ -93,9 +93,14 @@ quiescent. Current SDK gaps are failures, not expected passes or exclusions.
 The deadline fixture holds real I/O across the runtime deadline and cooperatively
 exits after it. A runtime clock alone never supplies a `platform_timeout` event:
 that event requires the original request's service `InvocationCompleted` history.
-The recovery driver keeps the original healthy peer held while an independent
-recovery request establishes capacity in the original environment. Releasing a
-victim fault cannot establish the preceding cleanup or recovery assertion.
+The recovery victim first waits in a checkpointed preparation step. The driver
+starts the peer halfway through the victim's native timeout, verifies the original
+cohort and the peer's remaining recovery window, then releases preparation to
+admit the fault. Recovery overlap excludes expired original requests and their
+retries. The original peer remains held until recovery completes. A still-running
+durable execution is collected as such; terminal-state waiting and stops belong
+to retirement after assertions. Releasing a victim fault cannot establish the
+preceding cleanup or recovery assertion.
 
 The warm fixture creates invocation-owned late work inside a step. A later
 invocation must find it in the same process; it observes the old callback using

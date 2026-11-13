@@ -14,8 +14,17 @@ from lmi_tests.tests.unit.test_shared_adapter import ScriptCloud, context
 @pytest.mark.parametrize(
     "cell", required_cases("python", "lifecycle"), ids=lambda c: c.scenario
 )
-def test_each_shared_case_uses_its_required_original_roles(cell):
+def test_each_shared_case_uses_its_required_original_roles(cell, monkeypatch):
     cloud = ScriptCloud(cell.minimum_native_concurrency)
+    if cell.scenario == "peer-recovery":
+        from types import SimpleNamespace
+        from lmi_tests import shared_scenarios
+        from lmi_tests.tests.unit.test_peer_recovery import RecoveryCloud
+
+        cloud = RecoveryCloud()
+        monkeypatch.setattr(
+            shared_scenarios, "time", SimpleNamespace(time=lambda: cloud.now)
+        )
     driver = ScenarioDriver(
         context(
             scenario=cell.scenario,

@@ -207,9 +207,11 @@ class Trace:
             observe(self, "control_error", gateId=name, error=str(error))
             raise
 
-    def gate(self, name, *, effects=False, attempt=1, ready=None):
+    def gate(self, name, *, effects=False, attempt=1, ready=None, preparation=False):
         # This return value is checkpointed by existing controlled-io steps.
-        self.gate_release(name, effects=effects, attempt=attempt, ready=ready)
+        self.gate_release(
+            name, effects=effects, attempt=attempt, ready=ready, preparation=preparation
+        )
 
     def gate_release(
         self,
@@ -220,6 +222,7 @@ class Trace:
         ready=None,
         on_hold=None,
         on_release=None,
+        preparation=False,
     ):
         """Observe normal versus emergency release without changing step results."""
         end = time.monotonic() + 150
@@ -266,6 +269,7 @@ class Trace:
                     return released
                 if (
                     self.payload["scenario"] == "deadline"
+                    and not preparation
                     and time.time() >= self.deadline + 0.2
                 ):
                     observe(self, "cooperative_io_cancelled", source="runtime-deadline")
@@ -278,8 +282,9 @@ class Trace:
                         on_hold(held_at_ms)
                     self.emit("BLOCKED", gate=name)
                     observe(self, "blocked", gateId=name, atMs=held_at_ms)
-                    observe(self, "barrier_arrived", gateId=name, atMs=held_at_ms)
-                    if self.payload["scenario"] == "deadline":
+                    if preparation or not self.payload.get("preparation_gate"):
+                        observe(self, "barrier_arrived", gateId=name, atMs=held_at_ms)
+                    if self.payload["scenario"] == "deadline" and not preparation:
                         observe(self, "work_in_flight", gateId=name, atMs=held_at_ms)
                     if self.payload.get("role") == "recovery":
                         observe(self, "worker_recovered", atMs=held_at_ms)
@@ -442,6 +447,12 @@ def run_workflow(event, context, trace):
         if scenario == "failure":
             raise ValueError("expected:" + marker)
         if scenario in {"barrier", "deadline"}:
+            if preparation_gate := event.get("preparation_gate"):
+                context.step(
+                    lambda _: trace.gate(preparation_gate, preparation=True),
+                    name="prepare-recovery",
+                    config=NO_RETRY,
+                )
             context.step(
                 lambda step: trace.gate(
                     event["gate"], effects=scenario == "deadline", attempt=step.attempt

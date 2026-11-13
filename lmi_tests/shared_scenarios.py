@@ -56,6 +56,7 @@ class ScenarioDriver:
             reserve_capacity,
         )
         self.boundary: dict[str, Any] | None = None
+        self.peer_boundary: dict[str, Any] | None = None
 
     @property
     def scenario(self) -> str:
@@ -78,6 +79,7 @@ class ScenarioDriver:
         fixture: str,
         *,
         gate: str | None = None,
+        preparation_gate: str | None = None,
         resume_roles: tuple[str, ...] = (),
         target_environment: str | None = None,
     ) -> dict[str, Any]:
@@ -86,6 +88,7 @@ class ScenarioDriver:
         item = self.cloud.start(
             fixture,
             gate=gate,
+            preparation_gate=preparation_gate,
             target_environment=target_environment,
             role=role,
             resume_roles=resume_roles,
@@ -108,6 +111,9 @@ class ScenarioDriver:
             gate=self.gate("fault")
             if self.scenario in {"deadline-during-step", "peer-recovery"}
             else None,
+            preparation_gate=self.gate("prepare")
+            if self.scenario == "peer-recovery"
+            else None,
             resume_roles=("resume",) if self.scenario == "suspension-retry" else (),
         )
 
@@ -117,9 +123,35 @@ class ScenarioDriver:
         markers = {self.items[role]["marker"] for role in roles}
 
         def established():
-            events = [
+            observed = [
                 event for event in self.cloud.refresh() if event["marker"] in markers
             ]
+            originals = {}
+            for role in roles:
+                entries = [
+                    event
+                    for event in observed
+                    if event["phase"] == "WRAPPER_ENTER"
+                    and event["marker"] == self.items[role]["marker"]
+                ]
+                if not entries:
+                    return None
+                entry = min(
+                    entries, key=lambda event: (event["time"], event["sequence"])
+                )
+                originals[role] = entry["request"]
+                if time.time() >= entry["deadline"]:
+                    raise PlacementError(
+                        f"Original {role} invocation expired before overlap was established"
+                    )
+            events = [
+                event for event in observed if event["request"] in originals.values()
+            ]
+            if any(
+                event["phase"] in {"WRAPPER_RETURN", "WRAPPER_RAISE"}
+                for event in events
+            ):
+                raise PlacementError("An original cohort invocation already ended")
             if environment is not None and any(
                 event["environment"] != environment
                 for event in select(events, "BLOCKED")
@@ -147,10 +179,65 @@ class ScenarioDriver:
         elif self.scenario in {"deadline-during-step", "peer-recovery"}:
             self.boundary = self.cloud.phase(victim, "BLOCKED")[0]
             if self.scenario == "peer-recovery":
-                self.launch("peer", "barrier", gate=self.gate("peer"))
-                self.wait_overlap(("victim", "peer"), self.boundary["environment"])
+                self._prepare_recovery_peer()
         else:
             self.cloud.phase(victim, "WRAPPER_ENTER")
+
+    def _prepare_recovery_peer(self) -> None:
+        if self.boundary is None:
+            raise CollectionError(
+                "Recovery preparation has no original victim boundary"
+            )
+        deadline = self.boundary["deadline"]
+        lead = self.cloud.manifest["invocationTimeout"] / 2
+        self.cloud.poll(
+            lambda: time.time() >= deadline - lead,
+            seconds=self.cloud.manifest["invocationTimeout"],
+            message="Original victim did not reach the peer-admission window",
+        )
+        if time.time() >= deadline:
+            raise PlacementError("Original victim expired before peer admission")
+        peer = self.launch(
+            "peer",
+            "barrier",
+            gate=self.gate("peer"),
+            target_environment=self.boundary["environment"],
+        )
+        self.peer_boundary = self.cloud.phase(peer, "BLOCKED")[0]
+        required_window = self.seconds("recoveryMs", 15) + self.seconds(
+            "observationGraceMs", 1
+        )
+        if self.peer_boundary["deadline"] <= deadline + required_window:
+            raise PlacementError(
+                "Original peer has insufficient time remaining for recovery"
+            )
+        self.wait_overlap(("victim", "peer"), self.boundary["environment"])
+        # Establish the original healthy cohort before admitting the actual fault.
+        self.cloud.release(self.gate("prepare"))
+        request = self.boundary["request"]
+        self.cloud.poll(
+            lambda: [
+                event
+                for event in canonical(self.cloud.for_item(self.items["victim"]))
+                if event.get("requestId") == request
+                and event.get("kind") == "work_in_flight"
+                and event.get("atMs", deadline * 1000) < deadline * 1000
+            ],
+            seconds=max(0.001, deadline - time.time()),
+            message="Original victim never entered the fault before its deadline",
+        )
+
+    def _peer_still_active(self) -> None:
+        if self.peer_boundary is None:
+            raise CollectionError("Recovery lost the original peer boundary")
+        if time.time() >= self.peer_boundary["deadline"]:
+            raise PlacementError("Original healthy peer expired during recovery")
+        if any(
+            event["request"] == self.peer_boundary["request"]
+            and event["phase"] in {"WRAPPER_RETURN", "WRAPPER_RAISE"}
+            for event in self.cloud.for_item(self.items["peer"])
+        ):
+            raise PlacementError("Original healthy peer ended during recovery")
 
     def _callback(self, item: dict[str, Any]) -> None:
         self.cloud.poll(
@@ -195,6 +282,7 @@ class ScenarioDriver:
             seconds=self.cloud.manifest["invocationTimeout"] + 5,
         )
         if self.scenario == "peer-recovery":
+            self._peer_still_active()
             recovery = self.launch(
                 "recovery",
                 "barrier",
@@ -204,6 +292,7 @@ class ScenarioDriver:
             self.wait_overlap(("peer", "recovery"), self.boundary["environment"])
             self.cloud.release(self.gate("recovery"))
             self.cloud.finish(recovery)
+            self._peer_still_active()
             self.cloud.release(self.gate("peer"))
             self.cloud.finish(self.items["peer"])
         self.cloud.platform_timeout(victim, self.boundary["request"])
@@ -216,7 +305,8 @@ class ScenarioDriver:
             ),
             seconds=self.cloud.manifest["invocationTimeout"] + 30,
         )
-        self.cloud.wait_terminal(victim)
+        # RUNNING is a valid pre-cleanup execution state for this measurement.
+        # Collection records it; retirement stops/reconciles the execution later.
 
     def execute(self) -> None:
         victim = self.items["victim"]

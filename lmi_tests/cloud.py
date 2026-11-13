@@ -194,6 +194,7 @@ class Cloud:
         gate=None,
         target_environment=None,
         *,
+        preparation_gate=None,
         role=None,
         resume_roles=(),
         dispatcher_payload=None,
@@ -231,6 +232,9 @@ class Cloud:
         if gate:
             payload["gate"] = gate
             self.hold(gate)
+        if preparation_gate:
+            payload["preparation_gate"] = preparation_gate
+            self.hold(preparation_gate)
         runner = DurableFunctionCloudTestRunner(
             self.manifest["functions"][self.configuration],
             region=self.manifest["region"],
