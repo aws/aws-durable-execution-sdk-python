@@ -21,6 +21,7 @@ This package holds the SDK-specific part: the handler and the SAM template that 
 | `telemetry` | `telemetry-1` | One successful single-step execution emits one `SUCCEEDED` record with `input`, `output`, ARN-derived identity fields, and `operationsByName`. |
 | `telemetry` | `telemetry-2` | One failed execution emits one `FAILED` record with an `error` on the execution and on `operationsByName.charge`.                             |
 | `telemetry` | `telemetry-3` | An `OperationOverride.result` transform exports exactly `{userId}` of a three-key step result; the record has no `input` or `output`.          |
+| `telemetry` | `telemetry-4` | With `operation_detail="full-tree"`, the record holds the map, its two iteration contexts, and the two steps by name.                          |
 
 ## Layout
 
@@ -29,6 +30,7 @@ src/
   telemetry_1_success.py       # single step "increment"; plugin + CloudWatchLogsExporter
   telemetry_2_failure.py       # step "charge" fails; handler raises "payment failed" from the step error
   telemetry_3_result_select.py # step "fetch-user"; override transform keeps only userId in the record
+  telemetry_4_full_tree_map.py # map "process-items" with step "greet-<item>"; full-tree detail records all five operations
   Makefile                     # one build-<LogicalId> target per function, used by `sam build`
   requirements.txt             # core SDK + telemetry exporter, pinned to ${PYTHON_SDK_REF}
 template.yaml                  # declares TelemetryLogGroupName and creates the group
