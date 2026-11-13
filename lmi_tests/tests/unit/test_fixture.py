@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
@@ -15,7 +14,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python_testing import DurableFunctionTestRunner
 from lmi_tests.fixture import ObservedClient, workflow
 from lmi_tests import fixture
-from lmi_tests.tests.regressions.test_issue741 import (
+from lmi_tests.tests.unit.support import (
     MemoryClient,
     invocation,
     lambda_context,
@@ -25,6 +24,7 @@ from lmi_tests.tests.regressions.test_issue741 import (
 class LocalTrace:
     def __init__(self):
         self.events = []
+        self.shared = False
         self.payload = {"scenario": "checkpoint", "marker": "local"}
 
     def emit(self, phase, **fields):
@@ -89,8 +89,6 @@ def test_checkpoint_proxy_preserves_real_result_and_errors():
     assert [e["phase"] for e in trace.events] == [
         "CHECKPOINT_CALL",
         "CHECKPOINT_ACK",
-        "ACK_HELD",
-        "GATE",
         "CHECKPOINT_EXIT",
     ]
     assert "secret" not in json.dumps(trace.events)
@@ -122,16 +120,6 @@ def test_replay_fixture_uses_real_public_apis_and_preserves_outcomes():
     failures = [e for e in trace.events if e["phase"] == "STORED_FAILURE"]
     assert len(failures) >= 2
     assert all(e["message"] == "expected:local" for e in failures)
-
-
-def test_parallel_checkpoints_finish_with_local_runner():
-    trace = LocalTrace()
-    handler = durable_execution(lambda e, c: workflow(e, c, trace))
-    with DurableFunctionTestRunner(handler) as runner, ThreadPoolExecutor(1) as caller:
-        result = caller.submit(
-            runner.run, input={"marker": "local", "scenario": "checkpoint"}
-        ).result(timeout=10)
-    assert result.status.value == "SUCCEEDED"
 
 
 def test_cloud_entrypoint_unwraps_runtime_event_and_observes_real_wrapper(monkeypatch):

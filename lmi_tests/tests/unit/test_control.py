@@ -1,10 +1,8 @@
 """Regressions for the real-cloud 403 and premature-loser false positives."""
 
 import io
-import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -13,10 +11,8 @@ from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 import pytest
 
-from lmi_tests.fixture import Trace, workflow
-from lmi_tests import evidence, fixture
-from lmi_tests.tests.regressions.test_issue741 import invocation, lambda_context
-from aws_durable_execution_sdk_python import durable_execution
+from lmi_tests.fixture import Trace
+from lmi_tests import fixture
 
 
 @pytest.fixture
@@ -140,54 +136,3 @@ def test_emitted_records_are_partitioned_by_case_and_request(trace):
         trace.s3.put_object.call_args.kwargs["Key"]
         == "runs/unit/events/case/request/000001.json"
     )
-
-
-@pytest.mark.parametrize("scenario", ["parallel", "map", "nested"])
-def test_full_fixture_establishes_a_real_blocked_loser(scenario):
-    """Exercise fixture wiring and SDK APIs; valid evidence survives future SDK fixes."""
-    objects = {
-        "runs/unit/control/release-all": b"hold",
-        "runs/unit/control/local-loser": b"hold",
-        "runs/unit/control/local-loser-started": b"hold",
-    }
-    events = []
-    computed = threading.Event()
-    lock = threading.Lock()
-
-    def put(**kwargs):
-        with lock:
-            objects[kwargs["Key"]] = kwargs["Body"]
-            if kwargs["Key"].startswith("runs/unit/events/"):
-                event = json.loads(kwargs["Body"])
-                events.append(event)
-                if event["phase"] == "WINNER_SELECTED":
-                    computed.set()
-
-    def get(**kwargs):
-        with lock:
-            return {"Body": io.BytesIO(objects[kwargs["Key"]])}
-
-    trace = Trace.__new__(Trace)
-    trace.capture_lock, trace.capture_sequence = threading.Lock(), 0
-    trace.s3, trace.bucket = Mock(), "test-bucket"
-    trace.s3.put_object.side_effect, trace.s3.get_object.side_effect = put, get
-    trace.identity = {"run": "unit", "marker": "local", "request": "request"}
-    trace.lock, trace.sequence, trace.deadline = threading.Lock(), 0, time.time() + 30
-    trace.payload, trace.shared = {"scenario": scenario}, False
-    trace.control_prefix = "runs/unit/control/"
-    handler = durable_execution(
-        lambda _e, c: workflow({"marker": "local", "scenario": scenario}, c, trace)
-    )
-    with ThreadPoolExecutor(1) as caller:
-        future = caller.submit(handler, invocation(), lambda_context(30000))
-        try:
-            assert computed.wait(3), (
-                "The controlled fixture did not reach winner selection"
-            )
-            with lock:
-                snapshot = list(events)
-            evidence.held_loser(snapshot)
-            assert any(e["phase"] == "EFFECT" for e in snapshot)
-        finally:
-            put(Key="runs/unit/control/local-loser", Body=b"release")
-            assert future.result(timeout=3)["Status"] == "SUCCEEDED"

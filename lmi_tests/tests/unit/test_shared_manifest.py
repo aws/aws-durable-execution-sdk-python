@@ -9,7 +9,6 @@ import pytest
 
 from aws_durable_execution_conformance_tests.lmi.app import load_manifest
 from lmi_tests.shared import make_manifest, verify_checkout
-from lmi_tests.python_catalog import suite_definition
 from lmi_tests.shared_contract import CONFORMANCE_REVISION, configuration_identity
 
 
@@ -35,7 +34,6 @@ def deployment():
         },
         "wheels": {
             "aws_durable_execution_sdk_python-3.0.0.whl": "core-sha",
-            "aws_durable_execution_sdk_python_otel-2.0.0.whl": "otel-sha",
         },
         "sharedLease": {
             "bucket": "private",
@@ -47,27 +45,29 @@ def deployment():
     }
 
 
-@pytest.mark.parametrize(
-    "profile,count", [("python-lifecycle", 76), ("export-lifecycle", 24)]
-)
-def test_generated_manifest_covers_every_required_slot(tmp_path, profile, count):
+def test_generated_manifest_covers_the_seven_shared_scenarios(tmp_path):
+    from aws_durable_execution_conformance_tests.lmi.app import coverage_inventory
+
     source = deployment()
-    plan = make_manifest(source, profile, tmp_path)
-    assert len(plan["scenarios"]) == count
-    identifiers = {case["requirement_id"] for case in plan["scenarios"]}
-    if profile == "python-lifecycle":
-        assert all(identity.startswith("python-lmi-") for identity in identifiers)
-    else:
-        assert identifiers == {"lmi-lifecycle-16"}
-    assert {case["profile_id"] for case in plan["scenarios"]} == {"c1", "c2"}
+    plan = make_manifest(source, "standard", tmp_path)
+    assert len(plan["scenarios"]) == 7
+    assert {c["requirement_id"] for c in plan["scenarios"]} == {
+        f"lmi-lifecycle-{i}" for i in range(1, 8)
+    }
+    assert {c["profile_id"] for c in plan["scenarios"]} == {"c1", "c2"}
+    assert all(
+        "otel_view" not in c and "export_mode" not in c for c in plan["scenarios"]
+    )
     assert plan["sdk"]["deployment"]["conformanceRevision"] == CONFORMANCE_REVISION
     path = tmp_path / "plan.json"
     path.write_text(json.dumps(plan))
+    assert load_manifest(path) == plan
+    assert coverage_inventory(plan)["missing"] == []
     assert (
-        load_manifest(
-            path, suite=suite_definition() if profile == "python-lifecycle" else None
-        )
-        == plan
+        next(c for c in plan["scenarios"] if c["scenario"] == "normal-failure")[
+            "requirement_id"
+        ]
+        == "lmi-lifecycle-7"
     )
     plan["sdk"]["deployment"]["commit"] = "mutated"
     assert source["commit"] == "sdk-commit"
@@ -77,11 +77,11 @@ def test_no_unowned_or_unidentified_artifact_can_be_planned(tmp_path):
     source = deployment()
     source.pop("sharedLease")
     with pytest.raises(ValueError, match="ownership"):
-        make_manifest(source, "python-lifecycle", tmp_path)
+        make_manifest(source, "standard", tmp_path)
     source = deployment()
     source["wheels"] = {}
     with pytest.raises(ValueError, match="wheel"):
-        make_manifest(source, "python-lifecycle", tmp_path)
+        make_manifest(source, "standard", tmp_path)
 
 
 def test_configuration_identity_changes_with_the_tested_settings():

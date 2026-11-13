@@ -55,7 +55,7 @@ def test_case_ownership_is_checked_before_control_release(
         "profiles": [{"profile_id": "c1", "resource_id": target}],
         "scenarios": [case],
     }
-    output = tmp_path / "python-lifecycle"
+    output = tmp_path / "standard"
     output.mkdir()
     (output / "manifest.json").write_text(json.dumps(plan))
     identity = hashlib.sha256(b"case:cohort").hexdigest()[:20]

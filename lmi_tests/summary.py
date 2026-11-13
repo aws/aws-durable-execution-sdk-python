@@ -1,43 +1,34 @@
-"""Small, dependency-free Actions summary; no executed scenario means no pass."""
+"""Summarize the shared lifecycle report without inventing cloud acceptance."""
 
 import json
 from pathlib import Path
-import xml.etree.ElementTree as ET
 
 
 def summarize(directory):
     directory = Path(directory)
     manifest = directory / "manifest.json"
-    lines = ["LMI cloud regressions for Python SDK #741.", ""]
-    if manifest.exists():
-        config = json.loads(manifest.read_text())
+    config = json.loads(manifest.read_text()) if manifest.exists() else None
+    lines = ["Python shared LMI lifecycle conformance."]
+    if config:
         lines.append(
-            f"Commit `{config['commit']}`; {config['runtime']}; one deployment, environment concurrency {list(config['concurrencies'].values())}."
+            f"Commit `{config['commit']}`; {config['runtime']}; native concurrency {list(config['concurrencies'].values())}."
         )
+    shared = directory / "shared"
+    path = shared / "standard/report.json"
+    report = json.loads(path.read_text()) if path.exists() else None
+    if report and config is None:
         lines.append(
-            f"Timeouts: invocation {config['invocationTimeout']}s (all scenarios), durable execution {config['executionTimeout']}s, driver {config['driverTimeout']}s; cleanup grace {config['cleanupGrace']}s."
+            "Deployment identity is missing; current cloud acceptance is unavailable."
         )
-    report = directory / "cloud.xml"
-    if report.exists():
-        for case in ET.parse(report).iter("testcase"):
-            category = next(
-                (
-                    p.get("value")
-                    for p in case.findall("properties/property")
-                    if p.get("name") == "lmi_outcome"
-                ),
-                None,
-            )
-            problem = next(
-                (
-                    case.find(k)
-                    for k in ("error", "failure", "skipped")
-                    if case.find(k) is not None
-                ),
-                None,
-            )
-            state = category or (problem.tag.upper() if problem is not None else "PASS")
-            lines.append(f"- {case.get('name')}: {state}")
+    elif report and config and report.get("run", {}).get("name") != config["run"]:
+        lines.append(
+            "Report belongs to another run; current cloud acceptance is unavailable."
+        )
+    elif report and report.get("results"):
+        lines.extend(f"- {case['id']}: {case['status']}" for case in report["results"])
+        lines.append(
+            f"Shared runner exit code: {report.get('ci', {}).get('exit_code', 'unknown')}."
+        )
     else:
         lines.append(
             "Cloud scenarios did not run. Inspect provisioning/build diagnostics."
@@ -45,11 +36,17 @@ def summarize(directory):
     for path in sorted(directory.glob("*-error.json")):
         data = json.loads(path.read_text())
         lines.append(f"- {path.stem}: {data['type']}")
-    cleanup = directory / "cleanup.json"
+    receipt = shared / "ownership-released.json"
+    released = (
+        config is not None
+        and receipt.exists()
+        and json.loads(receipt.read_text())
+        == {"runId": config["run"], "lease": config.get("sharedLease")}
+    )
     lines.append(
-        "Run work released; persistent stack, functions, bucket, and code retained."
-        if cleanup.exists()
-        else "Run cleanup not confirmed; persistent resources are retained. Inspect cleanup diagnostics before updating."
+        "Run ownership released after retirement; persistent resources retained."
+        if released
+        else "Run cleanup not confirmed; ownership and persistent resources are retained."
     )
     return "\n\n".join(lines)
 

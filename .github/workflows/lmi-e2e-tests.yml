@@ -19,7 +19,7 @@ env:
   # Ignore the CodeBuild image's shared pip target and Python search path.
   PIP_CONFIG_FILE: /dev/null
   PYTHONPATH: ""
-  CONFORMANCE_REVISION: 59352e1097d92fe034c7cd55a9618837b95b905b
+  CONFORMANCE_REVISION: cc1eae152d9d0a49ecb777db140339f290b43567
   LMI_SHARED_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
@@ -63,8 +63,8 @@ jobs:
   cloud:
     name: cloud (Python 3.14, concurrency 1 and 2)
     needs: harness
-    # Trusted PRs and manual runs exercise the full suite. The #741 regressions
-    # remain strict failures; fork and Dependabot PRs run only the harness.
+    # Trusted PRs and manual runs exercise the shared lifecycle suite. SDK
+    # failures remain strict; fork and Dependabot PRs run only the harness.
     if: github.actor != 'dependabot[bot]' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 120
@@ -128,7 +128,7 @@ jobs:
           role-session-name: python-lmi-assertions
           aws-region: ${{ env.AWS_REGION }}
           allowed-account-ids: ${{ secrets.TEST_ACCOUNT_ID }}
-      - name: Run Python lifecycle regressions and shared exporter conformance
+      - name: Run seven shared lifecycle requirements
         timeout-minutes: 60
         run: hatch run lmi:shared
       - name: Refresh credentials for evidence and cleanup

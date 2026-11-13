@@ -17,7 +17,7 @@ from aws_durable_execution_conformance_tests.lmi.coordinator import (
 )
 from lmi_tests import cloud as cloud_module
 from lmi_tests import shared_adapter as adapter_module
-from lmi_tests.evidence import CollectionError, PlacementError, ProvisioningError
+from lmi_tests.evidence import CollectionError, ProvisioningError
 from lmi_tests.shared_scenarios import ScenarioDriver
 
 
@@ -28,12 +28,10 @@ PROFILE = Profile("native-1", FUNCTION, 1, 1, "sdk-sha", "configuration-sha")
 
 def context(
     case_id="case",
-    scenario="replay-callback-retry",
+    scenario="suspension-retry",
     roles=("victim", "resume"),
     *,
     native=1,
-    view=None,
-    mode=None,
 ):
     profile = Profile(
         f"native-{native}", FUNCTION, native, native, "sdk-sha", "configuration-sha"
@@ -42,13 +40,11 @@ def context(
         "run",
         Scenario(
             case_id,
-            "lmi-lifecycle-16" if mode else "python-lmi-5",
+            "lmi-lifecycle-5",
             profile.profile_id,
             scenario,
             roles=roles,
-            otel_view=view,
-            export_mode=mode,
-            coverage_profile="export-lifecycle" if mode else "python-lifecycle",
+            coverage_profile="standard",
         ),
         profile,
     )
@@ -133,7 +129,7 @@ def test_direct_launch_is_journaled_before_public_runner_transport(cloud):
     payload = json.loads(observed[0]["Payload"])
     assert observed[0]["FunctionName"] == FUNCTION
     assert payload["scenario"] == "replay"
-    assert payload["sharedScenario"] == "replay-callback-retry"
+    assert payload["sharedScenario"] == "suspension-retry"
     assert payload["caseId"] == "case"
     assert payload["controlPrefix"] == cloud.control_prefix
     assert "/cases/" in cloud.control_prefix
@@ -407,11 +403,6 @@ class ScriptCloud:
             },
             {"phase": "WRAPPER_ENTER", "request": "first"},
             {"phase": "WRAPPER_ENTER", "request": "second"},
-            {
-                "phase": "CONFORMANCE",
-                "observation": {"kind": "flush_wait_completed", "outcome": "timeout"},
-            },
-            {"phase": "CONFORMANCE", "observation": {"kind": "export_completed"}},
             {"phase": "LATE_REJECTED"},
             {"phase": "ALIVE", "time": 2},
         ]
@@ -441,173 +432,6 @@ def test_callback_uses_same_execution_and_actual_pending_before_response():
         "callback-id", result=b"victim"
     )
     assert cloud.callback_records[0]["executionArn"] == "execution:victim"
-
-
-@pytest.mark.parametrize(
-    "scenario,fixture",
-    [
-        ("early-completion-parallel", "parallel"),
-        ("early-completion-map", "map"),
-        ("early-completion-nested", "nested"),
-    ],
-)
-def test_early_completion_observations_do_not_release_losing_fault(scenario, fixture):
-    cloud = ScriptCloud()
-    driver = ScenarioDriver(context(scenario=scenario, roles=("victim",)), cloud)
-    driver.start()
-    driver.place()
-    driver.execute()
-    assert cloud.actions[0][1] == fixture
-    assert not any(action[0] == "release" for action in cloud.actions)
-
-
-@pytest.mark.parametrize("mode", ["sync", "async-bounded-flush"])
-def test_held_async_export_observes_real_timeout_and_wrapper_before_release(mode):
-    cloud = ScriptCloud()
-    driver = ScenarioDriver(
-        context(
-            scenario="held-export", roles=("victim",), view="invocation", mode=mode
-        ),
-        cloud,
-    )
-    driver.start()
-    driver.place()
-    driver.execute()
-    released = next(
-        index for index, action in enumerate(cloud.actions) if action[0] == "release"
-    )
-    preceding = cloud.actions[:released]
-    assert ("phase", "victim", "OTEL_EXPORT_HELD") in preceding
-    assert (("phase", "victim", "WRAPPER_RETURN") in preceding) == (
-        mode == "async-bounded-flush"
-    )
-    assert cloud.actions[0][2]["otel_export"] == "held"
-
-
-def test_missed_original_placement_is_not_retried_as_another_victim():
-    cloud = ScriptCloud(2)
-    cloud.poll = lambda *args, **kwargs: [{"phase": "PLACEMENT_MISS"}]
-    driver = ScenarioDriver(
-        context(scenario="return-inflight", roles=("victim", "peer"), native=2), cloud
-    )
-    driver.start()
-    with pytest.raises(PlacementError, match="Original victim"):
-        driver.place()
-    assert len(cloud.invocations) == 2
-
-
-@pytest.mark.parametrize(
-    "scenario,count", [("warm-lifecycle", 9), ("otel-warm-lifecycle", 6)]
-)
-def test_warm_sequence_uses_real_callback_resumes_not_extra_driver_invocations(
-    scenario, count
-):
-    from lmi_tests.python_catalog import required_cases
-
-    cell = next(
-        case
-        for case in required_cases("lifecycle-otel")
-        if case.scenario == scenario and case.native_concurrency == 1
-    )
-    cloud = ScriptCloud()
-    driver = ScenarioDriver(
-        context(scenario=scenario, roles=cell.roles, view=cell.otel_view), cloud
-    )
-    driver.start()
-    driver.place()
-    driver.execute()
-    launches = [action for action in cloud.actions if action[0] == "start"]
-    assert len(launches) == count
-    assert [action[1] for action in launches] == ["success", "failure", "replay"] * (
-        count // 3
-    )
-    assert len(cloud.callback_records) == count // 3
-    assert len({item["arn"] for item in cloud.invocations}) == count
-
-
-@pytest.mark.parametrize("native", [1, 2])
-def test_deadline_recovery_demands_original_environment_before_fault_release(native):
-    roles = (
-        ("victim", "recovery")
-        if native == 1
-        else ("victim", "peer", "recovery", "recovery-peer")
-    )
-    cloud = ScriptCloud(native)
-    driver = ScenarioDriver(
-        context(scenario="deadline-recovery", roles=roles, native=native), cloud
-    )
-    driver.wait_overlap = Mock(return_value=[])
-    for role in roles:
-        driver.context.record_attempt(
-            role, role=role, requestId="request" if role == "victim" else role
-        )
-    driver.start()
-    driver.place()
-    driver.execute()
-    expected = ("recovery",) if native == 1 else ("recovery", "recovery-peer")
-    driver.wait_overlap.assert_called_with(expected, "environment")
-    measured = next(
-        index
-        for index, action in enumerate(cloud.actions)
-        if action[0] == "measurement"
-    )
-    released = next(
-        index
-        for index, action in enumerate(cloud.actions)
-        if action == ("release", driver.gate("fault"))
-    )
-    assert measured < released
-    assert ("platform-timeout", "execution:victim") in cloud.actions
-
-
-def test_timeout_retry_never_launches_a_replacement_execution():
-    cloud = ScriptCloud()
-    driver = ScenarioDriver(
-        context(scenario="timeout-retry", roles=("victim", "retry")), cloud
-    )
-    driver.context.record_attempt("original", role="victim", requestId="request")
-    driver.context.record_attempt("retry", role="retry", requestId="second")
-    driver.start()
-    driver.place()
-    driver.execute()
-    assert len(cloud.invocations) == 1
-    assert cloud.actions[0][2]["resume_roles"] == ("retry",)
-    assert [action[1] for action in cloud.actions if action[0] == "release"] == [
-        driver.gate("fault")
-    ]
-
-
-@pytest.mark.parametrize(
-    "scenario,gate_suffix,expected_status",
-    [
-        ("checkpoint-settlement", "checkpoint", "SUCCEEDED"),
-        ("pending-cleanup", "cleanup", "SUCCEEDED"),
-        ("return-inflight", "loser", "SUCCEEDED"),
-        ("failure-inflight", "loser", "FAILED"),
-        ("late-operation", "loser", "SUCCEEDED"),
-    ],
-)
-def test_scope_drivers_observe_real_boundary_before_releasing_its_control(
-    scenario, gate_suffix, expected_status
-):
-    cloud = ScriptCloud()
-    roles = ("victim", "resume") if scenario == "pending-cleanup" else ("victim",)
-    driver = ScenarioDriver(context(scenario=scenario, roles=roles), cloud)
-    driver.start()
-    driver.place()
-    driver.execute()
-    release = next(
-        index
-        for index, action in enumerate(cloud.actions)
-        if action == ("release", f"victim-{gate_suffix}")
-    )
-    finished = next(
-        index
-        for index, action in enumerate(cloud.actions)
-        if action == ("finish", "victim", expected_status)
-    )
-    assert release < finished
-    assert any(action[0] == "phase" for action in cloud.actions[:release])
 
 
 def test_each_case_has_independent_artifact_namespace(monkeypatch, tmp_path):
@@ -658,7 +482,7 @@ def settled_cloud(*, view=None):
         },
     ]
     cloud.refresh = lambda **kwargs: events
-    driver = ScenarioDriver(context(view=view), cloud)
+    driver = ScenarioDriver(context(), cloud)
     return driver, events
 
 
@@ -669,35 +493,15 @@ def settled_cloud(*, view=None):
         ("io_start", "io_exit", "taskId"),
         ("checkpoint_call", "checkpoint_exit", "callId"),
         ("poll_call", "poll_exit", "callId"),
-        ("export_started", "export_completed", "exportId"),
-        ("flush_started", "flush_completed", "flushId"),
     ],
 )
-def test_retirement_requires_every_real_task_call_and_export_to_exit(
-    start, end, identity
-):
+def test_retirement_requires_every_real_task_and_call_to_exit(start, end, identity):
     driver, events = settled_cloud()
     assert driver.quiescent()
     event = {"requestId": "native", identity: "outstanding"}
     events.append({"phase": "CONFORMANCE", "observation": {**event, "kind": start}})
     assert not driver.quiescent()
     events.append({"phase": "CONFORMANCE", "observation": {**event, "kind": end}})
-    assert driver.quiescent()
-
-
-def test_export_quiescence_needs_positive_publication_evidence_even_when_unsampled():
-    driver, events = settled_cloud(view="invocation")
-    assert not driver.quiescent()
-    observation = {
-        "kind": "export_quiescence",
-        "requestId": "native",
-        "pendingExportIds": [],
-        "pendingFlushIds": [],
-        "publicationCount": 1,
-    }
-    events.append({"phase": "CONFORMANCE", "observation": observation})
-    assert not driver.quiescent()
-    observation["publicationCount"] = 0
     assert driver.quiescent()
 
 

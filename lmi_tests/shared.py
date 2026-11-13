@@ -1,6 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run Python LMI regressions and shared exporter conformance."""
+"""Run the seven shared LMI lifecycle requirements."""
 
 from __future__ import annotations
 
@@ -20,20 +20,7 @@ from lmi_tests.shared_contract import CONFORMANCE_REVISION, configuration_identi
 from lmi_tests.shared_lock import OwnershipError, RunLease
 
 
-COVERAGE_PROFILES = ("python-lifecycle", "export-lifecycle")
-BEHAVIOR_BUDGETS = {
-    "observationGraceMs": 1000,
-    "cleanupMs": 5000,
-    "recoveryMs": 5000,
-    "retryMs": 40000,
-    "progressMs": 15000,
-    "maxThreadGrowth": 1,
-    "maxFdGrowth": 8,
-    "maxRssGrowthBytes": 32 * 1024 * 1024,
-    "exportMs": 30000,
-    "exportCompletionMs": 30000,
-    "flushWaitMs": 10000,
-}
+COVERAGE_PROFILES = ("standard",)
 
 
 def verify_checkout(checkout: Path) -> None:
@@ -62,8 +49,6 @@ def setup(checkout: Path) -> None:
             "install",
             "--editable",
             str(checkout / "packages/aws-durable-execution-conformance-tests"),
-            "--editable",
-            str(checkout / "packages/aws-durable-execution-conformance-tests-otel"),
         ],
         check=True,
     )
@@ -72,9 +57,8 @@ def setup(checkout: Path) -> None:
 def verify_install(checkout: Path) -> None:
     verify_checkout(checkout)
     import aws_durable_execution_conformance_tests as core
-    import aws_durable_execution_conformance_tests_otel as otel
 
-    for module in (core, otel):
+    for module in (core,):
         if not Path(module.__file__).resolve().is_relative_to(checkout.resolve()):
             raise ValueError(
                 "Installed conformance packages are not from the pinned checkout; run shared setup"
@@ -85,7 +69,6 @@ def make_manifest(
     deployment: Mapping[str, Any], coverage: str, directory: Path
 ) -> dict[str, Any]:
     from aws_durable_execution_conformance_tests.lmi.matrix import required_cases
-    from lmi_tests import python_catalog
 
     if coverage not in COVERAGE_PROFILES:
         raise ValueError("Unknown Python adapter coverage profile")
@@ -116,27 +99,24 @@ def make_manifest(
         for key in ("c1", "c2")
     ]
     scenarios = []
-    required_cells = (
-        python_catalog.required_cases("lifecycle-otel")
-        if coverage == "python-lifecycle"
-        else required_cases("python", "lifecycle-otel", coverage)
-    )
-    for required in required_cells:
-        case_id = f"{coverage}-{required.scenario}-c{required.native_concurrency}-{required.otel_view or 'baseline'}-{required.export_mode or 'sdk-default'}"
+    for required in required_cases("python", "lifecycle", coverage):
+        concurrency = required.minimum_native_concurrency
+        case_id = f"{required.requirement_id}-{required.scenario}"
         scenarios.append(
             {
                 "case_id": case_id,
                 "cohort_id": "cohort-1",
                 "requirement_id": required.requirement_id,
-                "profile_id": f"c{required.native_concurrency}",
+                "profile_id": f"c{concurrency}",
                 "scenario": required.scenario,
-                "otel_view": required.otel_view,
-                "export_mode": required.export_mode,
                 "roles": list(required.roles),
-                "slots": required.minimum_native_concurrency,
+                "slots": concurrency,
                 "exclusive": required.exclusive,
                 "behavior_budgets": {
-                    name: BEHAVIOR_BUDGETS[name] for name in required.budget_names
+                    "observationGraceMs": 1000,
+                    "admissionMs": 5000,
+                    "cleanupMs": 5000,
+                    "recoveryMs": 15000,
                 },
             }
         )
@@ -146,7 +126,7 @@ def make_manifest(
         "runtime": "python",
         "region": actual["region"],
         "coverageProfile": coverage,
-        "capabilityProfile": "lifecycle-otel",
+        "capabilityProfile": "lifecycle",
         "scenarioConcurrency": 8,
         "profiles": profiles,
         "scenarios": scenarios,
@@ -168,7 +148,6 @@ def make_manifest(
 
 
 def run(deployment: Mapping[str, Any], directory: Path) -> int:
-    from lmi_tests import python_catalog
 
     from aws_durable_execution_conformance_tests.lmi.app import (
         build_report,
@@ -198,27 +177,17 @@ def run(deployment: Mapping[str, Any], directory: Path) -> int:
             plan = make_manifest(deployment, coverage, output)
             path = output / "manifest.json"
             save(path, plan)
-            suite = (
-                python_catalog.suite_definition(plan["capabilityProfile"])
-                if coverage == "python-lifecycle"
-                else None
-            )
-            validated = (
-                python_catalog.load_manifest(path)
-                if suite is not None
-                else load_manifest(path)
-            )
+            validated = load_manifest(path)
             results = asyncio.run(
                 live_results(
                     validated,
                     "lmi_tests.shared_adapter:create_adapter",
                     audit_dir=output,
-                    suite=suite,
                 )
             )
-            report = build_report(validated, results, suite=suite)
+            report = build_report(validated, results)
             save(output / "evidence.json", results)
-            save(output / "coverage.json", coverage_inventory(validated, suite=suite))
+            save(output / "coverage.json", coverage_inventory(validated))
             print(render_console(report))
             for format_name in ("json", "junit"):
                 write_report(report, format_name, str(output / "report"))
@@ -386,7 +355,7 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
             "runId": deployment["run"],
             "errors": errors,
             "status": "OWNERSHIP_RETAINED",
-            "reason": "Fault release and Stop do not prove task/export quiescence; retained run requires reconciliation",
+            "reason": "Fault release and Stop do not prove task/request quiescence; retained run requires reconciliation",
         },
     )
     return 1

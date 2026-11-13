@@ -189,68 +189,38 @@ def test_requires_request_specific_service_timeout(driver, message):
 
 def test_summary_never_claims_unexecuted_or_skipped_cloud_success(tmp_path):
     assert "did not run" in summarize(tmp_path)
-    (tmp_path / "cloud.xml").write_text(
-        '<testsuites><testsuite><testcase name="placement"><properties><property name="lmi_outcome" value="PlacementError"/></properties><failure/></testcase><testcase name="not-run"><skipped/></testcase></testsuite></testsuites>'
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run": "current",
+                "commit": "sdk",
+                "runtime": "python3.14",
+                "concurrencies": {"c1": 1, "c2": 2},
+            }
+        )
+    )
+    shared = tmp_path / "shared/standard"
+    shared.mkdir(parents=True)
+    (shared / "report.json").write_text(
+        json.dumps(
+            {
+                "run": {"name": "current"},
+                "results": [
+                    {"id": "lmi-lifecycle-1", "status": "FAILED"},
+                    {"id": "lmi-lifecycle-2", "status": "UNCOVERED"},
+                ],
+                "ci": {"exit_code": 1},
+            }
+        )
     )
     summary = summarize(tmp_path)
-    assert "placement: PlacementError" in summary
-    assert "not-run: SKIPPED" in summary
+    assert "lmi-lifecycle-1: FAILED" in summary
+    assert "lmi-lifecycle-2: UNCOVERED" in summary
     assert "PASS" not in summary
     (tmp_path / "deploy-error.json").write_text(
         json.dumps({"type": "ProvisioningError"})
     )
     assert "ProvisioningError" in summarize(tmp_path)
-
-
-@pytest.mark.parametrize(
-    "scenario", ["parallel", "return-inflight", "failure-inflight", "late-operation"]
-)
-def test_controls_exist_before_invocation_and_shared_barriers_are_not_reset(
-    driver, scenario
-):
-    driver.lam.invoke = Mock(
-        return_value={"StatusCode": 202, "DurableExecutionArn": "arn"}
-    )
-    calls = []
-    driver.s3.put_object.side_effect = lambda **kw: calls.append(
-        ("hold", kw["Key"], kw["Body"])
-    )
-    driver.lam.invoke.side_effect = lambda **_: (
-        calls.append(("invoke",)) or {"StatusCode": 202, "DurableExecutionArn": "arn"}
-    )
-    item = driver.start(scenario)
-    assert calls == [
-        ("hold", "runs/unit/control/" + item["marker"] + "-loser", b"hold"),
-        ("hold", "runs/unit/control/" + item["marker"] + "-loser-started", b"hold"),
-        ("invoke",),
-    ]
-    calls.clear()
-    driver.start("barrier", gate="shared")
-    driver.start("barrier", gate="shared")
-    assert calls == [
-        ("hold", "runs/unit/control/shared", b"hold"),
-        ("invoke",),
-        ("invoke",),
-    ]
-    assert "release-all" not in driver.gates
-
-
-def test_finally_control_is_initialized_before_invocation(driver):
-    calls = []
-    driver.s3.put_object.side_effect = lambda **kw: calls.append(
-        ("hold", kw["Key"], kw["Body"])
-    )
-    driver.lam.invoke = Mock(
-        side_effect=lambda **_: (
-            calls.append(("invoke",))
-            or {"StatusCode": 202, "DurableExecutionArn": "arn"}
-        )
-    )
-    item = driver.start("suspend-cleanup")
-    assert calls == [
-        ("hold", "runs/unit/control/" + item["marker"] + "-cleanup", b"hold"),
-        ("invoke",),
-    ]
 
 
 def test_runs_share_functions_but_never_controls_or_event_prefixes(driver):
@@ -414,3 +384,46 @@ def test_case_collection_is_scoped_but_final_collection_is_complete(driver):
     driver.collect()
     driver.refresh.assert_called_with(markers=[], validate_controls=False)
     driver.logs.get_paginator.assert_called_once_with("filter_log_events")
+
+
+def test_summary_rejects_other_run_reports_and_requires_the_matching_release_receipt(
+    tmp_path,
+):
+    config = {
+        "commit": "sdk",
+        "runtime": "python3.14",
+        "concurrencies": {"c1": 1, "c2": 2},
+        "run": "current",
+        "sharedLease": {"token": "fence"},
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(config))
+    shared = tmp_path / "shared"
+    (shared / "standard").mkdir(parents=True)
+    (shared / "standard/report.json").write_text(
+        json.dumps(
+            {
+                "run": {"name": "previous"},
+                "results": [{"id": "lmi-lifecycle-1", "status": "PASSED"}],
+            }
+        )
+    )
+    receipt = shared / "ownership-released.json"
+    receipt.write_text(
+        json.dumps({"runId": "previous", "lease": config["sharedLease"]})
+    )
+    summary = summarize(tmp_path)
+    assert "another run" in summary and "PASSED" not in summary
+    assert "Run cleanup not confirmed" in summary
+    receipt.write_text(json.dumps({"runId": "current", "lease": config["sharedLease"]}))
+    assert "Run ownership released after retirement" in summarize(tmp_path)
+
+
+def test_summary_does_not_accept_a_report_without_deployment_identity(tmp_path):
+    shared = tmp_path / "shared/standard"
+    shared.mkdir(parents=True)
+    (shared / "report.json").write_text(
+        json.dumps({"results": [{"id": "lmi-lifecycle-1", "status": "PASSED"}]})
+    )
+    summary = summarize(tmp_path)
+    assert "Deployment identity is missing" in summary
+    assert "PASSED" not in summary

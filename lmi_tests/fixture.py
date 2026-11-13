@@ -3,10 +3,10 @@
 """Fault-injection handlers for real LMI. Never install these as SDK examples."""
 
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 import fcntl
 import json
 import os
-from pathlib import Path
 import threading
 import time
 import uuid
@@ -17,10 +17,8 @@ from botocore.exceptions import ClientError
 
 from aws_durable_execution_sdk_python import StepError, durable_execution
 from aws_durable_execution_sdk_python.config import (
-    CompletionConfig,
     Duration,
     MapConfig,
-    ParallelConfig,
     StepConfig,
 )
 from aws_durable_execution_sdk_python.execution import (
@@ -57,13 +55,7 @@ def environment_id(path="/tmp/python-lmi-environment"):
 
 
 def resources():
-    # Current RSS, not ru_maxrss (a lifetime high-water mark).
-    rss_pages = int(Path("/proc/self/statm").read_text().split()[1])
-    return {
-        "threads": [{"id": t.ident, "name": t.name} for t in threading.enumerate()],
-        "fds": len(list(Path("/proc/self/fd").iterdir())),
-        "rss": rss_pages * os.sysconf("SC_PAGE_SIZE"),
-    }
+    return {"threads": [{"id": t.ident, "name": t.name} for t in threading.enumerate()]}
 
 
 def observe(trace, kind, **fields):
@@ -84,8 +76,6 @@ class Trace:
         self.payload = dict(payload)
         if "runId" in self.payload:
             self.payload.setdefault("run", self.payload["runId"])
-        if "otelView" in self.payload:
-            self.payload.setdefault("otel_view", self.payload["otelView"])
         self.shared = bool(self.payload.get("coverageProfile"))
         if self.shared:
             for key in (
@@ -136,8 +126,6 @@ class Trace:
                         "role",
                         "coverageProfile",
                         "sharedScenario",
-                        "otelView",
-                        "exportMode",
                         "behaviorBudgets",
                     )
                     if key in self.payload
@@ -276,12 +264,25 @@ class Trace:
                         source="control-poll",
                     )
                     return released
+                if (
+                    self.payload["scenario"] == "deadline"
+                    and time.time() >= self.deadline + 0.2
+                ):
+                    observe(self, "cooperative_io_cancelled", source="runtime-deadline")
+                    raise TimeoutError(
+                        "Cooperative fixture I/O crossed the runtime deadline"
+                    )
                 if not entered:
                     held_at_ms = target_observed_at_ms
                     if on_hold is not None:
                         on_hold(held_at_ms)
                     self.emit("BLOCKED", gate=name)
                     observe(self, "blocked", gateId=name, atMs=held_at_ms)
+                    observe(self, "barrier_arrived", gateId=name, atMs=held_at_ms)
+                    if self.payload["scenario"] == "deadline":
+                        observe(self, "work_in_flight", gateId=name, atMs=held_at_ms)
+                    if self.payload.get("role") == "recovery":
+                        observe(self, "worker_recovered", atMs=held_at_ms)
                 if time.monotonic() >= end:
                     self.emit("ESCAPE", gate=name)
                     observe(self, "escape", gateId=name)
@@ -302,6 +303,8 @@ class Trace:
                 else:
                     self.emit("ALIVE", gate=name)
                     observe(self, "alive", gateId=name)
+                    if self.payload.get("role") == "peer":
+                        observe(self, "peer_progress", gateId=name)
                 if not entered and ready:
                     self.signal(ready)
                 entered = True
@@ -379,27 +382,6 @@ class ObservedClient:
                 source="service",
                 atMs=acknowledged_at,
             )
-            if self.trace.payload["scenario"] == "checkpoint" and any(
-                u["name"] == "checkpoint-loser" and u["action"] == "SUCCEED"
-                for u in updates
-            ):
-                # Real service response, withheld while a synchronous waiter owns a
-                # branch. This tests settlement/join ordering without a fake service.
-                self.trace.emit("ACK_HELD")
-                observed_operation = next(
-                    item["id"]
-                    for item in updates
-                    if item["name"] == "checkpoint-loser"
-                    and item["action"] == "SUCCEED"
-                )
-                observe(
-                    self.trace,
-                    "ack_held",
-                    callId=call_id,
-                    operationId=observed_operation,
-                    gateId=self.trace.payload["marker"] + "-checkpoint",
-                )
-                self.trace.gate(self.trace.payload["marker"] + "-checkpoint")
             return response
         except BaseException as error:
             self.trace.emit("CHECKPOINT_ERROR", error=type(error).__name__)
@@ -416,62 +398,32 @@ class ObservedClient:
             observe(self.trace, "checkpoint_exit", callId=call_id, atMs=exited_at)
 
 
-def nested_progress(context, trace, marker):
-    """Record public one-lane configurations without changing nested work."""
-    trace.emit("PROGRESS_BEGIN")
-    observe(trace, "progress_begin")
-
-    def children(child):
-        def mapped(branch):
-            config = MapConfig(max_concurrency=1)
-            with configuration(trace, "inner-map", config.max_concurrency):
-                return branch.map(
-                    [0, 1],
-                    lambda inner, item, _index, _all: inner.run_in_child_context(
-                        lambda leaf: leaf.step(
-                            lambda step: trace.body("leaf", f"{marker}:{item}", step),
-                            name="leaf",
-                        ),
-                        name="grandchild",
-                    ),
-                    name="inner-map",
-                    config=config,
-                ).get_results()
-
-        config = ParallelConfig(max_concurrency=1)
-        with configuration(trace, "outer-parallel", config.max_concurrency):
-            return child.parallel(
-                [
-                    mapped,
-                    lambda branch: branch.run_in_child_context(
-                        lambda leaf: leaf.step(
-                            lambda step: trace.body("sibling", marker, step),
-                            name="sibling",
-                        ),
-                        name="sibling-child",
-                    ),
-                ],
-                name="outer-parallel",
-                config=config,
-            ).get_results()
-
-    result = context.run_in_child_context(children, name="progress-child")
-    assert result == [[marker + ":0", marker + ":1"], marker]
-    trace.emit("PROGRESS", value=result)
-    observe(trace, "progress", value=result)
-
-
 def workflow(event, context, trace):
-    scope = (
-        trace.observer.root_scope() if event.get("coverageProfile") else nullcontext()
-    )
+    trace.durable_context = context
+    scope = trace.observer.root_scope() if trace.shared else nullcontext()
     with scope:
-        return run_workflow(event, context, trace)
+        try:
+            result = run_workflow(event, context, trace)
+        except Exception:
+            observe(trace, "root_completed", outcome="FAILED")
+            raise
+        else:
+            observe(trace, "root_completed", outcome="SUCCEEDED")
+            return result
 
 
 def run_workflow(event, context, trace):
     marker, scenario = event["marker"], event["scenario"]
-    admitted = False
+    if scenario not in {
+        "success",
+        "failure",
+        "barrier",
+        "deadline",
+        "replay",
+        "warm-owner",
+        "warm-probe",
+    }:
+        raise ValueError(f"Unsupported lifecycle fixture: {scenario}")
     try:
         if target := event.get("target_environment"):
             # Record placement before any fault work. Replays consume the same
@@ -486,11 +438,10 @@ def run_workflow(event, context, trace):
             )
             if not accepted:
                 return marker
-        admitted = True
         value = context.step(lambda s: trace.body("success", marker, s), name="success")
         if scenario == "failure":
             raise ValueError("expected:" + marker)
-        if scenario in {"barrier", "deadline", "nested-progress"}:
+        if scenario in {"barrier", "deadline"}:
             context.step(
                 lambda step: trace.gate(
                     event["gate"], effects=scenario == "deadline", attempt=step.attempt
@@ -499,120 +450,18 @@ def run_workflow(event, context, trace):
                 config=NO_RETRY,
             )
             context.step(lambda s: trace.body("after-io", marker, s), name="after-io")
-            if scenario == "nested-progress":
-                nested_progress(context, trace, marker)
-        elif scenario == "suspend-cleanup":
-            context.wait(Duration.from_seconds(5), name="pause")
-        elif scenario in {
-            "parallel",
-            "map",
-            "nested",
-            "return-inflight",
-            "failure-inflight",
-            "late-operation",
-        }:
-
-            def losing(child):
-                def io(step):
-                    trace.gate(
-                        marker + "-loser",
-                        effects=True,
-                        attempt=step.attempt,
-                        ready=marker + "-loser-started",
-                    )
-                    return marker
-
-                try:
-                    return child.step(io, name="losing-io", config=NO_RETRY)
-                finally:
-                    if scenario == "late-operation":
-                        # The preceding step's final checkpoint can itself be
-                        # rejected after the parent finishes. Still test the next
-                        # SDK boundary, without swallowing unrelated failures.
-                        trace.emit("LATE_ATTEMPT")
-                        scope_id = (
-                            trace.observer.closed_ancestor()
-                            if event.get("coverageProfile")
-                            else None
-                        )
-                        observe(trace, "late_attempt", scopeId=scope_id)
-                        try:
-                            child.step(
-                                lambda step: trace.body("late-work", marker, step),
-                                name="late-work",
-                                config=NO_RETRY,
-                            )
-                        except OrphanedChildException as error:
-                            trace.emit("LATE_REJECTED", error=type(error).__name__)
-                            observe(
-                                trace,
-                                "late_rejected",
-                                scopeId=scope_id,
-                                error={"type": type(error).__name__},
-                            )
-                        else:
-                            trace.emit("LATE_ACCEPTED")
-                            observe(trace, "late_accepted", scopeId=scope_id)
-
-            def winning(child):
-                def io(_):
-                    trace.gate(marker + "-loser-started")
-                    trace.emit("WINNER_READY")
-                    observe(trace, "winner_ready")
-                    return marker
-
-                return child.step(io, name="winner", config=NO_RETRY)
-
-            def race(child):
-                if scenario == "map":
-                    return child.map(
-                        [0, 1],
-                        lambda c, item, _index, _all: (
-                            losing(c) if item == 0 else winning(c)
-                        ),
-                        name="race-map",
-                        config=MapConfig(
-                            max_concurrency=2,
-                            completion_config=CompletionConfig(min_successful=1),
-                        ),
-                    )
-                return child.parallel(
-                    [losing, winning],
-                    name="race-parallel",
-                    config=ParallelConfig(
-                        max_concurrency=2,
-                        completion_config=CompletionConfig.first_successful(),
-                    ),
-                )
-
-            if scenario == "nested":
-                context.map(
-                    [0],
-                    lambda c, _item, _index, _all: c.run_in_child_context(
-                        race, name="nested-child"
-                    ),
-                    name="outer-map",
-                    config=MapConfig(max_concurrency=3),
-                )
-            else:
-                race(context)
-            trace.emit("WINNER_SELECTED")
-            observe(trace, "winner_selected")
-            if scenario == "failure-inflight":
-                trace.emit("ROOT_FAILURE_READY")
-                raise ValueError("expected:" + marker)
-        elif scenario == "checkpoint":
-            context.parallel(
-                [
-                    lambda c: c.step(lambda _: marker, name="checkpoint-loser"),
-                    lambda c: c.step(lambda _: marker, name="checkpoint-peer"),
-                ],
-                name="checkpoint-pool",
-                config=ParallelConfig(max_concurrency=2),
+        elif scenario == "warm-owner":
+            context.step(
+                lambda _: start_warm_work(trace),
+                name="start-late-work",
+                config=NO_RETRY,
             )
-            if event.get("coverageProfile"):
-                scope_id = trace.observer.completed_context("checkpoint-pool")
-                trace.observe("branch_join", scopeId=scope_id)
+        elif scenario == "warm-probe":
+            context.step(
+                lambda _: release_warm_work(trace),
+                name="release-late-work",
+                config=NO_RETRY,
+            )
         elif scenario == "replay":
 
             def fail(step):
@@ -672,19 +521,118 @@ def run_workflow(event, context, trace):
         trace.emit("USER_RESULT", value=value)
         return value
     finally:
-        if scenario == "suspend-cleanup" and admitted:
-            # Test-only root-finally diagnostics. This gate changes only exit
-            # timing; it introduces no durable operations during suspension.
-            trace.emit("CLEANUP_ENTER")
-            observe(trace, "cleanup_enter")
-            try:
-                trace.gate(marker + "-cleanup")
-            finally:
-                trace.emit("CLEANUP_EXIT")
-                observe(trace, "cleanup_exit")
         exited_at = time.time() * 1000
         trace.emit("USER_EXIT")
         observe(trace, "user_exit", atMs=exited_at)
+
+
+def admission_probes(trace):
+    trace.observe("task_start", taskId="admission-probes", source="fixture")
+    closed = False
+    try:
+        for probe, operation in (
+            (
+                "checkpoint",
+                lambda: trace.durable_context.state.create_checkpoint(is_sync=False),
+            ),
+            (
+                "operation",
+                lambda: trace.durable_context.step(
+                    lambda _: trace.observe("probe_body_executed"),
+                    name="operation-admission-probe",
+                    config=NO_RETRY,
+                ),
+            ),
+        ):
+            trace.observe("probe_enter", probe=probe)
+            error_record = None
+            try:
+                operation()
+            except OrphanedChildException as error:
+                outcome = "REJECTED"
+                error_record = {"type": type(error).__name__, "message": str(error)}
+            except BaseException as error:
+                outcome = "ERROR"
+                error_record = {"type": type(error).__name__, "message": str(error)}
+            else:
+                outcome = "ACCEPTED"
+            observed_at = time.time_ns() / 1_000_000
+            if outcome == "REJECTED" and not closed:
+                trace.observe(
+                    "admission_closed", atMs=observed_at, source="sdk-rejection"
+                )
+                closed = True
+            trace.observe(
+                "admission_probe",
+                probe=probe,
+                outcome=outcome,
+                error=error_record,
+                atMs=observed_at,
+            )
+    finally:
+        trace.observe("task_exit", taskId="admission-probes", source="fixture")
+
+
+def start_admission_probes(trace):
+    # A broken SDK can leave a late operation waiting forever. Keep that real
+    # task visible to the retirement audit instead of declaring it settled.
+    thread = threading.Thread(
+        target=admission_probes, args=(trace,), daemon=True, name="lmi-admission-probes"
+    )
+    thread.start()
+    thread.join(timeout=0.5)
+
+
+@dataclass
+class WarmWork:
+    trace: object
+    ready: threading.Event = field(default_factory=threading.Event)
+    observed_during: str | None = None
+
+
+WARM_WORK = {}
+WARM_LOCK = threading.Lock()
+
+
+def start_warm_work(trace):
+    key = (trace.payload["runId"], trace.payload["caseId"])
+    work = WarmWork(trace)
+    with WARM_LOCK:
+        if key in WARM_WORK:
+            raise ValueError("A warm case cannot replace its original work")
+        WARM_WORK[key] = work
+
+    def late():
+        trace.observe("task_start", taskId="late-callback", source="fixture")
+        try:
+            if not work.ready.wait(timeout=120):
+                trace.observe(
+                    "observation_error",
+                    message="Original late work never observed warm reuse",
+                )
+                return
+            trace.observe("late_activity", observedDuringRequestId=work.observed_during)
+            admission_probes(trace)
+        finally:
+            trace.observe("task_exit", taskId="late-callback", source="fixture")
+            with WARM_LOCK:
+                WARM_WORK.pop(key, None)
+
+    threading.Thread(target=late, daemon=True, name="lmi-late-callback").start()
+    return None
+
+
+def release_warm_work(trace):
+    key = (trace.payload["runId"], trace.payload["caseId"])
+    with WARM_LOCK:
+        work = WARM_WORK.get(key)
+    if work is None:
+        raise ValueError("Warm request did not reuse the original process")
+    work.observed_during = trace.identity["request"]
+    work.ready.set()
+    # Keep the warm invocation alive long enough to observe the old callback.
+    time.sleep(0.5)
+    return None
 
 
 def handler(event, context):
@@ -701,8 +649,6 @@ def handler(event, context):
     payload = dict(payload)
     if "runId" in payload:
         payload.setdefault("run", payload["runId"])
-    if "otelView" in payload:
-        payload.setdefault("otel_view", payload["otelView"])
     if payload["run"] != os.environ["LMI_RUN_ID"]:
         raise ValueError("Input belongs to a different deployment")
     trace = Trace(payload, context, invocation.durable_execution_arn)
@@ -750,12 +696,7 @@ def handler(event, context):
             source="runtime",
         )
     try:
-        if payload.get("otel_view"):
-            from lmi_tests.telemetry import invoke as invoke_with_telemetry
-
-            result = invoke_with_telemetry(trace, invoke)
-        else:
-            result = invoke()
+        result = invoke()
         trace.emit(
             "WRAPPER_RETURN",
             status=result["Status"],
@@ -771,6 +712,24 @@ def handler(event, context):
                     "resources": trace.sdk_resources,
                 }
             )
+        if result["Status"] == "PENDING":
+            observe(
+                trace,
+                "pending",
+                atMs=trace.sdk_completed_at * 1000,
+                source="sdk-wrapper",
+            )
+        if (
+            payload.get("sharedScenario")
+            in {
+                "normal-return",
+                "normal-failure",
+                "deadline-during-step",
+                "peer-recovery",
+            }
+            and payload.get("role") == "victim"
+        ):
+            start_admission_probes(trace)
         return result
     except BaseException as error:
         if payload.get("coverageProfile") and trace.sdk_observation is None:

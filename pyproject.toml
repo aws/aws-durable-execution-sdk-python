@@ -33,23 +33,17 @@ python = "3.14"
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-testing",
-  "packages/aws-durable-execution-sdk-python-otel",
 ]
-dependencies = [
-  "boto3>=1.43.0", "pytest", "ruff", "build",
-  "opentelemetry-sdk>=1.20.0", "opentelemetry-propagator-aws-xray",
-]
+dependencies = ["boto3>=1.43.0", "pytest", "ruff", "build", "mypy"]
 
 [tool.hatch.envs.lmi.scripts]
 unit = "pytest lmi_tests/tests/unit {args}"
-cloud = "pytest lmi_tests/tests/e2e --lmi-cloud {args}"
-regressions = "pytest lmi_tests/tests/regressions --run-lmi-regressions {args}"
 lint = "ruff check lmi_tests && ruff format --check lmi_tests"
 build = "python -m lmi_tests.deploy build {args}"
 shared-setup = "python -m lmi_tests.shared setup {args}"
 shared = "python -m lmi_tests.shared run {args}"
 shared-cleanup = "python -m lmi_tests.shared cleanup {args}"
-shared-tests = "python -m pytest lmi_tests/tests/unit lmi_tests/tests/e2e --ignore=lmi_tests/tests/e2e/test_lifecycle.py --ignore=lmi_tests/tests/e2e/test_observability.py {args}"
+shared-tests = "python -m pytest lmi_tests/tests/unit lmi_tests/tests/e2e {args}"
 
 [tool.pytest.ini_options]
 # Declare custom markers to avoid warnings with --strict-markers

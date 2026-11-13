@@ -24,6 +24,7 @@ from lmi_tests.shared_scenarios import ScenarioDriver
 class LocalTrace:
     def __init__(self):
         self.events = []
+        self.shared = False
         self.payload = {}
         self.lock = Lock()
 
@@ -107,9 +108,9 @@ def test_shared_callback_driver_resumes_the_original_public_sdk_execution():
         "local-run",
         Scenario(
             "callback-case",
-            "python-lmi-5",
+            "lmi-lifecycle-5",
             profile.profile_id,
-            "replay-callback-retry",
+            "suspension-retry",
             roles=("victim", "resume"),
         ),
         profile,

@@ -25,7 +25,7 @@ from aws_durable_execution_sdk_python.plugin import (
 
 
 class ObservationSink(Protocol):
-    """Shared with telemetry without a circular import of fixture.Trace."""
+    """Record SDK observations without importing fixture.Trace."""
 
     def observe(self, kind: str, **fields: Any) -> Mapping[str, Any]: ...
 
@@ -335,6 +335,7 @@ class LifecycleObservations(DurableInstrumentationPlugin):
             operationId=info.operation_id,
             parentId=info.parent_id,
             outcome=info.outcome.value,
+            attempt=task.operation.attempt,
         )
 
 

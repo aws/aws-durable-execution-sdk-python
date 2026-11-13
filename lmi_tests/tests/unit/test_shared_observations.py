@@ -31,7 +31,7 @@ from lmi_tests.shared_observations import (
     LifecycleObservations,
     OperationObservation,
 )
-from lmi_tests.tests.regressions.test_issue741 import lambda_context
+from lmi_tests.tests.unit.support import lambda_context
 
 
 class MemoryLedger:
@@ -96,7 +96,7 @@ def shared_payload(scenario: str = "success") -> dict[str, Any]:
         "caseId": "case",
         "cohortId": "cohort-1",
         "role": "victim",
-        "coverageProfile": "python-lifecycle",
+        "coverageProfile": "standard",
         "sharedScenario": scenario,
         "scenario": scenario,
         "marker": "marker",
@@ -297,7 +297,6 @@ def test_trace_records_immutable_case_identity_and_actual_source_sequence(
 ) -> None:
     ledger = install_ledger(monkeypatch)
     payload = shared_payload()
-    payload.update(otelView="invocation", exportMode="async-bounded-flush")
     trace = fixture.Trace(payload, lambda_context(30_000), "actual-execution")
     observed_at = time.time() * 1000 - 10
     record = trace.observe("boundary", atMs=observed_at)
@@ -307,8 +306,8 @@ def test_trace_records_immutable_case_identity_and_actual_source_sequence(
         "sourceSequence": record["sequence"],
         "captureSequence": 1,
     }
-    assert record["caseId"] == "case" and record["exportMode"] == "async-bounded-flush"
-    assert trace.payload["otel_view"] == "invocation" and trace.payload["run"] == "unit"
+    assert record["caseId"] == "case"
+    assert trace.payload["run"] == "unit"
     assert ledger.observations() == [record]
 
 

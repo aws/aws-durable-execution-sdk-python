@@ -21,7 +21,7 @@ from lmi_tests.cloud import Cloud
 
 
 TERMINAL = {"SUCCEEDED", "FAILED", "TIMED_OUT", "STOPPED"}
-_ACTIVE_FAULTS = {"deadline-recovery", "timeout-retry"}
+_ACTIVE_FAULTS = {"deadline-during-step", "peer-recovery"}
 _OPERATION_TYPES = {
     "Step": "STEP",
     "Wait": "WAIT",
@@ -42,8 +42,18 @@ def _milliseconds(value: Any) -> float:
 
 
 def _decoded(value: Any) -> Any:
+    if isinstance(value, Mapping) and "Payload" in value:
+        if value.get("Truncated") is True:
+            raise ValueError(
+                "Truncated service data cannot establish checkpoint equality"
+            )
+        value = value["Payload"]
     if isinstance(value, str):
-        return json.loads(value)
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            # Callback payloads may be plain UTF-8, rather than JSON results.
+            return value
     return value
 
 
@@ -128,7 +138,6 @@ class CaseSources:
             if event.get("kind") in {
                 "observation_error",
                 "control_error",
-                "export_publication_error",
             }:
                 errors.append(
                     str(event.get("message", event.get("error", event["kind"])))
@@ -234,6 +243,9 @@ class CaseSources:
                     operation["status"] = "TIMED_OUT"
                 elif event_type.endswith("Stopped"):
                     operation["status"] = "STOPPED"
+            for operation in operations.values():
+                operation.pop("startedAtMs", None)
+                operation.pop("endedAtMs", None)
             result = self.cloud.execution_results[arn]
             started = result.get("StartTimestamp")
             if started is None:
@@ -259,7 +271,7 @@ class CaseSources:
                 history["error"] = _error(result["Error"])
             histories.append(history)
             fixture = item.get("payload", {}).get("scenario")
-            if fixture in {"failure", "failure-inflight"}:
+            if fixture == "failure":
                 expected[arn] = {
                     "status": "FAILED",
                     "error": {
@@ -372,33 +384,6 @@ class CaseSources:
             if journal[request]["attempt"] == 1:
                 selected[role] = request
             attempts.append(attempt)
-        if (
-            self.context.scenario.scenario == "timeout-retry"
-            and "victim" in selected
-            and "retry" in selected
-        ):
-            original = next(
-                item for item in attempts if item["requestId"] == selected["victim"]
-            )
-            retry = next(
-                item for item in attempts if item["requestId"] == selected["retry"]
-            )
-            if (
-                original.get("outcome") == "TIMED_OUT"
-                and retry["executionArn"] == original["executionArn"]
-            ):
-                events.append(
-                    {
-                        "kind": "service_retry",
-                        "requestId": retry["requestId"],
-                        "ownerRequestId": retry["requestId"],
-                        "executionArn": retry["executionArn"],
-                        "atMs": retry["startedAtMs"],
-                        "source": "platform",
-                        "previousRequestId": original["requestId"],
-                        "sourceEvidence": "single-original-Invoke-and-native-service-continuation",
-                    }
-                )
         return attempts, selected, errors
 
 
@@ -416,7 +401,7 @@ def _causal_order(events: list[dict[str, Any]]) -> None:
             event["sequence"] = sequence
 
 
-def _quiescent(request: str, events: list[dict[str, Any]], *, telemetry: bool) -> bool:
+def _quiescent(request: str, events: list[dict[str, Any]]) -> bool:
     local = [event for event in events if event.get("requestId") == request]
     if not any(
         event.get("kind") in {"wrapper_return", "wrapper_raise"} for event in local
@@ -432,75 +417,147 @@ def _quiescent(request: str, events: list[dict[str, Any]], *, telemetry: bool) -
         ("io_start", "io_exit", "taskId"),
         ("checkpoint_call", "checkpoint_exit", "callId"),
         ("poll_call", "poll_exit", "callId"),
-        ("export_started", "export_completed", "exportId"),
-        ("flush_started", "flush_completed", "flushId"),
     ):
         begun = Counter(event.get(key) for event in local if event.get("kind") == start)
         ended = Counter(event.get(key) for event in local if event.get("kind") == end)
         if begun - ended:
             return False
-    if telemetry and not any(
-        event.get("kind") == "export_quiescence"
-        and event.get("pendingExportIds") == []
-        and event.get("pendingFlushIds") == []
-        and event.get("publicationCount") == 0
-        for event in local
-    ):
-        return False
     return not any(
         event.get("kind") in {"observation_error", "control_error"} for event in local
     )
 
 
-def _deadline_measurement(
-    context: ScenarioContext, cloud: Cloud, selected: Mapping[str, str]
-) -> tuple[dict[str, Any] | None, list[str]]:
-    """Read the persisted pre-release measurement without discarding full events."""
-    path = cloud.artifacts_dir / "measurements/deadline.json"
-    in_memory = getattr(cloud, "deadline_measurement", None)
-    if not path.exists():
-        if in_memory is not None:
-            return None, ["Pre-release deadline measurement file is missing"]
-        return None, []  # Legacy sources retain the strict full-tail validator.
-    try:
-        recorded = json.loads(path.read_text())
-        victim = next(
-            item for item in cloud.invocations if item.get("role") == "victim"
-        )
-        expected = {
-            "runId": context.run_id,
-            "caseId": context.scenario.case_id,
-            "cohortId": context.scenario.cohort_id,
-            "scenario": context.scenario.scenario,
-            "executionArn": victim["arn"],
-            "selectedRequests": dict(selected),
+def replay_evidence(events, histories, selected):
+    """Compare actual invocation-start checkpoints with final service history."""
+    first_resume = next(
+        (
+            event
+            for event in events
+            if event.get("kind") == "invocation_start"
+            and event.get("requestId") == selected.get("resume")
+        ),
+        {},
+    )
+    before = []
+    for saved in first_resume.get("operations", []):
+        if saved.get("operationType") == "EXECUTION" or saved.get("status") not in {
+            "SUCCEEDED",
+            "FAILED",
+        }:
+            continue
+        operation = {
+            "id": saved["operationId"],
+            "name": saved.get("name"),
+            "type": saved["operationType"],
+            "parentId": saved.get("parentId"),
+            "status": saved["status"],
         }
-        if not isinstance(recorded, dict) or any(
-            recorded.get(key) != value for key, value in expected.items()
-        ):
-            raise ValueError(
-                "stored measurement belongs to another run, case or original cohort"
-            )
-        fields = (
-            "selectedRequests",
-            "deadlineAtMs",
-            "cleanupCutoffAtMs",
-            "observationCutoffAtMs",
-            "observedAtMs",
+        if saved["status"] == "SUCCEEDED":
+            operation["result"] = _decoded(saved.get("serializedResult"))
+        else:
+            operation["error"] = saved.get("error")
+        before.append(operation)
+    victim = next(
+        (e for e in events if e.get("requestId") == selected.get("victim")), {}
+    )
+    after = next(
+        (
+            h["operations"]
+            for h in histories
+            if h["executionArn"] == victim.get("executionArn")
+        ),
+        [],
+    )
+    bodies = [e for e in events if e.get("kind") == "body"]
+    executions = [
+        {
+            "requestId": e["requestId"],
+            "operationId": e["operationId"],
+            "attemptId": f"{e['requestId']}:{e['attempt']}",
+        }
+        for e in bodies
+    ]
+    retry = [e for e in bodies if e.get("operation") == "retry"]
+    attempts = []
+    for body in retry:
+        ending = next(
+            (
+                e
+                for e in events
+                if e.get("kind") == "task_exit"
+                and e.get("operationId") == body["operationId"]
+                and e.get("requestId") == body["requestId"]
+                and e.get("attempt") == body["attempt"]
+            ),
+            {},
         )
-        if in_memory is not None and (
-            not isinstance(in_memory, Mapping)
-            or any(in_memory.get(key) != recorded.get(key) for key in fields)
-        ):
-            raise ValueError(
-                "in-memory and persisted measurement identities/bounds differ"
-            )
-        return {
-            **{key: recorded[key] for key in fields},
-            "sourceEvidenceUri": path.resolve().as_uri(),
-        }, []
-    except (OSError, ValueError, KeyError, StopIteration, TypeError) as error:
-        return None, [f"Invalid pre-release deadline measurement: {error}"]
+        attempts.append(
+            {
+                "attemptId": f"{body['requestId']}:{body['attempt']}",
+                "requestId": body["requestId"],
+                "outcome": ending.get("outcome"),
+            }
+        )
+    return {
+        "before": before,
+        "after": after,
+        "operationExecutions": executions,
+        "retry": {
+            "operationId": retry[0]["operationId"] if retry else "",
+            "attempts": attempts,
+        },
+        "sideEffects": [
+            {
+                "operationId": body["operationId"],
+                "count": sum(e["operationId"] == body["operationId"] for e in bodies),
+                "expectedCount": 2 if body.get("operation") == "retry" else 1,
+            }
+            for index, body in enumerate(bodies)
+            if body["operationId"] not in {e["operationId"] for e in bodies[:index]}
+        ],
+    }
+
+
+def assertion_events(events, scenario, selected):
+    """Expose one scenario-owned task boundary while retaining every task fact.
+
+    The shared behavior contract's task_exit is singular. Other real tasks stay
+    in the envelope with their source kind, and are restored for the separate
+    all-task retirement audit.
+    """
+    if scenario not in {
+        "normal-return",
+        "normal-failure",
+        "deadline-during-step",
+        "peer-recovery",
+        "warm-reuse",
+    }:
+        return events
+    result = []
+    for event in events:
+        item = dict(event)
+        target = (
+            "late-callback"
+            if scenario == "warm-reuse"
+            and event.get("requestId") == selected.get("victim")
+            else "root"
+        )
+        if item["kind"] in {"task_start", "task_exit"} and item.get("taskId") != target:
+            item["sourceKind"] = item["kind"]
+            item["kind"] = "observed_" + item["kind"]
+        result.append(item)
+    return result
+
+
+def retirement_snapshot(evidence):
+    """Restore every observed task for the common independent retirement audit."""
+    from copy import deepcopy
+
+    snapshot = deepcopy(evidence)
+    for event in snapshot.get("events", []):
+        if event.get("kind") in {"observed_task_start", "observed_task_exit"}:
+            event["kind"] = event["sourceKind"]
+    return snapshot
 
 
 def build_evidence(
@@ -518,14 +575,11 @@ def build_evidence(
         (cloud.retired_at if phase == "final" else cloud.observation_ended_at) or 0
     ) * 1000
     complete = bool(attempts) and all(
-        _quiescent(
-            item["requestId"], events, telemetry=context.scenario.otel_view is not None
-        )
-        for item in attempts
+        _quiescent(item["requestId"], events) for item in attempts
     )
     if not complete:
         errors.append(
-            "Actual wrapper/task/export publication has not established a complete observation window"
+            "Actual wrapper/task publication has not established a complete observation window"
         )
     latest = max((event["atMs"] for event in events), default=0)
     if ended < latest:
@@ -535,21 +589,10 @@ def build_evidence(
         if not errors
         else {}
     )
-    if context.scenario.export_mode and not errors:
-        watermarks["exportLifecycle"] = ended
     artifact = {
         "sdk": context.profile.artifact_id,
         "conformance": cloud.manifest.get("conformanceRevision", "unverified"),
     }
-    if context.scenario.otel_view:
-        artifact["plugin"] = next(
-            (
-                f"sha256:{digest}"
-                for name, digest in cloud.manifest.get("wheels", {}).items()
-                if "_otel-" in name
-            ),
-            "",
-        )
     profile = {
         "functionArn": context.profile.resource_id,
         "configurationDigest": context.profile.configuration_id,
@@ -571,7 +614,7 @@ def build_evidence(
         "profile": profile,
         "attempts": attempts,
         "selectedRequests": selected,
-        "events": events,
+        "events": assertion_events(events, context.scenario.scenario, selected),
         "histories": histories,
         "expectedHistories": expected,
         "observationEndedAtMs": ended,
@@ -582,50 +625,9 @@ def build_evidence(
         },
         "collectionErrors": errors,
     }
-    if context.scenario.otel_view:
-        evidence["otelView"] = context.scenario.otel_view
-    if context.scenario.export_mode:
-        evidence["exportMode"] = context.scenario.export_mode
-        evidence["exportLifecycle"] = {
-            "budgets": dict(context.scenario.behavior_budgets)
-        }
-    else:
-        evidence["regression"] = {"budgets": dict(context.scenario.behavior_budgets)}
-        victim = next(
-            (item for item in cloud.invocations if item.get("role") == "victim"), None
-        )
-        if victim:
-            fixture = victim.get("payload", {}).get("scenario")
-            suffix = (
-                "-checkpoint"
-                if fixture == "checkpoint"
-                else "-cleanup"
-                if fixture == "suspend-cleanup"
-                else "-loser"
-            )
-            if fixture in {
-                "checkpoint",
-                "suspend-cleanup",
-                "parallel",
-                "map",
-                "nested",
-                "return-inflight",
-                "failure-inflight",
-                "late-operation",
-            }:
-                evidence["regression"]["gateId"] = victim["marker"] + suffix
-        if context.scenario.scenario in _ACTIVE_FAULTS:
-            measurement, measurement_errors = _deadline_measurement(
-                context, cloud, selected
-            )
-            errors.extend(measurement_errors)
-            if measurement is not None:
-                evidence["regression"]["deadlineMeasurement"] = measurement
-        if context.scenario.scenario in {"warm-lifecycle", "otel-warm-lifecycle"}:
-            evidence["regression"]["warmSequence"] = [
-                {"executionArn": item["arn"], "fixture": item["payload"]["scenario"]}
-                for item in cloud.invocations
-            ]
+    evidence["budgets"] = dict(context.scenario.behavior_budgets)
+    if context.scenario.scenario == "suspension-retry":
+        evidence["replay"] = replay_evidence(events, histories, selected)
     for event in events:
         if event.get("kind") in {"checkpoint_call", "poll_call"}:
             evidence["sdkRequests"].append(
@@ -649,27 +651,28 @@ def build_evidence(
         {"kind": "execution", "id": arn, "ownerCaseId": context.scenario.case_id}
         for arn in dict.fromkeys(item["executionArn"] for item in attempts)
     )
-    for kind in ("export", "flush"):
-        created.extend(
-            {
-                "kind": kind,
-                "id": event[f"{kind}Id"],
-                "ownerCaseId": context.scenario.case_id,
-            }
-            for event in events
-            if event.get("kind") == f"{kind}_started"
-        )
     evidence["resourcesCreated"] = created
+    # Coordination barriers are not injected victim faults. Retain their full
+    # journal separately; releasing a healthy peer is not evidence of victim cleanup.
+    evidence["controlRecords"] = list(cloud.control_records)
+    victim_faults = {
+        item.get("payload", {}).get("gate")
+        for item in cloud.invocations
+        if item.get("role") == "victim"
+        and item.get("payload", {}).get("scenario") == "deadline"
+    }
     faults = []
     for gate in dict.fromkeys(
         record["gate"] for record in cloud.control_records if record["action"] == "hold"
     ):
+        if gate not in victim_faults:
+            continue
         fault: dict[str, Any] = {"id": gate, "ownerCaseId": context.scenario.case_id}
         receipts = [
             event["atMs"]
             for event in events
             if event.get("gateId") == gate
-            and event.get("kind") in {"fault_released", "export_released"}
+            and event.get("kind") in {"fault_released"}
             and event.get("mode") == "normal"
         ]
         releases = [
@@ -692,24 +695,6 @@ def build_evidence(
             fault.setdefault("releasedAtMs", release["time"] * 1000)
         faults.append(fault)
     evidence["faultsCreated"] = faults
-    if context.scenario.otel_view:
-        from lmi_tests.shared_telemetry import collect_telemetry
-
-        headers = {
-            request: item["trace_header"]
-            for item in cloud.invocations
-            for request in item.get("native_requests", [])
-            if item.get("trace_header")
-        }
-        evidence["telemetry"] = collect_telemetry(
-            list(sources.raw),
-            attempts,
-            view=context.scenario.otel_view,
-            expected_sampled=context.scenario.scenario != "runtime-carrier-unsampled",
-            caller_headers=headers,
-            observed_until_ms=ended,
-            export_mode=context.scenario.export_mode or "sync",
-        )
     if phase == "final":
         retired = (cloud.retired_at or 0) * 1000
         settled = []
@@ -721,13 +706,7 @@ def build_evidence(
             }
             if resource["kind"] == "invocation":
                 item["outcome"] = (
-                    "QUIESCENT"
-                    if _quiescent(
-                        resource["id"],
-                        events,
-                        telemetry=context.scenario.otel_view is not None,
-                    )
-                    else "UNKNOWN"
+                    "QUIESCENT" if _quiescent(resource["id"], events) else "UNKNOWN"
                 )
             elif resource["kind"] == "execution":
                 item["outcome"] = cloud.execution_results.get(resource["id"], {}).get(
@@ -757,7 +736,7 @@ def build_evidence(
                     "mode": "emergency"
                     if any(
                         event.get("gateId") == fault["id"]
-                        and event.get("kind") in {"fault_released", "export_released"}
+                        and event.get("kind") in {"fault_released"}
                         and event.get("mode") == "emergency"
                         for event in events
                     )

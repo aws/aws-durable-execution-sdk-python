@@ -236,7 +236,9 @@ class SharedAdapter:
             context.evidence["retirement"] = final.get("retirement", {})
             # Fresh completion facts prove physical retirement separately; they
             # must never replace the case's pre-release behavior observations.
-            context.retirement_evidence = final
+            from lmi_tests.shared_evidence import retirement_snapshot
+
+            context.retirement_evidence = retirement_snapshot(final)
             return complete
 
         return await case.call(retire)

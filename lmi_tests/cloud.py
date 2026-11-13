@@ -27,28 +27,14 @@ from lmi_tests.evidence import (
 class RunnerClient:
     """Share paced history reads with the public runner; other APIs are unchanged."""
 
-    def __init__(self, cloud, trace_header=None, *, before_call=None):
+    def __init__(self, cloud, *, before_call=None):
         self.cloud = cloud
-        self.trace_header = trace_header
         self.before_call = before_call
 
     def invoke(self, **kwargs):
         if self.before_call is not None:
             self.before_call()
-        if self.trace_header is None:
-            return self.cloud.lam.invoke(**kwargs)
-        # An instrumented caller's HTTP carrier goes through the real Lambda
-        # service. Never inject a synthetic header into the function payload.
-        isolated = client("lambda")
-
-        def add_carrier(params, **_kwargs):
-            params["headers"]["X-Amzn-Trace-Id"] = self.trace_header
-
-        isolated.meta.events.register("before-call.lambda.Invoke", add_carrier)
-        try:
-            return isolated.invoke(**kwargs)
-        finally:
-            isolated.close()
+        return self.cloud.lam.invoke(**kwargs)
 
     def __getattr__(self, name):
         operation = getattr(self.cloud.lam, name)
@@ -208,9 +194,6 @@ class Cloud:
         gate=None,
         target_environment=None,
         *,
-        otel_view=None,
-        trace_header=None,
-        otel_export="success",
         role=None,
         resume_roles=(),
         dispatcher_payload=None,
@@ -229,6 +212,10 @@ class Cloud:
             payload["sharedScenario"] = dispatcher_payload["scenario"]
         payload.update(scenario=scenario, marker=marker, run=self.manifest["run"])
         if self.case_context is not None:
+            payload["coverageProfile"] = "standard"
+            payload["behaviorBudgets"] = dict(
+                self.case_context.scenario.behavior_budgets
+            )
             payload["controlPrefix"] = self.control_prefix
             if "release-all" not in self.gates:
                 self.hold("release-all")
@@ -239,48 +226,22 @@ class Cloud:
                 for resume in resume_roles
             ):
                 raise ValueError("Resume role is not part of the admitted scenario")
-        if otel_view is not None:
-            if otel_view not in {"invocation", "execution"}:
-                raise ValueError("Unknown OTel view")
-            if otel_export not in {"success", "failure", "held"}:
-                raise ValueError("Unknown exporter fault")
-            payload.update(otel_view=otel_view, otel_export=otel_export)
-            if otel_export == "held":
-                payload["otel_export_gate"] = marker + "-export"
-                self.hold(payload["otel_export_gate"])
         if target_environment is not None:
             payload["target_environment"] = target_environment
         if gate:
             payload["gate"] = gate
             self.hold(gate)
-        if scenario in {
-            "parallel",
-            "map",
-            "nested",
-            "return-inflight",
-            "failure-inflight",
-            "late-operation",
-        }:
-            self.hold(marker + "-loser")
-            self.hold(marker + "-loser-started")
-        elif scenario == "checkpoint":
-            self.hold(marker + "-checkpoint")
-        elif scenario == "suspend-cleanup":
-            self.hold(marker + "-cleanup")
         runner = DurableFunctionCloudTestRunner(
             self.manifest["functions"][self.configuration],
             region=self.manifest["region"],
         )
-        runner.lambda_client = RunnerClient(
-            self, trace_header, before_call=self.check_active
-        )
+        runner.lambda_client = RunnerClient(self, before_call=self.check_active)
         item = {
             "marker": marker,
             "arn": None,
             "configuration": self.configuration,
             "runner": runner,
             "started": time.time(),
-            "trace_header": trace_header,
             "payload": payload,
             "role": role,
             "resume_roles": tuple(resume_roles),
@@ -320,7 +281,6 @@ class Cloud:
                 "arn": arn,
                 "function": runner.function_name,
                 "started": item["started"],
-                "trace_header": trace_header,
             },
         )
         return item

@@ -84,12 +84,8 @@ def build():
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir()
-    # Both SDK artifacts come from this checkout; pip resolves only their
-    # dependencies. A published core/plugin must not replace either artifact.
-    for package in (
-        "aws-durable-execution-sdk-python",
-        "aws-durable-execution-sdk-python-otel",
-    ):
+    # The tested core SDK comes from this checkout; pip resolves its dependencies.
+    for package in ("aws-durable-execution-sdk-python",):
         subprocess.run(
             ["hatch", "build", "-t", "wheel", str(directory)],
             cwd=ROOT / "packages" / package,
@@ -97,8 +93,8 @@ def build():
             check=True,
         )
     wheels = sorted(directory.glob("*.whl"))
-    if len(wheels) != 2:
-        raise ProvisioningError("Expected exactly the checked-out core and OTel wheels")
+    if len(wheels) != 1:
+        raise ProvisioningError("Expected exactly the checked-out core SDK wheel")
     wheel = next(directory.glob("aws_durable_execution_sdk_python-*.whl"))
     target = directory / "package"
     subprocess.run(
@@ -124,8 +120,6 @@ def build():
             "--report",
             str(directory / "dependencies.json"),
             *map(str, wheels),
-            "opentelemetry-sdk>=1.20.0",
-            "opentelemetry-propagator-aws-xray",
         ],
         check=True,
     )
@@ -133,9 +127,7 @@ def build():
     for name in (
         "__init__.py",
         "fixture.py",
-        "telemetry.py",
         "shared_observations.py",
-        "shared_exporter.py",
     ):
         shutil.copy(ROOT / "lmi_tests" / name, target / "lmi_tests" / name)
     artifact = directory / "function.zip"

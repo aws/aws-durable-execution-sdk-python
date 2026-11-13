@@ -83,89 +83,30 @@ def test_actual_service_replay_keeps_operation_identity_and_skips_completed_bodi
     assert "PENDING" in {item["outcome"] for item in values(ledger, "wrapper_return")}
 
 
-def test_actual_checkpoint_response_settles_before_join_observation(monkeypatch):
+def test_warm_invocation_observes_late_work_under_its_original_request(monkeypatch):
     ledger = install_ledger(monkeypatch)
-    payload = shared_payload("checkpoint")
-    prefix = payload["controlPrefix"]
-    ledger.objects[prefix + "marker-checkpoint"] = b"hold"
-    ledger.objects[prefix + "release-all"] = b"hold"
+    owner = shared_payload("warm-owner")
+    owner["sharedScenario"] = "warm-reuse"
+    warm = {**owner, "scenario": "warm-probe", "role": "warm", "marker": "warm-marker"}
     with DurableFunctionTestRunner(handler=fixture.handler) as runner:
-        arn = runner.run_async(input=json.dumps(payload), execution_timeout=30)
-        held = ledger.wait_for("ack_held")["observation"]
-        ledger.wait_for("blocked")
-        assert not [
-            item
-            for item in values(ledger, "checkpoint_exit")
-            if item["callId"] == held["callId"]
-        ]
-        assert values(ledger, "branch_join") == []
-        ledger.objects[prefix + "marker-checkpoint"] = b"release"
-        result = runner.wait_for_result(arn, timeout=20)
-    assert result.result == '"marker"'
-    assert values(ledger, "observation_error") == []
-    exited = next(
-        item
-        for item in values(ledger, "checkpoint_exit")
-        if item["callId"] == held["callId"]
+        first = runner.run(input=json.dumps(owner), execution_timeout=15)
+        second = runner.run(input=json.dumps(warm), execution_timeout=15)
+    assert first.result == '"marker"'
+    assert second.result == '"warm-marker"'
+    raw = ledger.records()
+    original = next(
+        e for e in raw if e["phase"] == "WRAPPER_RETURN" and e["role"] == "victim"
     )
-    joined = values(ledger, "branch_join")[0]
-    assert held["operationId"] in {
-        op.operation_id
-        for op in result.get_context("checkpoint-pool")
-        .child_operations[0]
-        .child_operations
-    }
-    assert joined["scopeId"] == result.get_context("checkpoint-pool").operation_id
-    assert (
-        exited["atMs"] <= joined["atMs"] <= values(ledger, "wrapper_return")[0]["atMs"]
+    entered = next(
+        e for e in raw if e["phase"] == "WRAPPER_ENTER" and e["role"] == "warm"
     )
-
-
-def test_actual_nested_public_calls_supply_configuration_ids(monkeypatch):
-    ledger = install_ledger(monkeypatch)
-    payload = shared_payload("nested-progress")
-    payload["gate"] = "entry"
-    ledger.objects[payload["controlPrefix"] + "entry"] = b"release"
-    ledger.objects[payload["controlPrefix"] + "release-all"] = b"hold"
-    with DurableFunctionTestRunner(handler=fixture.handler) as runner:
-        result = runner.run(input=json.dumps(payload), execution_timeout=30)
-    assert result.result == '"marker"'
-    assert values(ledger, "observation_error") == []
-    configured = values(ledger, "operation_config")
-    assert len(configured) == 2 and all(
-        item["maxConcurrency"] == 1 for item in configured
+    ended = next(
+        e for e in raw if e["phase"] == "WRAPPER_RETURN" and e["role"] == "warm"
     )
-    started = {item["operationId"]: item for item in values(ledger, "operation_start")}
-    assert {started[item["operationId"]]["name"] for item in configured} == {
-        "inner-map",
-        "outer-parallel",
-    }
-    assert values(ledger, "progress")[0]["value"] == [
-        ["marker:0", "marker:1"],
-        "marker",
-    ]
-
-
-def test_actual_parent_closure_is_captured_before_late_child_attempt(monkeypatch):
-    ledger = install_ledger(monkeypatch)
-    payload = shared_payload("late-operation")
-    prefix = payload["controlPrefix"]
-    ledger.objects[prefix + "marker-loser"] = b"hold"
-    ledger.objects[prefix + "marker-loser-started"] = b"hold"
-    ledger.objects[prefix + "release-all"] = b"hold"
-    with DurableFunctionTestRunner(handler=fixture.handler) as runner:
-        arn = runner.run_async(input=json.dumps(payload), execution_timeout=30)
-        winner = ledger.wait_for("winner_selected")["observation"]
-        ledger.objects[prefix + "marker-loser"] = b"release"
-        runner.wait_for_result(arn, timeout=20)
-    assert values(ledger, "observation_error") == []
-    attempted = values(ledger, "late_attempt")[0]
-    closed = next(
-        item
-        for item in values(ledger, "scope_closed")
-        if item["scopeId"] == attempted["scopeId"]
+    late = next(
+        e for e in raw if e.get("observation", {}).get("kind") == "late_activity"
     )
-    assert closed["atMs"] <= winner["atMs"] < attempted["atMs"]
-    # Observe the actual SDK result, without fixing or hiding a lifecycle defect.
-    outcomes = values(ledger, "late_rejected") + values(ledger, "late_accepted")
-    assert len(outcomes) == 1 and outcomes[0]["scopeId"] == attempted["scopeId"]
+    assert late["request"] == original["request"]
+    assert late["execution"] == original["execution"]
+    assert late["observation"]["observedDuringRequestId"] == entered["request"]
+    assert original["time"] < entered["time"] <= late["time"] <= ended["time"]
