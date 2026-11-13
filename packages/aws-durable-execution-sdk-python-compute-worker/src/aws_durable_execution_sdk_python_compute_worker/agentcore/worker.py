@@ -232,7 +232,21 @@ class _JobRunner:
             exchange.respond(400, {"error": str(error)})
             return
         job = request.job
-        with self._lock:
+        session_id = exchange.header(SESSION_ID_HEADER)
+        # The job thread waits for this event before it runs any job code.
+        # A handler that holds the GIL would otherwise delay the answer.
+        answered = threading.Event()
+        thread = threading.Thread(
+            target=self._run_job,
+            args=(job, request.region, session_id, answered),
+            name=f"agentcore-job-{job.callback_id[:16]}",
+            daemon=True,
+        )
+        # Registration and the thread start are one commit under the lock.
+        # A duplicate request waits for the lock. So it sees the callback
+        # ID only after the thread started, and never answers 200 for a job
+        # whose thread failed to start.
+        with self._changed:
             known = job.callback_id in self._running or job.callback_id in (
                 self._finished
             )
@@ -240,44 +254,53 @@ class _JobRunner:
                 if not self._running:
                     self._last_status_change = _now()
                 self._running.add(job.callback_id)
+                try:
+                    thread.start()
+                except BaseException:
+                    # The job never ran. AgentCore returns the 500 to the
+                    # request step as an error that the default retry
+                    # strategy does not retry. So the operation fails with
+                    # AgentcoreDeliveryError. The job must not stay known,
+                    # so that a new run of the durable function can deliver
+                    # it.
+                    self._end_job_locked(job.callback_id, finished=False)
+                    raise
         if known:
             self._logger.info(
                 "ignored a repeated job", extra={"callbackId": job.callback_id}
             )
             exchange.respond(200, {"accepted": True})
             return
-        session_id = exchange.header(SESSION_ID_HEADER)
         try:
-            threading.Thread(
-                target=self._run_job,
-                args=(job, request.region, session_id),
-                name=f"agentcore-job-{job.callback_id[:16]}",
-                daemon=True,
-            ).start()
-        except BaseException:
-            # The job never ran. AgentCore returns the 500 to the request
-            # step as an error that the default retry strategy does not
-            # retry. So the operation fails with AgentcoreDeliveryError. The
-            # job must not stay known, so that a new run of the durable
-            # function can deliver it.
-            self._end_job(job.callback_id, finished=False)
-            raise
-        exchange.respond(200, {"accepted": True})
+            exchange.respond(200, {"accepted": True})
+        finally:
+            # The job is accepted even when the answer could not be sent.
+            # A retried request then gets the answer for a known job.
+            answered.set()
 
     def _end_job(self, callback_id: str, *, finished: bool) -> None:
         with self._changed:
-            self._running.discard(callback_id)
-            if not self._running:
-                self._last_status_change = _now()
-            if finished:
-                self._finished[callback_id] = None
-                if len(self._finished) > MAX_FINISHED_JOBS:
-                    self._finished.popitem(last=False)
-            self._changed.notify_all()
+            self._end_job_locked(callback_id, finished=finished)
+
+    def _end_job_locked(self, callback_id: str, *, finished: bool) -> None:
+        """Forget a running job. The caller holds the lock."""
+        self._running.discard(callback_id)
+        if not self._running:
+            self._last_status_change = _now()
+        if finished:
+            self._finished[callback_id] = None
+            if len(self._finished) > MAX_FINISHED_JOBS:
+                self._finished.popitem(last=False)
+        self._changed.notify_all()
 
     def _run_job(
-        self, job: MicrovmJobDocument, region: str, session_id: str | None
+        self,
+        job: MicrovmJobDocument,
+        region: str,
+        session_id: str | None,
+        answered: threading.Event,
     ) -> None:
+        answered.wait()
         fields: dict[str, object] = {
             "callbackId": job.callback_id,
             "runtimeSessionId": session_id,
@@ -417,8 +440,14 @@ def start_agentcore_worker(
        accepted, and does nothing else. ``InvokeAgentRuntime`` has no
        idempotency token, so a retried request can deliver the same job
        again. The worker remembers the last 1,000 finished callback IDs.
-    3. Otherwise starts the handler in a thread, and answers
-       ``{"accepted": true}`` at once.
+    3. Otherwise registers the callback ID and starts the job's thread, as
+       one step under a lock. A thread that cannot start gets HTTP 500, and
+       the callback ID is forgotten. A duplicate request that arrives
+       meanwhile waits for the lock, so it never gets 200 for a job that
+       never ran.
+    4. Answers ``{"accepted": true}``. Only then does the job's thread run
+       the handler. So a handler that holds the GIL does not delay the
+       answer.
 
     The job's thread sends heartbeats when the job has a heartbeat timeout,
     and then the success or the failure callback.

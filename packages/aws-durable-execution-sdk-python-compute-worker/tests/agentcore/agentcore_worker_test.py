@@ -8,6 +8,8 @@ from __future__ import annotations
 import http.client
 import inspect
 import json
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -362,6 +364,148 @@ def test_answers_500_and_forgets_a_job_whose_thread_did_not_start(
     assert worker.idle(WAIT)
     assert runs == [{"n": 2}]
     assert client.names() == ["success"]
+
+
+def test_a_duplicate_during_a_failing_thread_start_runs_the_job(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first request's thread start blocks, and then fails. A duplicate
+    # sent during the block must not get 200 for a job that never runs.
+    runs: list[Any] = []
+    worker, client, _ = start(lambda job_input, context: runs.append(job_input))
+    original = threading.Thread.start
+    entered = threading.Event()
+    fail = threading.Event()
+    job_starts: list[str] = []
+
+    def block_then_fail_once(self: threading.Thread) -> None:
+        if self.name.startswith("agentcore-job-"):
+            job_starts.append(self.name)
+            if len(job_starts) == 1:
+                entered.set()
+                assert fail.wait(WAIT)
+                msg = "can't start new thread"
+                raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", block_then_fail_once)
+    answers: dict[str, int] = {}
+
+    def send(key: str) -> None:
+        answers[key] = request(worker, "POST", "/invocations", job_body())[0]
+
+    first = threading.Thread(target=send, args=("first",))
+    first.start()
+    assert entered.wait(WAIT)
+    duplicate = threading.Thread(target=send, args=("duplicate",))
+    duplicate.start()
+    # The duplicate waits for the lock while the first start blocks.
+    duplicate.join(0.5)
+    assert duplicate.is_alive()
+    assert "duplicate" not in answers
+    fail.set()
+    first.join(WAIT)
+    duplicate.join(WAIT)
+    assert worker.idle(WAIT)
+
+    assert answers == {"first": 500, "duplicate": 200}
+    assert runs == [{"n": 2}]
+    assert client.names() == ["success"]
+
+
+def test_starts_the_handler_only_after_the_answer_is_written(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The answer takes 0.3 seconds to write. A handler that started before
+    # the answer was written would record an earlier time.
+    events: list[str] = []
+    original = worker_module._Exchange.respond  # noqa: SLF001
+
+    def slow_respond(self: Any, status: int, body: Any) -> None:
+        if body == {"accepted": True}:
+            time.sleep(0.3)
+            original(self, status, body)
+            events.append("answered")
+            return
+        original(self, status, body)
+
+    monkeypatch.setattr(worker_module._Exchange, "respond", slow_respond)  # noqa: SLF001
+    worker, _, _ = start(lambda job_input, context: events.append("handler"))
+
+    assert request(worker, "POST", "/invocations", job_body())[0] == 200
+    assert worker.idle(WAIT)
+
+    assert events == ["answered", "handler"]
+
+
+def test_runs_an_accepted_job_when_the_answer_fails(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The job is registered before the answer. A job thread that waited
+    # forever would keep the session HealthyBusy, and a retry would get
+    # 200 for a job that never runs.
+    original = worker_module._Exchange.respond  # noqa: SLF001
+
+    def failing_respond(self: Any, status: int, body: Any) -> None:
+        if body == {"accepted": True}:
+            msg = "the answer could not be written"
+            raise RuntimeError(msg)
+        original(self, status, body)
+
+    monkeypatch.setattr(worker_module._Exchange, "respond", failing_respond)  # noqa: SLF001
+    runs: list[Any] = []
+    worker, client, _ = start(lambda job_input, context: runs.append(job_input))
+
+    assert request(worker, "POST", "/invocations", job_body())[0] == 500
+    assert worker.idle(WAIT)
+
+    assert runs == [{"n": 2}]
+    assert client.names() == ["success"]
+
+
+GIL_HOLDER = """
+import http.client, json, sys, time
+port = int(sys.argv[1])
+connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+body = json.dumps(
+    {"version": 1, "region": "us-west-2", "callbackId": "cb-gil", "input": {}}
+)
+started = time.monotonic()
+connection.request("POST", "/invocations", body=body)
+response = connection.getresponse()
+response.read()
+print(response.status, time.monotonic() - started)
+"""
+
+
+def test_a_handler_that_holds_the_gil_does_not_delay_the_answer(
+    start: Any,
+) -> None:
+    # The client runs in another process, so the GIL of this process does
+    # not delay it. The handler holds the GIL for 1 second: a switch
+    # interval of 5 seconds keeps a pure Python loop from yielding it.
+    def hold_the_gil(job_input: Any, context: AgentcoreJobContext) -> Any:
+        end = time.monotonic() + 1
+        while time.monotonic() < end:
+            pass
+
+    worker, _, _ = start(hold_the_gil)
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(5)
+    try:
+        answer = subprocess.run(
+            [sys.executable, "-c", GIL_HOLDER, str(worker.port)],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=WAIT,
+        ).stdout.split()
+    finally:
+        sys.setswitchinterval(interval)
+    assert worker.idle(WAIT)
+
+    assert answer[0] == "200"
+    assert float(answer[1]) < 0.5
 
 
 def test_forgets_the_oldest_finished_job_after_the_limit(
