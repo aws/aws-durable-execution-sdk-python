@@ -47,6 +47,7 @@ class OperationType(Enum):
     WAIT = "WAIT"
     CALLBACK = "CALLBACK"
     CHAINED_INVOKE = "CHAINED_INVOKE"
+    DISTRIBUTED_MAP = "DISTRIBUTED_MAP"
 
 
 def _to_invocation_status(status: ServiceInvocationStatus) -> InvocationStatus:
@@ -78,6 +79,7 @@ def _extract_error(operation: Operation) -> ErrorObject | None:
         operation.callback_details,
         operation.chained_invoke_details,
         operation.context_details,
+        operation.distributed_map_details,
     ):
         if details and details.error is not None and details.error.to_dict():
             return details.error

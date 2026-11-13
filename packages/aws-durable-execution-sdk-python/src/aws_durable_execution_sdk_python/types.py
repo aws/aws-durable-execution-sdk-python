@@ -81,6 +81,54 @@ class WaitForConditionCheckContext(OperationContext):
     attempt: int
 
 
+@dataclass(frozen=True)
+class DistributedMapItemContext(OperationContext):
+    """Context provided to distributed map per-item processor functions.
+
+    The wrapper owns the Lambda event, so without this a function could not
+    reach the run it belongs to or the id of the item it was handed.
+
+    Attributes:
+        distributed_map_run_arn: ARN of the map run this item belongs to. It is
+            the handle the distributed map APIs take, so a processor can read
+            or control its own run.
+        item_id: The service's id for this item. The wrapper reports this
+            item's outcome under the same id.
+    """
+
+    distributed_map_run_arn: str
+    item_id: str
+
+
+@dataclass(frozen=True)
+class DistributedMapBatchContext(OperationContext):
+    """Context provided to distributed map batch processor functions.
+
+    Attributes:
+        distributed_map_run_arn: ARN of the map run this batch belongs to.
+        item_ids: The ids of the batch's items, in the same order as the items
+            themselves, so ``item_ids[i]`` is the id of ``items[i]``. A batch
+            processor reports one outcome for the whole batch and its return
+            value is discarded, so these identify items in logs rather than
+            feeding anything the service records. Reordering or filtering the
+            items breaks the pairing.
+    """
+
+    distributed_map_run_arn: str
+    item_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DistributedMapReaderContext(OperationContext):
+    """Context provided to distributed map reader functions.
+
+    Attributes:
+        distributed_map_run_arn: ARN of the map run this page is read for.
+    """
+
+    distributed_map_run_arn: str
+
+
 class Callback(Protocol, Generic[C_co]):
     """Protocol for callback futures."""
 
