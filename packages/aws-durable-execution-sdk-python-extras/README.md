@@ -2,7 +2,7 @@
 
 > This package is experimental. Its API can change in any release.
 
-Run jobs from a durable function in AWS Lambda MicroVMs, with the `microvm` and `microvm_session` operations. Run a job in an Amazon Bedrock AgentCore Runtime session with the `agentcore` operation.
+Run jobs from a durable function in AWS Lambda MicroVMs, with the `microvm` and `microvm_session` operations. Run a job in an Amazon Bedrock AgentCore Runtime session with the `agentcore` operation. Ask a decision model or a large language model in a durable step, with the `decider` and `llm` operations ([docs/ai.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extras/docs/ai.md)).
 
 ## Install
 
@@ -299,6 +299,7 @@ Permissions:
 ## Reference
 
 - [docs/microvm.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extras/docs/microvm.md): job delivery, the durable operations each call records, all errors, the retry tiers, the state check, every permission, and best practices.
+- [docs/ai.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extras/docs/ai.md): `decider` and `llm`, where the decision model can run, limits, errors, and permissions.
 - [MicroVM worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-compute-worker): the code that runs in the MicroVM.
 - [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras/compute/microvm): config fields and docstrings.
 - [`@aws/durable-execution-sdk-js-extras`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-extras): the JavaScript counterpart.

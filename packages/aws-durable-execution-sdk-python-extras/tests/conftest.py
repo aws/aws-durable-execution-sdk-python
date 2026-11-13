@@ -13,6 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 
 import pytest
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_testing.runner import (
+    DurableFunctionTestResult,
+    DurableFunctionTestRunner,
+)
 from botocore.exceptions import ClientError
 
 
@@ -355,3 +361,55 @@ def fake_endpoint() -> Iterator[Callable[..., FakeEndpoint]]:
     yield _create
     for endpoint in endpoints:
         endpoint.close()
+
+
+# ---------------------------------------------------------------- ai
+
+
+AI_WAIT = 30
+
+
+def _catching_ai(body: Callable[[DurableContext], Any]) -> Callable[..., Any]:
+    """A handler that returns the body's result, or the class, message, and
+    status of the error that it raised."""
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            return {"result": body(context)}
+        except Exception as error:  # noqa: BLE001 - the test inspects it
+            return {
+                "error": type(error).__name__,
+                "message": str(error),
+                "status": getattr(error, "status", None),
+                "stop_reason": getattr(error, "stop_reason", None),
+            }
+
+    return handler
+
+
+def _ai_outcome(result: DurableFunctionTestResult) -> Any:
+    assert result.status.value == "SUCCEEDED", result.error
+    return json.loads(result.result) if result.result is not None else None
+
+
+@pytest.fixture
+def run_ai() -> Iterator[Callable[[Callable[[DurableContext], Any]], Any]]:
+    """Run an ``ai`` test body on the local test runner. Return the outcome and the test
+    result."""
+    runners: list[DurableFunctionTestRunner] = []
+
+    def _run(
+        body: Callable[[DurableContext], Any],
+    ) -> tuple[Any, DurableFunctionTestResult]:
+        runner = DurableFunctionTestRunner(
+            handler=_catching_ai(body), poll_interval=0.05
+        )
+        runners.append(runner)
+        arn = runner.run_async(input=json.dumps({}), execution_timeout=AI_WAIT)
+        result = runner.wait_for_result(arn, timeout=AI_WAIT)
+        return _ai_outcome(result), result
+
+    yield _run
+    for runner in runners:
+        runner.close()
