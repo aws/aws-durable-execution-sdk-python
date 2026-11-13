@@ -61,6 +61,8 @@ class LambdaLogExporter:
             256_000 if max_record_size_bytes is None else max_record_size_bytes
         )
 
+    # Tells ``truncate_record`` that operations are rendered by name, so it may
+    # binary-search the whole-operation drop count while names are unique.
     def render(self, record: dict[str, Any]) -> dict[str, Any]:
         timestamp = (
             datetime.datetime.now(datetime.UTC)
@@ -72,6 +74,8 @@ class LambdaLogExporter:
             "level": "INFO",
             "message": compact_dumps(with_operations_by_name(record)),
         }
+
+    render.ops_rendering = "by-name"
 
     def measure(self, rendered: Any) -> int | None:
         """Return the UTF-8 size of the line printed for ``rendered``."""
