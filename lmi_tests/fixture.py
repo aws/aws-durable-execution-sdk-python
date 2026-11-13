@@ -27,7 +27,12 @@ from aws_durable_execution_sdk_python.execution import (
 )
 from aws_durable_execution_sdk_python.lambda_service import LambdaClient
 from aws_durable_execution_sdk_python.retries import RetryDecision
-from aws_durable_execution_sdk_python.exceptions import OrphanedChildException
+from aws_durable_execution_sdk_python.exceptions import (
+    BackgroundThreadError,
+    CheckpointError,
+    OrphanedChildException,
+    SuspendExecution,
+)
 from lmi_tests.shared_observations import (
     GateRelease,
     LifecycleObservationFactory,
@@ -101,6 +106,7 @@ class Trace:
         self.capture_sequence = 0
         self.sequence = 0
         self.call_sequence = 0
+        self.sdk_request_count = 0
         self.sdk_completed_at = None
         self.sdk_observation = None
         self.sdk_resources = None
@@ -185,6 +191,8 @@ class Trace:
     def next_call_id(self, kind):
         with self.lock:
             self.call_sequence += 1
+            if kind in {"checkpoint", "poll"}:
+                self.sdk_request_count += 1
             return f"{self.identity['request']}:{kind}:{self.call_sequence}"
 
     def signal(self, name):
@@ -567,6 +575,13 @@ def run_workflow(event, context, trace):
 def admission_probes(trace):
     trace.observe("task_start", taskId="admission-probes", source="fixture")
     closed = False
+    body_executed = False
+
+    def body(_):
+        nonlocal body_executed
+        body_executed = True
+        trace.observe("probe_body_executed")
+
     try:
         for probe, operation in (
             (
@@ -576,18 +591,28 @@ def admission_probes(trace):
             (
                 "operation",
                 lambda: trace.durable_context.step(
-                    lambda _: trace.observe("probe_body_executed"),
-                    name="operation-admission-probe",
-                    config=NO_RETRY,
+                    body, name="operation-admission-probe", config=NO_RETRY
                 ),
             ),
         ):
             trace.observe("probe_enter", probe=probe)
+            calls_before = trace.sdk_request_count
             error_record = None
             try:
                 operation()
-            except OrphanedChildException as error:
-                outcome = "REJECTED"
+            except (
+                OrphanedChildException,
+                BackgroundThreadError,
+                CheckpointError,
+                SuspendExecution,
+            ) as error:
+                # Failed/revoked SDK state can reject by re-raising its stored
+                # error. It is a rejection only before user code or a new RPC.
+                outcome = (
+                    "REJECTED"
+                    if not body_executed and trace.sdk_request_count == calls_before
+                    else "ERROR"
+                )
                 error_record = {"type": type(error).__name__, "message": str(error)}
             except BaseException as error:
                 outcome = "ERROR"
@@ -606,6 +631,8 @@ def admission_probes(trace):
                 outcome=outcome,
                 error=error_record,
                 atMs=observed_at,
+                bodyExecuted=body_executed,
+                newSdkRequests=trace.sdk_request_count - calls_before,
             )
     finally:
         trace.observe("task_exit", taskId="admission-probes", source="fixture")
@@ -760,22 +787,6 @@ def handler(event, context):
                 atMs=trace.sdk_completed_at_ms,
                 source="sdk-wrapper",
             )
-        if (
-            payload.get("sharedScenario")
-            in {
-                "normal-return",
-                "normal-failure",
-                "deadline-during-step",
-                "peer-recovery",
-            }
-            and payload.get("role") == "victim"
-            and (
-                payload.get("sharedScenario") != "peer-recovery"
-                or trace.identity["request"]
-                == getattr(trace, "recovery_original_request", None)
-            )
-        ):
-            start_admission_probes(trace)
         return result
     except BaseException as error:
         if payload.get("coverageProfile") and trace.sdk_observation is None:
@@ -797,3 +808,20 @@ def handler(event, context):
                 }
             )
         raise
+    finally:
+        if (
+            payload.get("sharedScenario")
+            in {
+                "normal-return",
+                "normal-failure",
+                "deadline-during-step",
+                "peer-recovery",
+            }
+            and payload.get("role") == "victim"
+            and (
+                payload.get("sharedScenario") != "peer-recovery"
+                or trace.identity["request"]
+                == getattr(trace, "recovery_original_request", None)
+            )
+        ):
+            start_admission_probes(trace)

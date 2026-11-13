@@ -423,3 +423,43 @@ def test_pending_and_wrapper_return_share_one_captured_timestamp(
     wrapper = next(item for item in observations if item["kind"] == "wrapper_return")
     pending = next(item for item in observations if item["kind"] == "pending")
     assert pending["atMs"] == wrapper["atMs"] == completed_ns / 1_000_000
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "background", "suspend"])
+@pytest.mark.parametrize("effect", ["none", "body", "rpc"])
+def test_stored_sdk_errors_are_rejections_only_before_new_work(
+    monkeypatch, kind, effect
+):
+    ledger = install_ledger(monkeypatch)
+    trace = fixture.Trace(shared_payload(), lambda_context(30000), "execution")
+    errors = {
+        "checkpoint": lambda: fixture.CheckpointError("Invalid checkpoint token"),
+        "background": lambda: fixture.BackgroundThreadError(
+            "failed", ValueError("source")
+        ),
+        "suspend": lambda: fixture.SuspendExecution("revoked"),
+    }
+
+    def checkpoint(**options):
+        if effect == "rpc":
+            trace.next_call_id("checkpoint")
+        raise errors[kind]()
+
+    def step(body, **options):
+        if effect == "body":
+            body(None)
+        if effect == "rpc":
+            trace.next_call_id("checkpoint")
+        raise errors[kind]()
+
+    trace.durable_context = SimpleNamespace(
+        state=SimpleNamespace(create_checkpoint=checkpoint), step=step
+    )
+    fixture.admission_probes(trace)
+    probes = [
+        r["observation"]
+        for r in ledger.observations()
+        if r["observation"]["kind"] == "admission_probe"
+    ]
+    assert probes[0]["outcome"] == ("ERROR" if effect == "rpc" else "REJECTED")
+    assert probes[1]["outcome"] == ("REJECTED" if effect == "none" else "ERROR")

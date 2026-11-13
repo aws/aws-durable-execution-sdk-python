@@ -87,6 +87,19 @@ def test_service_retry_replays_preparation_without_reinjecting_the_original_faul
     assert result.result == '"marker"'
     assert len(fault_requests) == 1
     observations = ledger.observations()
+    raised = next(
+        e["observation"]
+        for e in observations
+        if e["request"] == fault_requests[0]
+        and e["observation"]["kind"] == "wrapper_raise"
+    )
+    original_probes = [
+        e["observation"]
+        for e in observations
+        if e["request"] == fault_requests[0]
+        and e["observation"]["kind"] == "admission_probe"
+    ]
+    assert original_probes and all(e["atMs"] >= raised["atMs"] for e in original_probes)
     skipped = [
         e for e in observations if e["observation"]["kind"] == "fault_not_reapplied"
     ]

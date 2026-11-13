@@ -85,8 +85,8 @@ For normal return/failure, the adapter records the actual durable wrapper bounda
 and probes the original context after that boundary. The operation probe uses
 `DurableContext.step`; the checkpoint probe calls the SDK's
 `context.state.create_checkpoint(is_sync=False)` admission path without issuing a
-raw Lambda request. Only an actual `OrphanedChildException` is recorded as
-rejection. An accepted checkpoint, another error, or a still-pending operation
+raw Lambda request. SDK closure/revocation errors are recorded as rejection only when no user code
+or new SDK request ran. Probes run after both wrapper return and wrapper raise. An accepted checkpoint, another error, or a still-pending operation
 remains visible. Probe tasks are tracked separately; a timeout cannot make them
 quiescent. Current SDK gaps are failures, not expected passes or exclusions.
 
