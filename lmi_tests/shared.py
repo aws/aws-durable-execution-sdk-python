@@ -224,6 +224,24 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
     This is the final CI recovery path after the runner process exits. It never
     rewrites assertion results or clears quarantine based on service status alone.
     """
+    if "sharedLease" not in deployment:
+        if (
+            deployment.get("owned")
+            or deployment.get("functions")
+            or any(directory.glob("*/manifest.json"))
+        ):
+            raise OwnershipError(
+                "Deployment or case records exist without a run lease; cleanup cannot verify ownership"
+            )
+        save(
+            directory / "cleanup.json",
+            {
+                "runId": deployment["run"],
+                "status": "SKIPPED_NO_LEASE",
+                "reason": "Deployment did not acquire target ownership; no resource cleanup was attempted",
+            },
+        )
+        return 0
     receipt = directory / "ownership-released.json"
     lease = RunLease.from_manifest(
         {"deployment": deployment, "lease": deployment["sharedLease"]}

@@ -108,3 +108,16 @@ def test_unknown_retirement_state_cannot_be_claimed_or_cleared(state):
     with pytest.raises(OwnershipError):
         lease.finish_profile("c1", True)
     assert store.record["profiles"]["c1"] == state
+
+
+def test_blocked_acquisition_identifies_owner_without_exposing_fence_or_mutating_lock():
+    store = Store()
+    owner = RunLease.acquire("private", "stack", "original-run", ("c1", "c2"), s3=store)
+    owner.finish_profile("c1", False)
+    before = json.dumps(store.record, sort_keys=True)
+    with pytest.raises(OwnershipError) as error:
+        RunLease.acquire("private", "stack", "new-run", ("c1", "c2"), s3=store)
+    assert "original-run" in str(error.value)
+    assert "quarantined" in str(error.value)
+    assert owner.token not in str(error.value)
+    assert json.dumps(store.record, sort_keys=True) == before

@@ -66,8 +66,12 @@ class RunLease:
             or not previous["profiles"]
             or any(value != "quiescent" for value in previous["profiles"].values())
         ):
+            owner = {
+                name: previous.get(name) for name in ("runId", "state", "profiles")
+            }
             raise OwnershipError(
-                "Persistent LMI targets are owned or quarantined by another run"
+                "Persistent LMI targets are owned or quarantined by another run: "
+                + json.dumps(owner, sort_keys=True)
             )
         record = {
             "schemaVersion": 1,

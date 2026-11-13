@@ -92,3 +92,40 @@ def test_case_ownership_is_checked_before_control_release(
         )
     lease.finish_profile.assert_called_once_with(target, False)
     lease.release.assert_not_called()
+
+
+def test_failed_lease_acquisition_skips_cleanup_without_touching_another_run(
+    monkeypatch, tmp_path
+):
+    from_manifest = Mock(side_effect=AssertionError("No lease was acquired"))
+    client = Mock(side_effect=AssertionError("Unowned resources must not be touched"))
+    monkeypatch.setattr(shared.RunLease, "from_manifest", from_manifest)
+    monkeypatch.setattr(shared, "client", client)
+    assert shared.cleanup({"run": "new-run", "functions": {}}, tmp_path) == 0
+    assert (
+        json.loads((tmp_path / "cleanup.json").read_text())["status"]
+        == "SKIPPED_NO_LEASE"
+    )
+    assert not (tmp_path / "ownership-released.json").exists()
+    from_manifest.assert_not_called()
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize("evidence", ["owned", "functions", "case-plan"])
+def test_missing_lease_with_prior_activity_is_not_treated_as_unacquired(
+    monkeypatch, tmp_path, evidence
+):
+    deployment = {"run": "run", "functions": {}}
+    if evidence == "case-plan":
+        output = tmp_path / "standard"
+        output.mkdir()
+        (output / "manifest.json").write_text("{}")
+    else:
+        deployment[evidence] = True if evidence == "owned" else {"c1": "arn:owned"}
+    client = Mock(
+        side_effect=AssertionError("Cannot mutate resources without ownership")
+    )
+    monkeypatch.setattr(shared, "client", client)
+    with pytest.raises(OwnershipError, match="cannot verify ownership"):
+        shared.cleanup(deployment, tmp_path)
+    client.assert_not_called()
