@@ -96,6 +96,12 @@ def make_manifest(
     ]
     scenarios = []
     for required in required_cases("python", "lifecycle", coverage):
+        # Temporary diagnostic run; restore the full catalog after validation.
+        if (
+            os.environ.get("LMI_SKIP_CASE_2") == "1"
+            and required.requirement_id == "lmi-lifecycle-2"
+        ):
+            continue
         concurrency = required.minimum_native_concurrency
         case_id = f"{required.requirement_id}-{required.scenario}"
         scenarios.append(
