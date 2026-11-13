@@ -19,7 +19,7 @@ env:
   # Ignore the CodeBuild image's shared pip target and Python search path.
   PIP_CONFIG_FILE: /dev/null
   PYTHONPATH: ""
-  CONFORMANCE_REVISION: 86bcaff49829351b25a1b1ae76f6d6483d37df83
+  CONFORMANCE_REVISION: 59352e1097d92fe034c7cd55a9618837b95b905b
   LMI_SHARED_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
@@ -128,7 +128,7 @@ jobs:
           role-session-name: python-lmi-assertions
           aws-region: ${{ env.AWS_REGION }}
           allowed-account-ids: ${{ secrets.TEST_ACCOUNT_ID }}
-      - name: Run shared lifecycle and exporter conformance
+      - name: Run Python lifecycle regressions and shared exporter conformance
         timeout-minutes: 60
         run: hatch run lmi:shared
       - name: Refresh credentials for evidence and cleanup

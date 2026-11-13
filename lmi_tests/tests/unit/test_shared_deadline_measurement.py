@@ -110,7 +110,7 @@ def measured_driver(
         "run",
         Scenario(
             "case",
-            "lmi-lifecycle-11",
+            "python-lmi-11",
             profile.profile_id,
             scenario,
             roles=roles,

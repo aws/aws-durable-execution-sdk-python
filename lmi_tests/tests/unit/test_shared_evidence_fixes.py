@@ -184,7 +184,7 @@ def test_assembler_keeps_post_measurement_events_in_the_main_evidence(measuremen
         case_id="case",
         cohort_id="cohort-1",
         scenario="timeout-retry",
-        requirement_id="lmi-lifecycle-11",
+        requirement_id="python-lmi-11",
         coverage_profile="python-lifecycle",
         otel_view=None,
         export_mode=None,

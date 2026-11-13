@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-from aws_durable_execution_conformance_tests.lmi.app import validate
+from lmi_tests.python_catalog import validate
 from aws_durable_execution_conformance_tests.lmi.coordinator import (
     Profile,
     Scenario,
@@ -41,7 +41,7 @@ def test_real_sdk_replay_and_service_history_normalize_for_shared_acceptance(
         "unit",
         Scenario(
             "case",
-            "lmi-lifecycle-5",
+            "python-lmi-5",
             "c1",
             "replay-callback-retry",
             roles=("victim", "resume"),

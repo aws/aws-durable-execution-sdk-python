@@ -1,6 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run the SDK-owned fixtures through the pinned shared conformance package."""
+"""Run Python LMI regressions and shared exporter conformance."""
 
 from __future__ import annotations
 
@@ -85,6 +85,7 @@ def make_manifest(
     deployment: Mapping[str, Any], coverage: str, directory: Path
 ) -> dict[str, Any]:
     from aws_durable_execution_conformance_tests.lmi.matrix import required_cases
+    from lmi_tests import python_catalog
 
     if coverage not in COVERAGE_PROFILES:
         raise ValueError("Unknown Python adapter coverage profile")
@@ -115,7 +116,12 @@ def make_manifest(
         for key in ("c1", "c2")
     ]
     scenarios = []
-    for required in required_cases("python", "lifecycle-otel", coverage):
+    required_cells = (
+        python_catalog.required_cases("lifecycle-otel")
+        if coverage == "python-lifecycle"
+        else required_cases("python", "lifecycle-otel", coverage)
+    )
+    for required in required_cells:
         case_id = f"{coverage}-{required.scenario}-c{required.native_concurrency}-{required.otel_view or 'baseline'}-{required.export_mode or 'sdk-default'}"
         scenarios.append(
             {
@@ -162,6 +168,8 @@ def make_manifest(
 
 
 def run(deployment: Mapping[str, Any], directory: Path) -> int:
+    from lmi_tests import python_catalog
+
     from aws_durable_execution_conformance_tests.lmi.app import (
         build_report,
         coverage_inventory,
@@ -190,17 +198,27 @@ def run(deployment: Mapping[str, Any], directory: Path) -> int:
             plan = make_manifest(deployment, coverage, output)
             path = output / "manifest.json"
             save(path, plan)
-            validated = load_manifest(path)
+            suite = (
+                python_catalog.suite_definition(plan["capabilityProfile"])
+                if coverage == "python-lifecycle"
+                else None
+            )
+            validated = (
+                python_catalog.load_manifest(path)
+                if suite is not None
+                else load_manifest(path)
+            )
             results = asyncio.run(
                 live_results(
                     validated,
                     "lmi_tests.shared_adapter:create_adapter",
                     audit_dir=output,
+                    suite=suite,
                 )
             )
-            report = build_report(validated, results)
+            report = build_report(validated, results, suite=suite)
             save(output / "evidence.json", results)
-            save(output / "coverage.json", coverage_inventory(validated))
+            save(output / "coverage.json", coverage_inventory(validated, suite=suite))
             print(render_console(report))
             for format_name in ("json", "junit"):
                 write_report(report, format_name, str(output / "report"))

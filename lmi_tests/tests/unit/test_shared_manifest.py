@@ -9,6 +9,7 @@ import pytest
 
 from aws_durable_execution_conformance_tests.lmi.app import load_manifest
 from lmi_tests.shared import make_manifest, verify_checkout
+from lmi_tests.python_catalog import suite_definition
 from lmi_tests.shared_contract import CONFORMANCE_REVISION, configuration_identity
 
 
@@ -53,11 +54,21 @@ def test_generated_manifest_covers_every_required_slot(tmp_path, profile, count)
     source = deployment()
     plan = make_manifest(source, profile, tmp_path)
     assert len(plan["scenarios"]) == count
+    identifiers = {case["requirement_id"] for case in plan["scenarios"]}
+    if profile == "python-lifecycle":
+        assert all(identity.startswith("python-lmi-") for identity in identifiers)
+    else:
+        assert identifiers == {"lmi-lifecycle-16"}
     assert {case["profile_id"] for case in plan["scenarios"]} == {"c1", "c2"}
     assert plan["sdk"]["deployment"]["conformanceRevision"] == CONFORMANCE_REVISION
     path = tmp_path / "plan.json"
     path.write_text(json.dumps(plan))
-    assert load_manifest(path) == plan
+    assert (
+        load_manifest(
+            path, suite=suite_definition() if profile == "python-lifecycle" else None
+        )
+        == plan
+    )
     plan["sdk"]["deployment"]["commit"] = "mutated"
     assert source["commit"] == "sdk-commit"
 

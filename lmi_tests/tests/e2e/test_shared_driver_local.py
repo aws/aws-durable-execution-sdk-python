@@ -107,7 +107,7 @@ def test_shared_callback_driver_resumes_the_original_public_sdk_execution():
         "local-run",
         Scenario(
             "callback-case",
-            "lmi-lifecycle-5",
+            "python-lmi-5",
             profile.profile_id,
             "replay-callback-retry",
             roles=("victim", "resume"),

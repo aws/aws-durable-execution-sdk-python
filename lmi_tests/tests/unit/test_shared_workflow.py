@@ -100,3 +100,37 @@ def test_cloud_runs_automatically_for_trusted_prs_and_supports_manual_dispatch()
     assert cloud["needs"] == "harness"
     assert cloud["concurrency"]["group"] == "lmi-e2e-shared-capacity-provider"
     assert cloud["concurrency"]["cancel-in-progress"] is False
+
+
+def test_shared_setup_bootstraps_before_conformance_is_installed():
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent("""
+        import importlib.abc
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+
+        class NoConformance(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.startswith('aws_durable_execution_conformance_tests'):
+                    raise AssertionError('bootstrap tried to import uninstalled conformance')
+                return None
+
+        sys.meta_path.insert(0, NoConformance())
+        from lmi_tests import shared
+        with patch.object(shared, 'verify_checkout') as verify, patch.object(shared.subprocess, 'run') as install:
+            shared.setup(Path('.conformance'))
+            verify.assert_called_once_with(Path('.conformance'))
+            assert install.call_args.args[0][1:4] == ['-m', 'pip', 'install']
+    """)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

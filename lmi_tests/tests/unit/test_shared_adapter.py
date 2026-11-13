@@ -42,7 +42,7 @@ def context(
         "run",
         Scenario(
             case_id,
-            "lmi-lifecycle-5",
+            "lmi-lifecycle-16" if mode else "python-lmi-5",
             profile.profile_id,
             scenario,
             roles=roles,
@@ -502,11 +502,11 @@ def test_missed_original_placement_is_not_retried_as_another_victim():
 def test_warm_sequence_uses_real_callback_resumes_not_extra_driver_invocations(
     scenario, count
 ):
-    from aws_durable_execution_conformance_tests.lmi.matrix import required_cases
+    from lmi_tests.python_catalog import required_cases
 
     cell = next(
         case
-        for case in required_cases("python", "lifecycle-otel", "python-lifecycle")
+        for case in required_cases("lifecycle-otel")
         if case.scenario == scenario and case.native_concurrency == 1
     )
     cloud = ScriptCloud()

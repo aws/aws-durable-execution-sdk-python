@@ -1,13 +1,17 @@
 # Python LMI shared conformance adapter
 
-The cloud entry point is now the shared runner from
+The cloud entry point runs two separately owned suites against the same persistent
+c1/c2 functions. The Python SDK owns `python-lifecycle`: 28 lifecycle cells plus
+48 instrumented cells, using `python-lmi-*` requirement IDs. Their definitions,
+matrices and validators live in `python_catalog.py`, `python_lifecycle.py`, and
+`python_otel.py`. They are Python regressions, not shared conformance requirements.
+
+The language-neutral `export-lifecycle` profile contributes another 24 cells from
 [conformance PR #186](https://github.com/aws/aws-durable-execution-conformance-tests/pull/186),
-pinned to `86bcaff49829351b25a1b1ae76f6d6483d37df83`. The Python adapter runs
-`python-lifecycle` (76 cells) and `export-lifecycle` (24 cells) against the same
-persistent c1/c2 functions. The latter covers both OTel views with synchronous
-export and asynchronous export with a bounded flush wait. Shared requirements,
-validation, JSON/JUnit reports and ownership journals come from that pinned
-checkout; the conformance packages are installed on the driver only.
+pinned to `59352e1097d92fe034c7cd55a9618837b95b905b`. Both suites reuse its generic
+coordinator, launch journals, common evidence/retirement audit, and JSON/JUnit
+reporting. Only the 24 exporter cells count toward that shared profile; these runs
+do not claim acceptance of the separate shared `standard` profile.
 
 This suite implements [#742](https://github.com/aws/aws-durable-execution-sdk-python/issues/742)
 and asserts the invocation-lifetime behavior requested by
@@ -31,7 +35,7 @@ Use Python 3.14 and Hatch from the repository root:
 ```sh
 # Check out the exact shared runner revision first.
 gh repo clone aws/aws-durable-execution-conformance-tests .conformance
-git -C .conformance checkout 86bcaff49829351b25a1b1ae76f6d6483d37df83
+git -C .conformance checkout 59352e1097d92fe034c7cd55a9618837b95b905b
 hatch run lmi:shared-setup
 hatch run lmi:shared-tests
 hatch run lmi:lint
@@ -99,7 +103,7 @@ any evidence you need before starting another run. The run manifest is invalidat
 first, so a failed build, invalid configuration, or account/provider check cannot
 make an exit trap collect or clean up the preceding run. This deployment supplies both native
 environment-concurrency settings, `1` and `2`, on Python 3.14. The single cloud
-command runs 100 shared coverage cells. The shared coordinator reserves native
+command runs 76 Python-owned regression cells and 24 shared exporter cells. The shared coordinator reserves native
 capacity for each case and serializes exclusive cases, without redeploying or
 changing function configuration between cases. Independent SDK
 branch-concurrency settings include 1, 2, and 3.
@@ -117,7 +121,7 @@ use GitHub-hosted runners. Python 3.14 comes from `setup-uv`; the runner image's
 shared pip target and Python search path are disabled so Hatch environments stay
 isolated. CI first runs the local harness, then assumes the repository's configured
 test role and deploys the checked-out SDK and OTel wheels. It uploads the raw S3/service
-records, shared manifests, attempt journals, coverage inventories, and JSON/JUnit
+records, suite manifests, attempt journals, coverage inventories, and JSON/JUnit
 reports under `lmi_tests/artifacts/shared/`. Missing placement or source evidence
 is a failure, not an accepted skip. Local integration checks exercise the real
 public SDK and local checkpoint service; they do not establish LMI recovery.
@@ -139,7 +143,9 @@ provider flush API; shared acceptance allows ten seconds for that wait boundary.
 Export completion is tracked separately and remains owned after wrapper return.
 These are declared test budgets, not SDK SLAs. See
 [shared telemetry observations](shared-telemetry.md) for capture/publication
-ordering and [the adapter design](shared-suite-design.md) for ownership details.
+ordering, [Python lifecycle rules](python-lifecycle-schema.md) and
+[Python OTel rules](python-otel.md) for SDK-owned assertions, and
+[the adapter design](shared-suite-design.md) for suite ownership details.
 
 The first run creates the persistent `python-lmi-e2e` stack, one private bucket,
 and two functions/log groups (`python-lmi-e2e-c1`, `python-lmi-e2e-c2`). Later runs
@@ -180,8 +186,8 @@ waiting for results, with finite boto transport timeouts.
 | Timeout/retry | A second service invocation of the **same** durable execution, completed step skipped, original attempt effects cease; repeated interrupted at-least-once work is recorded separately and is not called exactly-once |
 
 The following sections describe the retained SDK-local fixtures and legacy
-pytest regression entry points. Cloud acceptance uses the shared manifests and
-validators described above. Java-specific executor, handler-owner and Context/MDC
+pytest regression entry points. The automated run uses the Python-owned and shared exporter suites described
+above. Java-specific executor, handler-owner and Context/MDC
 assertions remain the Java SDK's responsibility.
 
 ### Java lifecycle coverage in Python
@@ -282,7 +288,7 @@ transport timeout). Invocation and callback writes are not retried by this layer
 | Cleanup acceptance grace | 5 s |
 | Fault-fixture emergency I/O release | 150 s |
 | Per-case retirement after assertions | 30 s |
-| Workflow cloud assertions (all 76 cases) | 60 min |
+| Workflow cloud assertions (76 Python + 24 shared exporter cells) | 60 min |
 | Waiting for prior executions before updating | 270 s |
 | Single cloud job including deployment/run cleanup | 120 min |
 

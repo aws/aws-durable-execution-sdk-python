@@ -23,7 +23,7 @@ def context():
         "run",
         Scenario(
             "case",
-            "lmi-lifecycle-11",
+            "python-lmi-11",
             "c1",
             "timeout-retry",
             roles=("victim", "retry"),
@@ -113,7 +113,7 @@ def test_final_read_bound_alone_does_not_invent_quiescence(tmp_path):
     ctx = context()
     ctx.scenario = Scenario(
         "case",
-        "lmi-lifecycle-1",
+        "python-lmi-1",
         "c1",
         "native-concurrency",
         roles=("victim",),
