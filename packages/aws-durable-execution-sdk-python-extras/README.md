@@ -271,6 +271,8 @@ if __name__ == "__main__":
 
 The operation records `review.session`, `review.callback`, `review.request`, and `review.stop` in one child context named `review`. `review.stop` calls `StopRuntimeSession` after success, failure, and timeout alike. A failed stop is logged, and does not hide the job's result or error.
 
+Each `InvokeAgentRuntime` and `StopRuntimeSession` call must end 10 seconds before the Lambda invocation times out, as the MicroVM calls must. A Lambda timeout during a step attempt records no outcome for the attempt. So a call that has not ended by then fails its attempt with a `TimeoutError`, and the default retry strategy retries it in a later invocation.
+
 While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
 Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.

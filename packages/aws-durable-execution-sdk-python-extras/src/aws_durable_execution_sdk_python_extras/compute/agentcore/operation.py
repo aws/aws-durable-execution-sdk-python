@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -54,6 +55,11 @@ from aws_durable_execution_sdk_python_extras.compute.microvm.job import (
     MAX_JOB_INPUT_BYTES,
     dumps,
 )
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
+    INVOCATION_RESERVE_SECONDS,
+    call_before_deadline,
+    reserve_starts_at,
+)
 
 
 if TYPE_CHECKING:
@@ -67,8 +73,9 @@ _CLIENT_ATTEMPTS = 3
 
 The first ``InvokeAgentRuntime`` of a session starts the session's microVM
 before the agent answers. So the read timeout is 60 seconds, longer than the
-30 seconds of the MicroVM client. One step attempt then takes at most about
-3 minutes.
+30 seconds of the MicroVM client. One call can then take about 3 minutes.
+The invocation reserve ends a step attempt earlier when the invocation has
+less time left. See :func:`_call_before_reserve`.
 """
 
 MAX_ANSWER_BYTES = 64 * 1024
@@ -309,6 +316,7 @@ class _AgentcoreScope:
             .to_json()
             .encode()
         )
+        remaining_seconds = _remaining_seconds(child)
 
         def attempt(_: object) -> None:
             request: dict[str, Any] = {
@@ -320,8 +328,14 @@ class _AgentcoreScope:
             }
             if self.config.qualifier is not None:
                 request["qualifier"] = self.config.qualifier
-            response = self._client().invoke_agent_runtime(**request)
-            _check_accepted(response)
+
+            def call() -> None:
+                # The answer is a stream. A stalled read must end before the
+                # reserve too. So the read runs inside the same call.
+                response = self._client().invoke_agent_runtime(**request)
+                _check_accepted(response)
+
+            _call_before_reserve("InvokeAgentRuntime", call, remaining_seconds)
 
         try:
             child.step(
@@ -346,10 +360,20 @@ class _AgentcoreScope:
         failure must not discard the outcome. The step's failure is
         checkpointed. So on replay the step fails again at once, with the
         same outcome.
+
+        Each attempt ends before the invocation reserve. A stalled call
+        then fails the attempt with a retryable ``TimeoutError``, instead of
+        running until Lambda ends the invocation. So the step records an
+        outcome, and a later replay returns the job's outcome.
         """
+        remaining_seconds = _remaining_seconds(child)
         try:
             child.step(
-                lambda _: self._stop_call(session_id),
+                lambda _: _call_before_reserve(
+                    "StopRuntimeSession",
+                    lambda: self._stop_call(session_id),
+                    remaining_seconds,
+                ),
                 name=f"{self.name}.stop",
                 config=StepConfig(retry_strategy=self.retry_strategy),
             )
@@ -492,6 +516,55 @@ def _validate_input(name: str, job_input: Any) -> None:
             "example as an S3 key."
         )
         raise ValueError(msg)
+
+
+def _remaining_seconds(context: DurableContext) -> Callable[[], float | None]:
+    """Return a reader of the invocation's remaining time, in seconds.
+
+    ``None`` means that the compute reports no deadline. The MicroVM
+    operation reads the time the same way.
+    """
+    lambda_context = context.lambda_context
+    if lambda_context is None:
+        return lambda: None
+    return lambda: lambda_context.get_remaining_time_in_millis() / 1000
+
+
+def _call_before_reserve(
+    api: str,
+    call: Callable[[], None],
+    remaining_seconds: Callable[[], float | None],
+) -> None:
+    """Run one call of a step attempt, and end it before the invocation
+    reserve.
+
+    1. A Lambda timeout during a step attempt records no outcome for the
+       attempt. So replay runs the attempt again, and a call that always
+       stalls would never record an outcome.
+    2. The MicroVM operation keeps an invocation reserve of
+       :data:`INVOCATION_RESERVE_SECONDS` for that reason. This function
+       uses the same reserve and the same helper, ``call_before_deadline``.
+    3. A call that has not ended at the reserve fails the attempt with
+       ``TimeoutError``. The default retry strategy retries it, in a later
+       invocation. boto3 cannot cancel a call, so the call's thread keeps
+       running, and its result is discarded.
+
+    Raises:
+        TimeoutError: When the call does not end before the reserve.
+        Exception: The error of the call.
+    """
+    started = time.monotonic()
+
+    def expired() -> Exception:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        return TimeoutError(
+            f"{api} did not end before the invocation reserve, after "
+            f"{elapsed_ms} ms. The step stops "
+            f"{INVOCATION_RESERVE_SECONDS:.0f} seconds before the Lambda "
+            "invocation times out, so that it can record its outcome."
+        )
+
+    call_before_deadline(call, reserve_starts_at(remaining_seconds), expired)
 
 
 def _function_region(context: DurableContext) -> str:

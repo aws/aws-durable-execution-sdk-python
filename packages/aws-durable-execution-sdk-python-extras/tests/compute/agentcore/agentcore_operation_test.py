@@ -47,6 +47,9 @@ from aws_durable_execution_sdk_python_extras.compute.agentcore import (
     default_agentcore_retry_strategy,
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore import operation
+from aws_durable_execution_sdk_python_extras.compute.microvm.request import (
+    INVOCATION_RESERVE_SECONDS,
+)
 
 
 WAIT = 30
@@ -658,3 +661,98 @@ def test_reads_only_the_first_64_kib_of_the_answer(
     [stream] = client.streams
     assert stream.closed
     assert stream.read() == b'{"accepted":true}'
+
+
+RESERVE_IN = 1.5
+"""The seconds from the start of a call to the invocation reserve, in the
+reserve tests."""
+
+
+@pytest.fixture
+def near_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every invocation report that the reserve starts in
+    :data:`RESERVE_IN` seconds."""
+    monkeypatch.setattr(
+        operation,
+        "_remaining_seconds",
+        lambda context: lambda: INVOCATION_RESERVE_SECONDS + RESERVE_IN,
+    )
+
+
+@pytest.fixture
+def stall() -> Iterator[Callable[[dict[str, Any]], None]]:
+    """An answer that blocks the call until the test ends."""
+    release = threading.Event()
+
+    def _stall(request: dict[str, Any]) -> None:
+        release.wait(WAIT)
+
+    yield _stall
+    release.set()
+
+
+def test_ends_a_stalled_request_before_the_reserve_and_retries_it(
+    run: Any, fake_agentcore_client: Any, near_reserve: None, stall: Any
+) -> None:
+    # The default strategy retries the TimeoutError of the reserve. The
+    # retry runs in a later invocation, and the second call answers.
+    client = fake_agentcore_client(invokes=[stall])
+    config = config_with(client, retry_strategy=default_agentcore_retry_strategy)
+    started = time.monotonic()
+
+    result = run(catching(config), {}, succeed_with("ok"))
+
+    assert outcome(result) == {"result": "ok"}
+    invokes = client.requests("invoke_agent_runtime")
+    assert len(invokes) == 2
+    assert invokes[0]["runtimeSessionId"] == invokes[1]["runtimeSessionId"]
+    # The stalled call blocks for WAIT seconds. The attempt ended after
+    # RESERVE_IN seconds, plus the 2-second retry delay.
+    assert time.monotonic() - started < WAIT / 2
+
+
+def test_fails_the_delivery_with_the_reserve_error_of_a_stalled_request(
+    run: Any, fake_agentcore_client: Any, near_reserve: None, stall: Any
+) -> None:
+    client = fake_agentcore_client(invokes=[stall])
+
+    result = run(catching(config_with(client)), {})
+
+    error = outcome(result)
+    assert error["error"] == "AgentcoreDeliveryError"
+    assert (
+        "InvokeAgentRuntime did not end before the invocation reserve"
+        in error["message"]
+    )
+    assert len(client.requests("stop_runtime_session")) == 1
+
+
+def test_a_stalled_stop_does_not_hide_the_recorded_result(
+    run: Any, fake_agentcore_client: Any, near_reserve: None, stall: Any
+) -> None:
+    client = fake_agentcore_client(stops=[stall])
+    started = time.monotonic()
+
+    result = run(catching(config_with(client)), {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    stop = result.get_context("review").get_step("review.stop")
+    assert stop.error is not None
+    assert "StopRuntimeSession did not end before the invocation reserve" in (
+        stop.error.message or ""
+    )
+    assert time.monotonic() - started < WAIT / 2
+
+
+def test_calls_without_a_deadline_outside_lambda() -> None:
+    context: Any = SimpleNamespace(lambda_context=None)
+    calls: list[str] = []
+
+    operation._call_before_reserve(  # noqa: SLF001
+        "StopRuntimeSession",
+        lambda: calls.append(threading.current_thread().name),
+        operation._remaining_seconds(context),  # noqa: SLF001
+    )
+
+    # Without a deadline, the call runs in the calling thread.
+    assert calls == [threading.current_thread().name]
