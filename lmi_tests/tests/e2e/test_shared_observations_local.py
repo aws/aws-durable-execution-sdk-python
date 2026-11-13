@@ -81,6 +81,17 @@ def test_actual_service_replay_keeps_operation_identity_and_skips_completed_bodi
         for item in replay["operations"]
     )
     assert "PENDING" in {item["outcome"] for item in values(ledger, "wrapper_return")}
+    observations = ledger.observations()
+    for record in observations:
+        if record["observation"]["kind"] != "pending":
+            continue
+        wrapper = next(
+            item["observation"]
+            for item in observations
+            if item["request"] == record["request"]
+            and item["observation"]["kind"] == "wrapper_return"
+        )
+        assert record["observation"]["atMs"] == wrapper["atMs"]
 
 
 def test_warm_invocation_observes_late_work_under_its_original_request(monkeypatch):

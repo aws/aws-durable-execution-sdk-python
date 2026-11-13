@@ -677,9 +677,12 @@ def handler(event, context):
             # Preserve the actual SDK boundary before post-call evidence I/O.
             completed_at_ns = time.time_ns()
             trace.sdk_completed_at = completed_at_ns / 1_000_000_000
+            # Both semantic records describe this same boundary. Converting
+            # seconds back to milliseconds can round to a different float.
+            trace.sdk_completed_at_ms = completed_at_ns / 1_000_000
             if payload.get("coverageProfile"):
                 trace.sdk_observation = trace.capture_observation(
-                    "sdk_completion", atMs=completed_at_ns / 1_000_000
+                    "sdk_completion", atMs=trace.sdk_completed_at_ms
                 )
             trace.sdk_resources = resources()
 
@@ -716,7 +719,7 @@ def handler(event, context):
             observe(
                 trace,
                 "pending",
-                atMs=trace.sdk_completed_at * 1000,
+                atMs=trace.sdk_completed_at_ms,
                 source="sdk-wrapper",
             )
         if (

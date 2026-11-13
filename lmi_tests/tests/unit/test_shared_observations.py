@@ -11,6 +11,7 @@ import json
 import threading
 import time
 from typing import Any
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,7 +32,7 @@ from lmi_tests.shared_observations import (
     LifecycleObservations,
     OperationObservation,
 )
-from lmi_tests.tests.unit.support import lambda_context
+from lmi_tests.tests.unit.support import invocation, lambda_context
 
 
 class MemoryLedger:
@@ -393,3 +394,32 @@ def test_failed_real_client_call_keeps_its_dispatch_and_exit_identity(
     exited = next(item for item in observations if item["kind"] == prefix + "_exit")
     assert entered["callId"] == exited["callId"] and entered["atMs"] <= exited["atMs"]
     assert not any(item["kind"] == "checkpoint_ack" for item in observations)
+
+
+@pytest.mark.parametrize("completed_ns", [1794607984811568141, 1794607984811569459])
+def test_pending_and_wrapper_return_share_one_captured_timestamp(
+    monkeypatch, completed_ns
+):
+    ledger = install_ledger(monkeypatch)
+    original = invocation()
+    payload = original.to_json_dict()
+    payload["InitialExecutionState"]["Operations"][0]["ExecutionDetails"][
+        "InputPayload"
+    ] = json.dumps(shared_payload())
+    injected = fixture.DurableExecutionInvocationInputWithClient.from_durable_execution_invocation_input(
+        fixture.DurableExecutionInvocationInput.from_json_dict(payload),
+        original.service_client,
+    )
+    monkeypatch.setattr(
+        fixture, "time", SimpleNamespace(time=time.time, time_ns=lambda: completed_ns)
+    )
+    monkeypatch.setattr(
+        fixture,
+        "durable_execution",
+        lambda *args, **kwargs: lambda *args: {"Status": "PENDING"},
+    )
+    assert fixture.handler(injected, lambda_context(30000)) == {"Status": "PENDING"}
+    observations = [record["observation"] for record in ledger.observations()]
+    wrapper = next(item for item in observations if item["kind"] == "wrapper_return")
+    pending = next(item for item in observations if item["kind"] == "pending")
+    assert pending["atMs"] == wrapper["atMs"] == completed_ns / 1_000_000
