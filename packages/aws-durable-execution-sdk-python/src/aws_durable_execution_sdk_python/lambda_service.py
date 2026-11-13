@@ -128,6 +128,21 @@ class InvocationStatus(Enum):
     RETRY = "RETRY"
 
 
+class ExecutionStatus(Enum):
+    """Authoritative status of a durable execution from GetDurableExecution.
+
+    Plugins use it to distinguish a stopped or timed-out execution from an
+    invocation that will simply be retried: an invocation ``RETRY`` disposition
+    does not guarantee that another invocation runs.
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
+    STOPPED = "STOPPED"
+    RUNNING = "RUNNING"
+
+
 @dataclass(frozen=True)
 class DurableExecutionInvocationOutput:
     """Representation the DurableExecutionInvocationOutput. This is what the Durable lambda handler returns.
@@ -1170,6 +1185,25 @@ class StateOutput:
         return cls(operations=operations, next_marker=data.get("NextMarker"))
 
 
+@dataclass(frozen=True)
+class ExecutionInfo:
+    """Execution status and service end time from GetDurableExecution.
+
+    ``end_timestamp`` is the service termination time when the execution is
+    terminal, and ``None`` otherwise.
+    """
+
+    status: ExecutionStatus
+    end_timestamp: datetime.datetime | None = None
+
+    @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> ExecutionInfo:
+        return cls(
+            status=ExecutionStatus(data["Status"]),
+            end_timestamp=data.get("EndTimestamp"),
+        )
+
+
 # endregion model
 
 
@@ -1192,6 +1226,10 @@ class DurableServiceClient(Protocol):
         next_marker: str,
         max_items: int = 1000,
     ) -> StateOutput: ...  # pragma: no cover
+
+    def get_execution(
+        self, durable_execution_arn: str
+    ) -> ExecutionInfo: ...  # pragma: no cover
 
 
 class LambdaClient(DurableServiceClient):
@@ -1287,6 +1325,25 @@ class LambdaClient(DurableServiceClient):
             error = GetExecutionStateError.from_exception(e)
             logger.exception(
                 "Failed to get execution state.", extra=error.build_logger_extras()
+            )
+            raise error from None
+
+    def get_execution(self, durable_execution_arn: str) -> ExecutionInfo:
+        """Read the execution's authoritative status and end time.
+
+        Raises a retryable :class:`GetExecutionStateError` on failure so the
+        caller can preserve uncertainty rather than fabricate a terminal
+        outcome.
+        """
+        try:
+            result: MutableMapping[str, Any] = self.client.get_durable_execution(
+                DurableExecutionArn=durable_execution_arn
+            )
+            return ExecutionInfo.from_dict(result)
+        except Exception as e:
+            error = GetExecutionStateError.from_exception(e)
+            logger.exception(
+                "Failed to get execution.", extra=error.build_logger_extras()
             )
             raise error from None
 

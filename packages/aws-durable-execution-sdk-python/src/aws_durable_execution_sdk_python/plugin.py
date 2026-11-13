@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
     ErrorObject,
+    ExecutionStatus,
     InvocationStatus as ServiceInvocationStatus,
     Operation,
     OperationAction,
@@ -354,12 +355,38 @@ class InvocationEndInfo(InvocationInfo):
     compare.
     """
 
+    execution_status: ExecutionStatus | None = field(
+        default=None,
+        kw_only=True,
+    )
+    """The execution's authoritative status, when known at invocation end.
+
+    The invocation :attr:`status` is not the execution's outcome: a ``RETRY``
+    invocation can belong to an execution the service already ``STOPPED`` or
+    ``TIMED_OUT``, in which case no further invocation runs. When the surviving
+    invocation reaches finalization after termination, the SDK reports the real
+    outcome here so a plugin can distinguish execution termination from a
+    retryable failure without parsing a checkpoint error. ``None`` means
+    unknown (still running, or the lookup failed), not "non-terminal".
+    """
+
+    execution_end_time: datetime.datetime | None = field(
+        default=None,
+        kw_only=True,
+    )
+    """The service termination time, set only with a terminal status.
+
+    It is the service's clock, not the invocation-finalization time.
+    """
+
     @classmethod
     def from_durable_execution_invocation_output(
         cls,
         invocation_start_info: InvocationStartInfo,
         output: "DurableExecutionInvocationOutput",
         operations: dict[str, OperationInfo] | None = None,
+        execution_status: ExecutionStatus | None = None,
+        execution_end_time: datetime.datetime | None = None,
     ):
         return InvocationEndInfo(
             request_id=invocation_start_info.request_id,
@@ -377,6 +404,8 @@ class InvocationEndInfo(InvocationInfo):
             status=_to_invocation_status(output.status),
             error=output.error,
             execution_result=output.result,
+            execution_status=execution_status,
+            execution_end_time=execution_end_time,
         )
 
 
@@ -1674,6 +1703,8 @@ class PluginExecutor:
     def on_invocation_end(
         self,
         output: "DurableExecutionInvocationOutput",
+        execution_status: ExecutionStatus | None = None,
+        execution_end_time: datetime.datetime | None = None,
     ) -> None:
         if self._invocation_status is None:
             # on_invocation_start not called, skip
@@ -1697,6 +1728,8 @@ class PluginExecutor:
                 self._invocation_status,
                 output,
                 operations=self._snapshot_operation_infos(self._operations_provider),
+                execution_status=execution_status,
+                execution_end_time=execution_end_time,
             )
         )
         try:
