@@ -386,7 +386,7 @@ def test_case_collection_is_scoped_but_final_collection_is_complete(driver):
     driver.logs.get_paginator.assert_called_once_with("filter_log_events")
 
 
-def test_summary_rejects_other_run_reports_and_requires_the_matching_release_receipt(
+def test_summary_rejects_other_run_reports_and_requires_matching_cleanup(
     tmp_path,
 ):
     config = {
@@ -394,7 +394,6 @@ def test_summary_rejects_other_run_reports_and_requires_the_matching_release_rec
         "runtime": "python3.14",
         "concurrencies": {"c1": 1, "c2": 2},
         "run": "current",
-        "sharedLease": {"token": "fence"},
     }
     (tmp_path / "manifest.json").write_text(json.dumps(config))
     shared = tmp_path / "shared"
@@ -407,15 +406,17 @@ def test_summary_rejects_other_run_reports_and_requires_the_matching_release_rec
             }
         )
     )
-    receipt = shared / "ownership-released.json"
+    receipt = shared / "cleanup.json"
     receipt.write_text(
-        json.dumps({"runId": "previous", "lease": config["sharedLease"]})
+        json.dumps({"runId": "previous", "status": "CLEANUP_REQUESTED", "errors": []})
     )
     summary = summarize(tmp_path)
     assert "another run" in summary and "PASSED" not in summary
     assert "Run cleanup not confirmed" in summary
-    receipt.write_text(json.dumps({"runId": "current", "lease": config["sharedLease"]}))
-    assert "Run ownership released after retirement" in summarize(tmp_path)
+    receipt.write_text(
+        json.dumps({"runId": "current", "status": "CLEANUP_REQUESTED", "errors": []})
+    )
+    assert "Run-scoped cleanup requests completed" in summarize(tmp_path)
 
 
 def test_summary_does_not_accept_a_report_without_deployment_identity(tmp_path):

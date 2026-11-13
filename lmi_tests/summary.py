@@ -36,18 +36,20 @@ def summarize(directory):
     for path in sorted(directory.glob("*-error.json")):
         data = json.loads(path.read_text())
         lines.append(f"- {path.stem}: {data['type']}")
-    receipt = shared / "ownership-released.json"
-    released = (
-        config is not None
-        and receipt.exists()
-        and json.loads(receipt.read_text())
-        == {"runId": config["run"], "lease": config.get("sharedLease")}
-    )
-    lines.append(
-        "Run ownership released after retirement; persistent resources retained."
-        if released
-        else "Run cleanup not confirmed; ownership and persistent resources are retained."
-    )
+    path = shared / "cleanup.json"
+    cleanup = json.loads(path.read_text()) if path.exists() else {}
+    if config is None or cleanup.get("runId") != config["run"]:
+        lines.append("Run cleanup not confirmed; persistent resources are retained.")
+    elif cleanup.get("status") == "NO_CASES":
+        lines.append("No scenario work was recorded for cleanup.")
+    elif cleanup.get("status") == "CLEANUP_REQUESTED" and cleanup.get("errors") == []:
+        lines.append(
+            "Run-scoped cleanup requests completed; see case reports for task retirement."
+        )
+    else:
+        lines.append(
+            "Run cleanup failed or is incomplete; inspect cleanup diagnostics."
+        )
     return "\n\n".join(lines)
 
 

@@ -25,4 +25,8 @@ acceptance or fix the underlying SDK lifecycle behavior.
 
 The core-only Lambda bundle excludes driver code and conformance packages. CI
 retains the dedicated test-account boundary, trusted-PR condition, exact dependency
-pin, conditional ownership lease and final reconciliation path.
+pin and run-scoped cleanup. GitHub Actions is the sole cross-run concurrency
+guard: the fixed cloud-job group covers deployment, assertions and cleanup, with
+`cancel-in-progress: false`. The adapter has no shared-lock module, S3 lease,
+fence token or persisted quarantine. The shared runner still schedules individual
+cases and reports retirement failures within each run.

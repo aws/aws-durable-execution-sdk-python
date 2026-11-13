@@ -71,8 +71,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    # All runs use the same provider. Hold this slot through cleanup; do not
-    # include a PR/ref/run ID in the group.
+    # GitHub Actions is the cross-run concurrency guard. Hold this slot through
+    # cleanup and use the same group for every PR/ref targeting this provider.
     concurrency:
       group: lmi-e2e-shared-capacity-provider
       cancel-in-progress: false

@@ -65,7 +65,6 @@ def adapter(tmp_path, *, read_fails=False):
 
     result = SharedAdapter(
         {"sdk": {"deployment": {}, "artifacts_dir": str(tmp_path)}},
-        ownership=Mock(),
         evidence_builder=build,
     )
     result.cases["case"] = _Case(driver)

@@ -35,13 +35,6 @@ def deployment():
         "wheels": {
             "aws_durable_execution_sdk_python-3.0.0.whl": "core-sha",
         },
-        "sharedLease": {
-            "bucket": "private",
-            "key": "ownership/stack/shared-run.json",
-            "runId": "run-1",
-            "token": "fence",
-            "resources": ["c1", "c2"],
-        },
     }
 
 
@@ -51,6 +44,8 @@ def test_generated_manifest_covers_the_seven_shared_scenarios(tmp_path):
     source = deployment()
     plan = make_manifest(source, "standard", tmp_path)
     assert len(plan["scenarios"]) == 7
+    assert "lease" not in plan["sdk"]
+    assert "sharedLease" not in plan["sdk"]["deployment"]
     assert {c["requirement_id"] for c in plan["scenarios"]} == {
         f"lmi-lifecycle-{i}" for i in range(1, 8)
     }
@@ -73,11 +68,7 @@ def test_generated_manifest_covers_the_seven_shared_scenarios(tmp_path):
     assert source["commit"] == "sdk-commit"
 
 
-def test_no_unowned_or_unidentified_artifact_can_be_planned(tmp_path):
-    source = deployment()
-    source.pop("sharedLease")
-    with pytest.raises(ValueError, match="ownership"):
-        make_manifest(source, "standard", tmp_path)
+def test_no_unidentified_artifact_can_be_planned(tmp_path):
     source = deployment()
     source["wheels"] = {}
     with pytest.raises(ValueError, match="wheel"):
@@ -107,3 +98,34 @@ def test_only_the_exact_clean_shared_revision_is_accepted(tmp_path):
         side_effect=[CONFORMANCE_REVISION + "\n", ""],
     ):
         verify_checkout(tmp_path)
+
+
+def test_shared_run_writes_reports_without_an_external_lock(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    from lmi_tests import shared
+    from aws_durable_execution_conformance_tests.lmi import app
+
+    async def results(plan, adapter_name, *, audit_dir):
+        assert adapter_name == "lmi_tests.shared_adapter:create_adapter"
+        assert "lease" not in plan["sdk"]
+        return [
+            {
+                "case_id": case["case_id"],
+                "requirement_id": case["requirement_id"],
+                "profile_id": case["profile_id"],
+                "status": "PASSED",
+                "errors": [],
+            }
+            for case in plan["scenarios"]
+        ]
+
+    client = Mock(
+        side_effect=AssertionError("Run orchestration must not acquire an AWS lock")
+    )
+    monkeypatch.setattr(shared, "client", client)
+    monkeypatch.setattr(app, "live_results", results)
+    output = tmp_path / "run"
+    assert shared.run(deployment(), output) == 0
+    report = json.loads((output / "standard/report.json").read_text())
+    assert report["summary"]["passed"] == 7
+    client.assert_not_called()

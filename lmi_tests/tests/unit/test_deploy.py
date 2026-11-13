@@ -138,9 +138,6 @@ def apis(monkeypatch, tmp_path):
     clients = {name: Mock() for name in ("cloudformation", "s3", "lambda")}
     monkeypatch.setattr(deploy, "client", clients.__getitem__)
     monkeypatch.setattr(deploy, "ARTIFACTS", tmp_path)
-    from lmi_tests.tests.unit.test_shared_lock import Store
-
-    lease_store = Store()
     clients["s3"].get_public_access_block.return_value = {
         "PublicAccessBlockConfiguration": {
             "BlockPublicAcls": True,
@@ -149,14 +146,9 @@ def apis(monkeypatch, tmp_path):
             "RestrictPublicBuckets": True,
         }
     }
-    clients["s3"].get_object.side_effect = lease_store.get_object
-
-    def store(**kwargs):
-        if kwargs["Key"].startswith("ownership/"):
-            return lease_store.put_object(**kwargs)
-        return {}
-
-    clients["s3"].put_object.side_effect = store
+    clients["s3"].get_object.side_effect = AssertionError(
+        "Deployment must not read an S3 lock"
+    )
     return clients
 
 
@@ -173,22 +165,6 @@ def test_later_run_updates_fixed_functions_without_recreating_resources(
     verify = Mock()
     monkeypatch.setattr(deploy, "verify", verify)
     deploy.deploy_stack(manifest, b"first-code")
-    # No SDK work is launched by this deployment-only test. Retire its ownership
-    # window before testing a second revision against the same persistent targets.
-    from lmi_tests.shared_lock import RunLease
-
-    record = manifest["sharedLease"]
-    lease = RunLease(
-        record["bucket"],
-        record["key"],
-        record["runId"],
-        record["token"],
-        tuple(record["resources"]),
-        apis["s3"],
-    )
-    for resource in lease.resources:
-        lease.finish_profile(resource, True)
-    lease.release()
     second = {
         **manifest,
         "run": "second",
@@ -198,6 +174,11 @@ def test_later_run_updates_fixed_functions_without_recreating_resources(
     deploy.deploy_stack(second, b"second-code")
     cfn.create_stack.assert_called_once()
     assert cfn.update_stack.call_count == 2
+    apis["s3"].get_object.assert_not_called()
+    assert all(
+        not call.kwargs["Key"].startswith("ownership/")
+        for call in apis["s3"].put_object.call_args_list
+    )
     templates = [
         json.loads(call.kwargs["TemplateBody"])
         for call in cfn.update_stack.call_args_list

@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 from lmi_tests.deploy import ARTIFACTS, ROOT, client, save
 from lmi_tests.shared_contract import CONFORMANCE_REVISION, configuration_identity
-from lmi_tests.shared_lock import OwnershipError, RunLease
+from lmi_tests.evidence import CollectionError
 
 
 COVERAGE_PROFILES = ("standard",)
@@ -72,10 +72,6 @@ def make_manifest(
 
     if coverage not in COVERAGE_PROFILES:
         raise ValueError("Unknown Python adapter coverage profile")
-    if "sharedLease" not in deployment:
-        raise ValueError(
-            "Deployment was not prepared with persistent shared-run ownership"
-        )
     actual = deepcopy(dict(deployment))
     actual["conformanceRevision"] = CONFORMANCE_REVISION
     core_wheels = {
@@ -142,7 +138,6 @@ def make_manifest(
         "sdk": {
             "deployment": actual,
             "artifacts_dir": str(directory.resolve() / "source"),
-            "lease": actual["sharedLease"],
         },
     }
 
@@ -165,115 +160,73 @@ def run(deployment: Mapping[str, Any], directory: Path) -> int:
         raise ValueError(
             "Shared run output must be empty; preserve prior attempts and failure evidence"
         )
-    lease = RunLease.from_manifest(
-        {"deployment": deployment, "lease": deployment["sharedLease"]}
-    )
     exit_code = 0
-    completed = False
-    try:
-        for coverage in COVERAGE_PROFILES:
-            output = directory / coverage
-            output.mkdir()
-            plan = make_manifest(deployment, coverage, output)
-            path = output / "manifest.json"
-            save(path, plan)
-            validated = load_manifest(path)
-            results = asyncio.run(
-                live_results(
-                    validated,
-                    "lmi_tests.shared_adapter:create_adapter",
-                    audit_dir=output,
-                )
+    for coverage in COVERAGE_PROFILES:
+        output = directory / coverage
+        output.mkdir()
+        plan = make_manifest(deployment, coverage, output)
+        path = output / "manifest.json"
+        save(path, plan)
+        validated = load_manifest(path)
+        results = asyncio.run(
+            live_results(
+                validated,
+                "lmi_tests.shared_adapter:create_adapter",
+                audit_dir=output,
             )
-            report = build_report(validated, results)
-            save(output / "evidence.json", results)
-            save(output / "coverage.json", coverage_inventory(validated))
-            print(render_console(report))
-            for format_name in ("json", "junit"):
-                write_report(report, format_name, str(output / "report"))
-            exit_code = max(exit_code, report.exit_code())
-        completed = True
-    finally:
-        if completed:
-            try:
-                lease.release()
-                save(
-                    directory / "ownership-released.json",
-                    {"runId": deployment["run"], "lease": lease.to_manifest()},
-                )
-            except OwnershipError as error:
-                save(
-                    directory / "ownership-retained.json",
-                    {"error": str(error), "lease": lease.to_manifest()},
-                )
-                exit_code = 1
-        else:
-            save(
-                directory / "ownership-retained.json",
-                {
-                    "reason": "Interrupted or incomplete shared run",
-                    "lease": lease.to_manifest(),
-                },
-            )
+        )
+        report = build_report(validated, results)
+        save(output / "evidence.json", results)
+        save(output / "coverage.json", coverage_inventory(validated))
+        print(render_console(report))
+        for format_name in ("json", "junit"):
+            write_report(report, format_name, str(output / "report"))
+        exit_code = max(exit_code, report.exit_code())
     return exit_code
 
 
 def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
-    """Release only persisted case controls; unknown retirement retains ownership.
+    """Release this run's controls and request stops without altering its reports.
 
-    This is the final CI recovery path after the runner process exits. It never
-    rewrites assertion results or clears quarantine based on service status alone.
+    GitHub Actions holds the cloud job's concurrency slot through this step.
+    Successful requests do not imply that every runtime task has retired.
     """
-    if "sharedLease" not in deployment:
-        if (
-            deployment.get("owned")
-            or deployment.get("functions")
-            or any(directory.glob("*/manifest.json"))
-        ):
-            raise OwnershipError(
-                "Deployment or case records exist without a run lease; cleanup cannot verify ownership"
-            )
+    plans = []
+    for coverage in COVERAGE_PROFILES:
+        path = directory / coverage / "manifest.json"
+        if not path.exists():
+            continue
+        plan = json.loads(path.read_text())
+        if plan.get("runId") != deployment["run"]:
+            raise CollectionError("Cleanup manifest belongs to another run")
+        profiles = {profile["profile_id"]: profile for profile in plan["profiles"]}
+        for case in plan["scenarios"]:
+            target = profiles[case["profile_id"]]["resource_id"]
+            if target not in deployment["functions"].values():
+                raise CollectionError("Cleanup target is outside this deployment")
+        plans.append((coverage, plan))
+    if not plans:
         save(
             directory / "cleanup.json",
             {
                 "runId": deployment["run"],
-                "status": "SKIPPED_NO_LEASE",
-                "reason": "Deployment did not acquire target ownership; no resource cleanup was attempted",
+                "status": "NO_CASES",
+                "errors": [],
+                "reason": "No shared case manifests were recorded; no cleanup requests were sent",
             },
         )
-        return 0
-    receipt = directory / "ownership-released.json"
-    lease = RunLease.from_manifest(
-        {"deployment": deployment, "lease": deployment["sharedLease"]}
-    )
-    if receipt.exists() and json.loads(receipt.read_text()) == {
-        "runId": deployment["run"],
-        "lease": lease.to_manifest(),
-    }:
-        return 0
-    record, _ = lease._read()
-    record = lease._owned(record)
-    if all(value == "quiescent" for value in record["profiles"].values()):
-        lease.release()
-        save(receipt, {"runId": deployment["run"], "lease": lease.to_manifest()})
         return 0
     storage, service = (
         client("s3", deployment["region"]),
         client("lambda", deployment["region"]),
     )
     errors: list[str] = []
-    for coverage in COVERAGE_PROFILES:
-        plan_path = directory / coverage / "manifest.json"
-        if not plan_path.exists():
-            continue
-        plan = json.loads(plan_path.read_text())
-        if plan.get("runId") != deployment["run"]:
-            raise OwnershipError("Cleanup manifest belongs to another run")
+    for coverage, plan in plans:
         profiles = {profile["profile_id"]: profile for profile in plan["profiles"]}
         for case in plan["scenarios"]:
             target = profiles[case["profile_id"]]["resource_id"]
             if target not in deployment["functions"].values():
-                raise OwnershipError("Cleanup target is outside the owned deployment")
+                raise CollectionError("Cleanup target is outside the owned deployment")
             owner = hashlib.sha256(
                 f"{case['case_id']}:{case.get('cohort_id', 'cohort-1')}".encode()
             ).hexdigest()[:20]
@@ -288,7 +241,7 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
                     for item in page.get("Contents", [])
                 ]
                 if any(not key.startswith(prefix) for key in objects):
-                    raise OwnershipError(
+                    raise CollectionError(
                         "Control listing escaped the case-owned prefix"
                     )
                 executions: set[str] = set()
@@ -299,12 +252,13 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
                         payload.get("run") != deployment["run"]
                         or payload.get("caseId") != case["case_id"]
                     ):
-                        raise OwnershipError(
+                        raise CollectionError(
                             "Invocation intent belongs to another case"
                         )
                     if invocation.get("arn"):
                         executions.add(invocation["arn"])
                     else:
+                        recovered_executions: set[str] = set()
                         marker = payload["marker"]
                         event_prefix = f"runs/{deployment['run']}/events/{marker}/"
                         for page in storage.get_paginator("list_objects_v2").paginate(
@@ -319,11 +273,12 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
                                     event.get("run") != deployment["run"]
                                     or event.get("caseId") != case["case_id"]
                                 ):
-                                    raise OwnershipError(
+                                    raise CollectionError(
                                         "Recovered invocation evidence belongs to another case"
                                     )
-                                executions.add(event["execution"])
-                        if not executions:
+                                recovered_executions.add(event["execution"])
+                        executions.update(recovered_executions)
+                        if not recovered_executions:
                             errors.append(
                                 f"Unreconciled Invoke: {case['case_id']}/{marker}"
                             )
@@ -331,7 +286,7 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
                     not arn.startswith(target + "/durable-execution/")
                     for arn in executions
                 ):
-                    raise OwnershipError("Refusing to stop a foreign execution")
+                    raise CollectionError("Refusing to stop a foreign execution")
                 for key in sorted(
                     objects, key=lambda value: value != prefix + "release-all"
                 ):
@@ -340,7 +295,7 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
                     ] as stream:
                         state = stream.read()
                     if state not in {b"hold", b"release"}:
-                        raise OwnershipError(
+                        raise CollectionError(
                             "Unknown control content; refusing to overwrite it"
                         )
                     if state == b"hold":
@@ -364,19 +319,16 @@ def cleanup(deployment: Mapping[str, Any], directory: Path) -> int:
                                 raise
             except Exception as error:
                 errors.append(f"{case['case_id']}: {type(error).__name__}: {error}")
-    for target, status in record["profiles"].items():
-        if status != "quiescent":
-            lease.finish_profile(target, False)
     save(
         directory / "cleanup.json",
         {
             "runId": deployment["run"],
             "errors": errors,
-            "status": "OWNERSHIP_RETAINED",
-            "reason": "Fault release and Stop do not prove task/request quiescence; retained run requires reconciliation",
+            "status": "FAILED" if errors else "CLEANUP_REQUESTED",
+            "reason": "Run-scoped control release and execution-stop requests; case reports retain task retirement findings",
         },
     )
-    return 1
+    return int(bool(errors))
 
 
 def main() -> None:
@@ -399,7 +351,7 @@ def main() -> None:
     deployment = json.loads(args.manifest.read_text())
     expected_run = os.environ.get("LMI_SHARED_RUN_ID")
     if expected_run and deployment.get("run") != expected_run:
-        raise OwnershipError("Deployment manifest belongs to a different CI run")
+        raise CollectionError("Deployment manifest belongs to a different CI run")
     if args.command == "cleanup":
         raise SystemExit(cleanup(deployment, args.output))
     if args.command == "plan":

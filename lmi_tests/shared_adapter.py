@@ -23,11 +23,6 @@ from lmi_tests.shared_scenarios import ScenarioDriver
 from lmi_tests.shared_contract import configuration_identity
 
 
-class RunOwnership(Protocol):
-    def assert_owned(self, resource_id: str) -> None: ...
-    def finish_profile(self, resource_id: str, quiescent: bool) -> None: ...
-
-
 class EvidenceBuilder(Protocol):
     def __call__(
         self, context: ScenarioContext, cloud: Cloud, *, phase: str
@@ -74,7 +69,6 @@ class SharedAdapter:
         self,
         manifest: Mapping[str, Any],
         *,
-        ownership: RunOwnership,
         evidence_builder: EvidenceBuilder,
         cloud_factory: Callable[..., Cloud] = Cloud,
     ) -> None:
@@ -82,14 +76,12 @@ class SharedAdapter:
         self.sdk = self.manifest["sdk"]
         self.deployment = self.sdk["deployment"]
         self.artifacts_dir = Path(self.sdk["artifacts_dir"])
-        self.ownership = ownership
         self.evidence_builder = evidence_builder
         self.cloud_factory = cloud_factory
         self.cases: dict[str, _Case] = {}
 
     async def prepare(self, profile: Profile) -> None:
         def verify() -> None:
-            self.ownership.assert_owned(profile.resource_id)
             if profile.resource_id not in self.deployment["functions"].values():
                 raise ProvisioningError(
                     "Shared profile is not part of the owned SDK deployment"
@@ -125,9 +117,6 @@ class SharedAdapter:
     async def start(self, context: ScenarioContext) -> None:
         if context.scenario.case_id in self.cases:
             raise CollectionError("A later scenario cannot replace an admitted case")
-        await asyncio.to_thread(
-            self.ownership.assert_owned, context.profile.resource_id
-        )
         key = next(
             (
                 key
@@ -244,15 +233,13 @@ class SharedAdapter:
         return await case.call(retire)
 
     async def finish(self, profile: Profile, *, quiescent: bool) -> None:
-        await asyncio.to_thread(
-            self.ownership.finish_profile, profile.resource_id, quiescent
-        )
+        # The shared runner retains per-case retirement results. Cross-run
+        # serialization ends with the GitHub Actions cloud job.
+        return None
 
 
 def create_adapter(manifest: Mapping[str, Any]) -> SharedAdapter:
-    """Factory used by the shared CLI; persistent ownership is mandatory."""
+    """Create an adapter for the cloud job serialized by GitHub Actions."""
     from lmi_tests.shared_evidence import build_evidence
-    from lmi_tests.shared_lock import RunLease
 
-    ownership = RunLease.from_manifest(manifest["sdk"])
-    return SharedAdapter(manifest, ownership=ownership, evidence_builder=build_evidence)
+    return SharedAdapter(manifest, evidence_builder=build_evidence)

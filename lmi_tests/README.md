@@ -16,8 +16,8 @@ shared matrix directly rather than maintaining a second requirement catalog.
 | `lmi-lifecycle-6` | `warm-reuse` | c1 | victim, warm |
 | `lmi-lifecycle-7` | `normal-failure` | c1 | victim |
 
-The shared runner owns assertions, strict reports, placement identity, leases,
-launch journals and independent retirement auditing. This repository owns the
+The shared runner owns assertions, strict reports, placement identity, per-case
+scheduling, launch journals and independent retirement auditing. This repository owns the
 real public SDK handlers, AWS transport, source observations and deployment.
 OTel/exporter tests and the previous Python-specific matrix are deferred.
 There is no local conformance profile or validator that replaces a shared rule.
@@ -56,16 +56,11 @@ persistent functions use Python 3.14, arm64, 2048 MiB and native concurrency 1 a
 2, with one environment each. SDK artifact and configuration digests are retained
 in every manifest and checked before invoking either target.
 
-```bash
-export AWS_REGION=us-west-2
-export LMI_SHARED_RUN_ID=your-unique-run-id
-# Set CAPACITY_PROVIDER_ARN, TEST_ACCOUNT_ID and TEST_LAMBDA_EXECUTION_ROLE_ARN.
-hatch run lmi:build
-hatch run lmi:python -m lmi_tests.deploy deploy \
-  --stack-name python-lmi-e2e --run-id "$LMI_SHARED_RUN_ID" --runtime python3.14
-hatch run lmi:shared
-hatch run lmi:shared-cleanup
-```
+Run cloud tests through the workflow's `workflow_dispatch` action or a trusted
+same-repository PR. Its fixed `lmi-e2e-shared-capacity-provider` concurrency group
+serializes cloud jobs across PRs and refs from deployment through final cleanup,
+with `cancel-in-progress: false`. GitHub Actions is the only cross-run concurrency
+control. Direct CLI calls do not acquire a lock and are not serialized with CI.
 
 `shared plan` writes the seven-case manifest without invoking functions. `shared
 run` writes under `lmi_tests/artifacts/shared/standard/`: the manifest, coverage,
@@ -75,8 +70,8 @@ the same durable execution; it is not another driver Invoke.
 
 Trusted same-repository pull requests and manual workflow runs exercise the cloud
 suite. Fork and Dependabot pull requests run only the unprivileged local harness.
-Runs using the same capacity provider are serialized through cleanup. A conditional
-S3 run lease also prevents overlapping deployments or reuse of quarantined work.
+There is no S3 lease, fence token or persistent quarantine record. Existing S3
+ownership objects are not read and cannot block a later workflow run.
 
 ## Actual observations and failure handling
 
@@ -121,8 +116,10 @@ Coordination barriers retain their complete `controlRecords` journal separately
 from injected victim `faultsCreated`; releasing a healthy peer is not victim
 fault recovery.
 
-Cleanup releases only the current run's controls and stops only its identified
-executions. It does not erase assertion errors or clear ownership simply because
-the runner process ended. A failed case can release its target only after all
-actual launches and tasks have independently settled. Unknown invocations,
-missing evidence and unresolved late work retain quarantine for reconciliation.
+Cleanup releases only the current run's controls and requests stops only for its
+identified executions. It validates run, case and function identity before those
+requests. It records `NO_CASES`, `CLEANUP_REQUESTED` or `FAILED` in `cleanup.json`;
+completed cleanup requests do not claim that every task retired. Assertion and
+retirement failures remain in the shared reports. The shared runner can prevent
+reuse of an unretired target within the current run, but that state is not stored
+as a lock for future workflow runs.

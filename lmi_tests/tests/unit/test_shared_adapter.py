@@ -245,10 +245,9 @@ class FakeCloud:
         self.actions.append("release")
 
 
-def adapter(tmp_path, *, factory=FakeCloud, ownership=None):
+def adapter(tmp_path, *, factory=FakeCloud):
     return adapter_module.SharedAdapter(
         {"sdk": {"deployment": deployment(), "artifacts_dir": str(tmp_path)}},
-        ownership=ownership or Mock(spec=["assert_owned", "finish_profile", "release"]),
         evidence_builder=lambda context, cloud, *, phase: {
             "retirement": {"owner": context.scenario.case_id, "phase": phase}
         },
@@ -256,9 +255,8 @@ def adapter(tmp_path, *, factory=FakeCloud, ownership=None):
     )
 
 
-def test_prepare_checks_persistent_ownership_and_actual_profile(tmp_path):
-    owner = Mock(spec=["assert_owned", "finish_profile", "release"])
-    value = adapter(tmp_path, ownership=owner)
+def test_prepare_checks_the_actual_deployment_profile(tmp_path):
+    value = adapter(tmp_path)
     from lmi_tests.shared_contract import configuration_identity
 
     valid = Profile(
@@ -272,19 +270,20 @@ def test_prepare_checks_persistent_ownership_and_actual_profile(tmp_path):
     asyncio.run(value.prepare(valid))
     with pytest.raises(ProvisioningError, match="configuration identity"):
         asyncio.run(value.prepare(PROFILE))
-    assert all(call.args == (FUNCTION,) for call in owner.assert_owned.call_args_list)
     assert FakeCloud.instances[-1].actions == ["verify"]
     bad = Profile("bad", FUNCTION, 1, 2, "sdk-sha", "configuration-sha")
     with pytest.raises(ProvisioningError, match="Native concurrency"):
         asyncio.run(value.prepare(bad))
 
 
-def test_lost_ownership_prevents_any_driver_launch(tmp_path):
-    owner = Mock(spec=["assert_owned", "finish_profile", "release"])
-    owner.assert_owned.side_effect = RuntimeError("lease lost")
-    value = adapter(tmp_path, ownership=owner)
-    with pytest.raises(RuntimeError, match="lease lost"):
-        asyncio.run(value.start(context()))
+def test_foreign_target_prevents_any_driver_launch(tmp_path):
+    value = adapter(tmp_path)
+    ctx = context()
+    ctx.profile = Profile(
+        "foreign", "arn:foreign", 1, 1, "sdk-sha", "configuration-sha"
+    )
+    with pytest.raises(ProvisioningError, match="outside"):
+        asyncio.run(value.start(ctx))
     assert value.cases == {}
 
 
@@ -327,14 +326,6 @@ def test_cancelled_worker_is_joined_before_case_cleanup(monkeypatch, tmp_path):
         assert ctx.evidence["retirement"] == {"owner": "case", "phase": "final"}
 
     asyncio.run(exercise())
-
-
-def test_finish_records_quarantine_without_releasing_the_whole_run(tmp_path):
-    owner = Mock(spec=["assert_owned", "finish_profile", "release"])
-    value = adapter(tmp_path, ownership=owner)
-    asyncio.run(value.finish(PROFILE, quiescent=False))
-    owner.finish_profile.assert_called_once_with(FUNCTION, False)
-    assert not owner.release.called
 
 
 class ScriptCloud:

@@ -20,7 +20,6 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from lmi_tests.evidence import ProvisioningError
-from lmi_tests.shared_lock import RunLease
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -473,16 +472,6 @@ def deploy_stack(manifest, data):
         raise ProvisioningError(
             "Evidence bucket must be private before uploading the tested artifact"
         )
-    partition = manifest["provider"].split(":")[1]
-    targets = tuple(
-        f"arn:{partition}:lambda:{manifest['region']}:{manifest['account']}:function:{manifest['stack']}-{key}:{QUALIFIER}"
-        for key in CONCURRENCIES
-    )
-    lease = RunLease.acquire(
-        manifest["bucket"], manifest["stack"], manifest["run"], targets, s3=storage
-    )
-    manifest["sharedLease"] = lease.to_manifest()
-    save(ARTIFACTS / "manifest.json", manifest)
     if stack is not None:
         wait_for_idle_functions(stack)
     manifest["owned"] = True
