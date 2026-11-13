@@ -2,7 +2,7 @@
 
 > This package is experimental. Its API can change in any release.
 
-Run jobs from a durable function in AWS Lambda MicroVMs, with the `microvm` and `microvm_session` operations. Ask a decision model or a large language model in a durable step, with the `decider` and `llm` operations ([docs/ai.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extras/docs/ai.md)).
+Run jobs from a durable function in AWS Lambda MicroVMs, with the `microvm` and `microvm_session` operations. Run a job in an Amazon Bedrock AgentCore Runtime session with the `agentcore` operation. Ask a decision model or a large language model in a durable step, with the `decider` and `llm` operations ([docs/ai.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extras/docs/ai.md)).
 
 ## Install
 
@@ -220,6 +220,82 @@ The function's execution role needs:
 The function's role does not need `lambda:ResumeMicrovm`.
 
 The MicroVM's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the function ARN. With `auto_suspend_on_idle`, it also needs `lambda:SuspendMicrovm` on the image.
+
+## Run a job in AgentCore Runtime
+
+> The `compute.agentcore` module is experimental. Its API can change in any release.
+
+`agentcore` sends one job to a new [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html) session, waits for the result, and stops the session. The function invocation ends while the agent works. So no Lambda compute is billed during the wait.
+
+```python
+import os
+
+from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_extras.compute.agentcore import (
+    AgentcoreConfig,
+    agentcore,
+)
+
+AGENT = AgentcoreConfig(
+    agent_runtime_arn=os.environ["AGENT_RUNTIME_ARN"],
+    qualifier="DEFAULT",
+    timeout=Duration.from_hours(1),
+    heartbeat_timeout=Duration.from_minutes(5),
+)
+
+
+@durable_execution
+def handler(event: dict, context: DurableContext) -> bool:
+    review = agentcore(context, "review", job_input={"pr": event["pr"]}, config=AGENT)
+    return review["approved"]
+```
+
+The agent runtime runs the [AgentCore worker](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-compute-worker#run-a-job-in-agentcore-runtime):
+
+```python
+from aws_durable_execution_sdk_python_compute_worker.agentcore import (
+    AgentcoreJobContext,
+    start_agentcore_worker,
+)
+
+
+def review(job_input: dict, context: AgentcoreJobContext) -> dict:
+    return {"approved": True, "comments": []}
+
+
+if __name__ == "__main__":
+    start_agentcore_worker(handler=review).wait()
+```
+
+The operation records `review.session`, `review.callback`, `review.request`, and `review.stop` in one child context named `review`. Each operation records a subtype from `AgentcoreOperationSubType`: `Agentcore` on the child context, then `AgentcoreSessionId`, `AgentcoreCallback`, `AgentcoreRequest`, and `AgentcoreStop`, the same values as the JavaScript SDK. Execution history and plugins can filter on them. `review.stop` calls `StopRuntimeSession` after success, failure, and timeout alike. A failed stop is logged, and does not hide the job's result or error.
+
+Each `InvokeAgentRuntime` and `StopRuntimeSession` call must end 10 seconds before the Lambda invocation times out, as the MicroVM calls must. A Lambda timeout during a step attempt records no outcome for the attempt. So a call that has not ended by then fails its attempt with a `TimeoutError`, and the default retry strategy retries it in a later invocation. A step attempt with less than 11 seconds left makes no call. It fails with a message that asks for a longer function timeout.
+
+While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
+
+Delivery is at-least-once, so make the job handler's side effects idempotent:
+
+1. `InvokeAgentRuntime` has no idempotency token. So a retried request step can deliver the same job twice.
+2. The worker ignores a second delivery of a job that it already accepted. It remembers the callback IDs only in its process memory. So the worker runs a job once per process.
+3. An answer can be lost after the job finished. The retry can then arrive after the idle timeout replaced the session's process. The new process runs the same job again.
+
+### Rules for AgentCore jobs
+
+1. Set `heartbeat_timeout`. It ends the job when the worker crashes or stops reporting. The first heartbeat period starts when the callback is created, before the job is delivered. So it must cover the request step with its retries and a cold session start, which took 1.4 to 3.1 seconds in a live test. 30 seconds or more is a safe value.
+2. `timeout` must fit the agent runtime's configured `maxLifetime`.
+3. A job can run more than once when AgentCore replaces the worker process. Make handler side effects safe to repeat.
+4. Your logger must not throw.
+5. The runtime's idle timeout applies only while no job is running. One `agentcore()` call runs one job, so it does not lose state between jobs.
+6. Give the durable function a timeout of at least 11 seconds. Each AgentCore call needs the 10-second invocation reserve and 1 second for the call.
+
+Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.
+
+Permissions:
+
+- The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on two resources: the agent runtime ARN, and `<runtime ARN>/runtime-endpoint/*`. Without the endpoint resource, both calls are denied on `<runtime ARN>/runtime-endpoint/DEFAULT`. To allow one endpoint only, name the endpoint of `qualifier` instead of `*`.
+- The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the function ARN.
 
 ## Reference
 

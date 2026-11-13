@@ -1,0 +1,664 @@
+# SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for the AgentCore worker, through real HTTP requests on loopback."""
+
+from __future__ import annotations
+
+import http.client
+import inspect
+import json
+import threading
+import time
+from collections.abc import Callable, Iterator
+from typing import Any
+
+import pytest
+
+from aws_durable_execution_sdk_python_compute_worker.agentcore import (
+    AgentcoreJobContext,
+    AgentcoreWorker,
+    start_agentcore_worker,
+)
+from aws_durable_execution_sdk_python_compute_worker.agentcore import (
+    worker as worker_module,
+)
+from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
+    CallbackReporter,
+)
+
+
+WAIT = 10
+
+
+def job_body(callback_id: str = "cb-1", **fields: Any) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "region": "us-west-2",
+        "callbackId": callback_id,
+        "input": {"n": 2},
+        **fields,
+    }
+
+
+def request(
+    worker: AgentcoreWorker,
+    method: str,
+    path: str,
+    body: Any = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
+    connection = http.client.HTTPConnection("127.0.0.1", worker.port, timeout=WAIT)
+    try:
+        data = (
+            None
+            if body is None
+            else (body if isinstance(body, bytes) else json.dumps(body).encode())
+        )
+        connection.request(method, path, body=data, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, json.loads(response.read() or b"null")
+    finally:
+        connection.close()
+
+
+@pytest.fixture
+def start(
+    fake_client: Any, logger: Any
+) -> Iterator[Callable[..., tuple[AgentcoreWorker, Any, list[str]]]]:
+    workers: list[AgentcoreWorker] = []
+
+    def _start(
+        handler: Callable[[Any, AgentcoreJobContext], Any], client: Any = None
+    ) -> tuple[AgentcoreWorker, Any, list[str]]:
+        client = client or fake_client()
+        regions: list[str] = []
+
+        def create_client(region: str) -> Any:
+            regions.append(region)
+            return client
+
+        worker = start_agentcore_worker(
+            handler=handler,
+            logger=logger,
+            create_client=create_client,
+            host="127.0.0.1",
+            port=0,
+        )
+        workers.append(worker)
+        return worker, client, regions
+
+    yield _start
+    for worker in workers:
+        worker.close()
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Make each read of the worker's clock return the next second, from
+    100. The list holds the values that the worker read."""
+    reads: list[int] = []
+
+    def now() -> int:
+        reads.append(100 + len(reads))
+        return reads[-1]
+
+    monkeypatch.setattr(worker_module, "_now", now)
+    return reads
+
+
+def ping(worker: AgentcoreWorker) -> Any:
+    status, answer = request(worker, "GET", "/ping")
+    assert status == 200
+    return answer
+
+
+def test_ping_keeps_the_start_time_while_the_status_stays(
+    start: Any, clock: list[int]
+) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+
+    first = ping(worker)
+    second = ping(worker)
+
+    assert first == {"status": "Healthy", "time_of_last_update": 100}
+    assert second == first
+    assert clock == [100]
+
+
+def test_ping_changes_the_time_when_the_first_job_starts_and_the_last_ends(
+    start: Any, clock: list[int]
+) -> None:
+    release = threading.Event()
+    started = threading.Semaphore(0)
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        started.release()
+        assert release.wait(WAIT)
+        return "done"
+
+    worker, client, _ = start(handler)
+    assert request(worker, "POST", "/invocations", job_body("cb-1")) == (
+        200,
+        {"accepted": True},
+    )
+    assert started.acquire(timeout=WAIT)
+    busy = ping(worker)
+    # A second job while one runs does not change the status.
+    request(worker, "POST", "/invocations", job_body("cb-2"))
+    assert started.acquire(timeout=WAIT)
+    still_busy = ping(worker)
+    release.set()
+    assert worker.idle(WAIT)
+    healthy = ping(worker)
+
+    assert busy == {"status": "HealthyBusy", "time_of_last_update": 101}
+    assert still_busy == busy
+    assert healthy == {"status": "Healthy", "time_of_last_update": 102}
+    assert ping(worker) == healthy
+    assert client.names() == ["success", "success"]
+
+
+def test_reports_the_result_to_the_callback_of_the_job(start: Any) -> None:
+    seen: list[AgentcoreJobContext] = []
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        seen.append(context)
+        return {"sum": job_input["n"] + 1}
+
+    worker, client, regions = start(handler)
+    status, _ = request(
+        worker,
+        "POST",
+        "/invocations",
+        job_body(),
+        {"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": "s" * 36},
+    )
+
+    assert status == 200
+    assert worker.idle(WAIT)
+    assert client.calls == [("success", {"CallbackId": "cb-1", "Result": b'{"sum":3}'})]
+    assert regions == ["us-west-2"]
+    [context] = seen
+    assert context.callback_id == "cb-1"
+    assert context.session_id == "s" * 36
+    assert context.region == "us-west-2"
+
+
+def test_reports_the_error_of_a_failed_job(start: Any) -> None:
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        msg = "3 tests failed"
+        raise RuntimeError(msg)
+
+    worker, client, _ = start(handler)
+    request(worker, "POST", "/invocations", job_body())
+
+    assert worker.idle(WAIT)
+    assert client.calls == [
+        (
+            "failure",
+            {
+                "CallbackId": "cb-1",
+                "Error": {
+                    "ErrorType": "RuntimeError",
+                    "ErrorMessage": "3 tests failed",
+                },
+            },
+        )
+    ]
+
+
+def test_reports_a_result_that_is_not_json_as_a_failure(start: Any) -> None:
+    worker, client, _ = start(lambda job_input, context: {1, 2})
+    request(worker, "POST", "/invocations", job_body())
+
+    assert worker.idle(WAIT)
+    [(name, call)] = client.calls
+    assert name == "failure"
+    assert call["Error"]["ErrorType"] == "ResultSerializationError"
+
+
+def test_runs_a_repeated_callback_id_once(start: Any) -> None:
+    runs: list[str] = []
+    release = threading.Event()
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        runs.append(context.callback_id)
+        assert release.wait(WAIT)
+        return None
+
+    worker, client, _ = start(handler)
+    # The second request arrives while the job runs, the third after it ended.
+    assert request(worker, "POST", "/invocations", job_body())[1] == {"accepted": True}
+    assert request(worker, "POST", "/invocations", job_body())[1] == {"accepted": True}
+    release.set()
+    assert worker.idle(WAIT)
+    assert request(worker, "POST", "/invocations", job_body())[1] == {"accepted": True}
+    assert worker.idle(WAIT)
+
+    assert runs == ["cb-1"]
+    assert client.names() == ["success"]
+
+
+def test_sends_heartbeats_for_a_job_with_a_heartbeat_timeout(
+    fake_client: Any, logger: Any
+) -> None:
+    release = threading.Event()
+    client = fake_client()
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        assert release.wait(WAIT)
+        return None
+
+    worker = start_agentcore_worker(
+        handler=handler,
+        logger=logger,
+        create_client=lambda region: client,
+        heartbeat_interval_seconds=0.05,
+        host="127.0.0.1",
+        port=0,
+    )
+    try:
+        request(worker, "POST", "/invocations", job_body(heartbeatTimeoutSeconds=60))
+        deadline = threading.Event()
+        for _ in range(200):
+            if client.names().count("heartbeat") >= 2:
+                break
+            deadline.wait(0.05)
+        release.set()
+        assert worker.idle(WAIT)
+    finally:
+        worker.close()
+
+    names = client.names()
+    assert names.count("heartbeat") >= 2
+    # Heartbeats continue while the worker reports the outcome. So a
+    # heartbeat can follow the success call.
+    assert names.count("success") == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        job_body(version=2),
+        {"version": 1, "region": "us-west-2"},
+        {"version": 1, "callbackId": "cb-1"},
+        job_body(heartbeatTimeoutSeconds=0),
+    ],
+)
+def test_rejects_a_job_request_that_does_not_match_the_contract(
+    start: Any, body: Any
+) -> None:
+    runs: list[Any] = []
+    worker, client, _ = start(lambda job_input, context: runs.append(job_input))
+
+    status, answer = request(worker, "POST", "/invocations", body)
+
+    assert status == 400
+    assert "error" in answer
+    assert worker.idle(WAIT)
+    assert runs == []
+    assert client.calls == []
+
+
+def test_answers_404_for_another_path(start: Any) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+
+    assert request(worker, "GET", "/other")[0] == 404
+    assert request(worker, "POST", "/ping", {})[0] == 404
+
+
+def test_refuses_an_async_handler() -> None:
+    async def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        return None
+
+    with pytest.raises(TypeError, match="async"):
+        start_agentcore_worker(handler=handler, host="127.0.0.1", port=0)  # type: ignore[arg-type]
+
+
+def test_refuses_a_handler_that_is_not_callable() -> None:
+    with pytest.raises(TypeError, match="callable"):
+        start_agentcore_worker(handler="job", host="127.0.0.1", port=0)  # type: ignore[arg-type]
+
+
+def test_wait_returns_after_close(start: Any) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+
+    assert not worker.wait(0)
+    worker.close()
+    worker.close()
+    assert worker.wait(0)
+
+
+def test_refuses_an_object_whose_call_is_async() -> None:
+    class Handler:
+        async def __call__(self, job_input: Any, context: AgentcoreJobContext) -> Any:
+            return None
+
+    with pytest.raises(TypeError, match="async"):
+        start_agentcore_worker(handler=Handler(), host="127.0.0.1", port=0)  # type: ignore[arg-type]
+
+
+def test_answers_500_and_forgets_a_job_whose_thread_did_not_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The thread starts before the answer. So a failed start answers 500,
+    # and the worker forgets the job. A later delivery of the same job then
+    # runs it.
+    runs: list[Any] = []
+    worker, client, _ = start(lambda job_input, context: runs.append(job_input))
+    original = threading.Thread.start
+
+    def fail_job_threads(self: threading.Thread) -> None:
+        if self.name.startswith("agentcore-job-"):
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_job_threads)
+    assert request(worker, "POST", "/invocations", job_body())[0] == 500
+    monkeypatch.setattr(threading.Thread, "start", original)
+
+    assert ping(worker)["status"] == "Healthy"
+    assert "could not start the job's thread" in logger.messages("error")
+    assert runs == []
+    assert client.calls == []
+
+    assert request(worker, "POST", "/invocations", job_body())[0] == 200
+    assert worker.idle(WAIT)
+    assert runs == [{"n": 2}]
+    assert client.names() == ["success"]
+
+
+def test_starts_the_handler_only_after_the_answer_is_written(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The answer takes 0.3 seconds to write. A handler that started before
+    # the answer was written would record an earlier time.
+    events: list[str] = []
+    original = worker_module._Exchange.respond  # noqa: SLF001
+
+    def slow_respond(self: Any, status: int, body: Any) -> None:
+        if body == {"accepted": True}:
+            time.sleep(0.3)
+            original(self, status, body)
+            events.append("answered")
+            return
+        original(self, status, body)
+
+    monkeypatch.setattr(worker_module._Exchange, "respond", slow_respond)  # noqa: SLF001
+    worker, _, _ = start(lambda job_input, context: events.append("handler"))
+
+    assert request(worker, "POST", "/invocations", job_body())[0] == 200
+    assert worker.idle(WAIT)
+
+    assert events == ["answered", "handler"]
+
+
+def test_forgets_the_oldest_finished_job_after_the_limit(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "MAX_FINISHED_JOBS", 1)
+    runs: list[str] = []
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        runs.append(context.callback_id)
+
+    worker, _, _ = start(handler)
+    for callback_id in ("cb-1", "cb-2", "cb-1"):
+        request(worker, "POST", "/invocations", job_body(callback_id))
+        assert worker.idle(WAIT)
+
+    assert runs == ["cb-1", "cb-2", "cb-1"]
+
+
+def test_logs_a_job_whose_client_cannot_be_created(
+    logger: Any,
+) -> None:
+    def create_client(region: str) -> Any:
+        msg = "no credentials"
+        raise RuntimeError(msg)
+
+    worker = start_agentcore_worker(
+        handler=lambda job_input, context: None,
+        logger=logger,
+        create_client=create_client,
+        host="127.0.0.1",
+        port=0,
+    )
+    try:
+        assert request(worker, "POST", "/invocations", job_body())[0] == 200
+        assert worker.idle(WAIT)
+        assert ping(worker)["status"] == "Healthy"
+    finally:
+        worker.close()
+
+    assert logger.messages("error") == ["job failed inside the worker"]
+
+
+def test_creates_its_own_reporter_without_create_client(
+    fake_client: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = fake_client()
+    regions: list[str] = []
+
+    def create(callback_id: str, region: str, *, logger: Any = None) -> Any:
+        regions.append(region)
+        return CallbackReporter(callback_id, client, logger=logger)
+
+    monkeypatch.setattr(worker_module.CallbackReporter, "create", create)
+    worker = start_agentcore_worker(
+        handler=lambda job_input, context: "done",
+        logger=logger,
+        host="127.0.0.1",
+        port=0,
+    )
+    try:
+        request(worker, "POST", "/invocations", job_body())
+        assert worker.idle(WAIT)
+    finally:
+        worker.close()
+
+    assert regions == ["us-west-2"]
+    assert client.names() == ["success"]
+
+
+def test_does_not_report_a_job_whose_callback_is_gone(
+    fake_client: Any, make_error: Any, logger: Any
+) -> None:
+    # The first heartbeat finds the callback closed. The worker then sets
+    # context.cancelled, and does not report the handler's outcome.
+    client = fake_client(make_error("CallbackTimeoutException"))
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        assert context.cancelled.wait(WAIT)
+        return "late"
+
+    worker = start_agentcore_worker(
+        handler=handler,
+        logger=logger,
+        create_client=lambda region: client,
+        heartbeat_interval_seconds=0.05,
+        host="127.0.0.1",
+        port=0,
+    )
+    try:
+        request(worker, "POST", "/invocations", job_body(heartbeatTimeoutSeconds=60))
+        assert worker.idle(WAIT)
+    finally:
+        worker.close()
+
+    assert client.names() == ["heartbeat"]
+    assert "job outcome not reported: the callback is gone" in logger.messages(
+        "warning"
+    )
+
+
+def test_logs_an_outcome_that_could_not_be_reported(
+    fake_client: Any, make_error: Any, logger: Any
+) -> None:
+    client = fake_client(make_error("AccessDeniedException", 403))
+    worker = start_agentcore_worker(
+        handler=lambda job_input, context: "done",
+        logger=logger,
+        create_client=lambda region: client,
+        host="127.0.0.1",
+        port=0,
+    )
+    try:
+        request(worker, "POST", "/invocations", job_body())
+        assert worker.idle(WAIT)
+    finally:
+        worker.close()
+
+    assert client.names() == ["success"]
+    assert logger.messages("error") == ["job outcome could not be reported"]
+
+
+def test_the_contract_constants_are_the_agentcore_host_and_port() -> None:
+    assert worker_module.AGENTCORE_HOST == "0.0.0.0"  # noqa: S104
+    assert worker_module.AGENTCORE_PORT == 8080
+    parameters = inspect.signature(start_agentcore_worker).parameters
+    assert parameters["port"].default == 8080
+    assert parameters["host"].default is None
+
+
+def test_default_host_is_loopback_outside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENTCORE_RUNTIME_URL", raising=False)
+
+    assert worker_module.default_host() == "127.0.0.1"
+
+
+def test_default_host_is_all_interfaces_inside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENTCORE_RUNTIME_URL", "http://127.0.0.1:9000")
+
+    assert worker_module.default_host() == "0.0.0.0"  # noqa: S104
+
+
+def test_binds_loopback_without_a_host_outside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENTCORE_RUNTIME_URL", raising=False)
+    worker = start_agentcore_worker(handler=lambda job_input, context: None, port=0)
+    try:
+        assert worker._server.server_address[0] == "127.0.0.1"  # noqa: SLF001
+        assert ping(worker)["status"] == "Healthy"
+    finally:
+        worker.close()
+
+
+def test_binds_the_explicit_host_inside_agentcore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENTCORE_RUNTIME_URL", "http://127.0.0.1:9000")
+    worker = start_agentcore_worker(
+        handler=lambda job_input, context: None, host="127.0.0.1", port=0
+    )
+    try:
+        assert worker._server.server_address[0] == "127.0.0.1"  # noqa: SLF001
+    finally:
+        worker.close()
+
+
+def test_listens_with_a_backlog_of_511(start: Any) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+
+    assert worker._server.request_queue_size == 511  # noqa: SLF001
+
+
+def test_handle_error_prints_no_traceback_for_a_reset_connection(
+    start: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+    server = worker._server  # noqa: SLF001
+
+    try:
+        raise ConnectionResetError
+    except ConnectionError:
+        server.handle_error(None, ("127.0.0.1", 1))
+    assert capsys.readouterr().err == ""
+    try:
+        raise ValueError("boom")  # noqa: EM101, TRY003
+    except ValueError:
+        server.handle_error(None, ("127.0.0.1", 1))
+    assert "ValueError: boom" in capsys.readouterr().err
+
+
+def test_fails_the_callback_when_the_heartbeats_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs: list[Any] = []
+
+    def fail_start(*args: Any, **kwargs: Any) -> Any:
+        msg = "can't start new thread"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(worker_module.Heartbeats, "start", fail_start)
+    worker, client, _ = start(lambda job_input, context: runs.append(job_input))
+
+    assert request(worker, "POST", "/invocations", job_body())[1] == {"accepted": True}
+    assert worker.idle(WAIT)
+    assert runs == []
+    assert client.calls == [
+        (
+            "failure",
+            {
+                "CallbackId": "cb-1",
+                "Error": {
+                    "ErrorType": "RuntimeError",
+                    "ErrorMessage": "can't start new thread",
+                },
+            },
+        )
+    ]
+    assert logger.messages("error") == ["could not start the job's heartbeats"]
+
+
+class _SlowSet(set[str]):
+    """A set whose membership check reads the set, then waits 0.2 seconds.
+
+    Two requests that check without a lock both read the set before either
+    adds the callback ID. So both would run the job. The worker's lock makes
+    the second check wait for the first add.
+    """
+
+    def __contains__(self, item: object) -> bool:
+        found = super().__contains__(item)
+        time.sleep(0.2)
+        return found
+
+
+def test_two_concurrent_deliveries_of_one_job_run_it_once(start: Any) -> None:
+    runs: list[str] = []
+    release = threading.Event()
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        runs.append(context.callback_id)
+        assert release.wait(WAIT)
+
+    worker, client, _ = start(handler)
+    worker._runner._running = _SlowSet()  # noqa: SLF001
+    answers: list[Any] = []
+    threads = [
+        threading.Thread(
+            target=lambda: answers.append(
+                request(worker, "POST", "/invocations", job_body())
+            )
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(WAIT)
+    release.set()
+    assert worker.idle(WAIT)
+
+    assert answers == [(200, {"accepted": True})] * 2
+    assert runs == ["cb-1"]
+    assert client.names() == ["success"]
