@@ -204,3 +204,13 @@ def test_original_peer_cannot_expire_while_waiting_for_recovery_completion(monke
     with pytest.raises(PlacementError, match="Original healthy peer expired"):
         driver.execute()
     assert ("release", driver.gate("peer")) not in cloud.actions
+
+
+def test_expired_victim_does_not_start_a_peer_or_arm_the_fault(monkeypatch):
+    driver, cloud = recovery_driver(monkeypatch)
+    driver.start()
+    cloud.now = cloud.invocations[0]["deadline"] + 1
+    with pytest.raises(PlacementError, match="Original victim expired"):
+        driver.place()
+    assert [item["marker"] for item in cloud.invocations] == ["victim"]
+    assert ("release", driver.gate("prepare")) not in cloud.actions

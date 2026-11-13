@@ -23,6 +23,11 @@ def test_preparation_gate_precedes_fault_and_keeps_one_original_barrier(monkeypa
         assert not [
             e
             for e in ledger.observations()
+            if e["observation"]["kind"] == "barrier_arrived"
+        ]
+        assert not [
+            e
+            for e in ledger.observations()
             if e["observation"]["kind"] == "work_in_flight"
         ]
         ledger.objects[prefix + "prepare"] = b"release"
@@ -34,6 +39,13 @@ def test_preparation_gate_precedes_fault_and_keeps_one_original_barrier(monkeypa
     observations = [event["observation"] for event in ledger.observations()]
     barriers = [event for event in observations if event["kind"] == "barrier_arrived"]
     assert len(barriers) == 1 and barriers[0]["gateId"] == "prepare"
+    released = next(
+        e
+        for e in observations
+        if e["kind"] == "fault_released" and e["gateId"] == "prepare"
+    )
+    assert barriers[0]["atMs"] == released["atMs"]
+    assert prepared["atMs"] < barriers[0]["atMs"] <= fault["atMs"]
     checkpoint = next(
         event
         for event in observations

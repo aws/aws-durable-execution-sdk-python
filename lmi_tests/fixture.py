@@ -258,6 +258,17 @@ class Trace:
                     )
                     if on_release is not None:
                         on_release(released)
+                    if preparation and mode == "normal":
+                        # The driver releases preparation only after the peer
+                        # joined. This observes the cohort barrier within the
+                        # original invocations' overlap, not at early warm-up.
+                        observe(
+                            self,
+                            "barrier_arrived",
+                            gateId=name,
+                            atMs=released.observed_at_ms,
+                            source="cohort-admission",
+                        )
                     observe(
                         self,
                         "fault_released",
@@ -282,7 +293,7 @@ class Trace:
                         on_hold(held_at_ms)
                     self.emit("BLOCKED", gate=name)
                     observe(self, "blocked", gateId=name, atMs=held_at_ms)
-                    if preparation or not self.payload.get("preparation_gate"):
+                    if not preparation and not self.payload.get("preparation_gate"):
                         observe(self, "barrier_arrived", gateId=name, atMs=held_at_ms)
                     if self.payload["scenario"] == "deadline" and not preparation:
                         observe(self, "work_in_flight", gateId=name, atMs=held_at_ms)
