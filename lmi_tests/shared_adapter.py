@@ -10,6 +10,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from copy import deepcopy
 import hashlib
 from pathlib import Path
+import time
 from typing import Any, Protocol
 
 from aws_durable_execution_conformance_tests.lmi.coordinator import (
@@ -191,6 +192,29 @@ class SharedAdapter:
 
         return await case.call(collect)
 
+    async def collect_partial(self, context: ScenarioContext) -> dict[str, Any]:
+        """Retain a failed phase's facts before release, without awaiting cleanup."""
+        case = self._case(context)
+
+        def capture() -> dict[str, Any]:
+            cloud = case.driver.cloud
+            read_error = None
+            try:
+                cloud.collect(full_run=False)
+            except Exception as error:
+                read_error = (
+                    f"Partial source collection: {type(error).__name__}: {error}"
+                )
+            cloud.observation_ended_at = time.time()
+            partial = self.evidence_builder(context, cloud, phase="observations")
+            if read_error is not None:
+                partial.setdefault("collectionErrors", []).append(read_error)
+                partial.setdefault("collection", {})["watermarks"] = {}
+            cloud._save("shared-partial-evidence.json", partial)
+            return partial
+
+        return await case.call(capture)
+
     async def release(self, context: ScenarioContext) -> None:
         case = self.cases.get(context.scenario.case_id)
         if case is None:
@@ -210,6 +234,9 @@ class SharedAdapter:
             # The coordinator freezes observation evidence before fault release.
             # Only actual retirement facts may be appended by this phase.
             context.evidence["retirement"] = final.get("retirement", {})
+            # Fresh completion facts prove physical retirement separately; they
+            # must never replace the case's pre-release behavior observations.
+            context.retirement_evidence = final
             return complete
 
         return await case.call(retire)

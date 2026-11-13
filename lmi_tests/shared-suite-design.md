@@ -70,7 +70,7 @@ claim to fix the open runtime deadline/cleanup defects tracked by Python #741.
 ## Reviewable decisions and limits
 
 - This PR targets current main, reuses the Python #743 harness, and does not modify that PR's branch.
-- Conformance is pinned to PR #186 revision `6f899679c7eb6ede836c737acb9816e6fd7072fd`.
+- Conformance is pinned to PR #186 revision `86bcaff49829351b25a1b1ae76f6d6483d37df83`.
 - The default target is the Python-specific 76-cell matrix plus the portable
   24-cell exporter matrix; it does not imply ordinary SDK/OTel suite acceptance
   on LMI or acceptance against the separate standard profile.
@@ -93,3 +93,27 @@ Native timeout and wrapper return are independent outcomes. Deadline measurement
 are frozen before cleanup releases the held step; cleanup cannot repair failed
 behavior assertions. The shared error expectations explicitly enumerate allowed
 service statuses where a measurement may precede execution termination.
+
+## Retained cloud evidence corrections
+
+The shared reader selects the declared held-work gate when the Python fixture
+also records a winner-admission handshake. Execution-view operation spans that
+cross a resume need matching service operation identity, status and timestamps;
+the adapter retains the first actual service start and final terminal timestamp.
+Per-request export records remain intact even when one logical span is delivered
+again. Contradictory span observations remain failures.
+
+Deadline snapshots are read from the persisted pre-release measurement and bound
+to the original case, execution, selected requests and declared time budgets.
+The full event ledger remains available. Measurement does not authorize new user
+work or SDK dispatch after the deadline cutoff; completion of already dispatched
+requests is accounted for separately from the controller's normal fault release.
+
+A failed phase can provide a read-only partial collection before release. Its
+original errors and incomplete behavior evidence stay in the report. The adapter
+also supplies a separate post-cleanup retirement snapshot, with the actual final
+read boundary. The shared coordinator independently checks every journaled launch,
+known resource and completed task/request/export before allowing reuse. A missing
+required role remains a test failure, while an unidentifiable actual launch or
+unsettled work retains quarantine. An adapter's boolean retirement result alone
+cannot make a failed case safe or turn it into a passing case.

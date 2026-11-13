@@ -201,6 +201,25 @@ class CaseSources:
                 if "ParentId" in raw:
                     operation["parentId"] = raw["ParentId"]
                 details = raw.get(event_type + "Details", {})
+                # Service operation lifetime is independent of native invocation
+                # and exporter timing. A retry cannot replace its original start.
+                if (
+                    event_type in {prefix + "Started" for prefix in _OPERATION_TYPES}
+                    and raw.get("EventTimestamp") is not None
+                ):
+                    started_at = _milliseconds(raw["EventTimestamp"])
+                    operation["startedAtMs"] = min(
+                        operation.get("startedAtMs", started_at), started_at
+                    )
+                if (
+                    any(
+                        event_type.endswith(suffix)
+                        for suffix in ("Succeeded", "Failed", "TimedOut", "Stopped")
+                    )
+                    and raw.get("EventTimestamp") is not None
+                ):
+                    ended_at = _milliseconds(raw["EventTimestamp"])
+                    operation["endedAtMs"] = ended_at
                 if event_type.endswith("Succeeded"):
                     operation["status"] = "SUCCEEDED"
                     result = details.get("Result", info.get("serializedResult"))
@@ -213,6 +232,8 @@ class CaseSources:
                     )
                 elif event_type.endswith("TimedOut"):
                     operation["status"] = "TIMED_OUT"
+                elif event_type.endswith("Stopped"):
+                    operation["status"] = "STOPPED"
             result = self.cloud.execution_results[arn]
             started = result.get("StartTimestamp")
             if started is None:
@@ -431,6 +452,57 @@ def _quiescent(request: str, events: list[dict[str, Any]], *, telemetry: bool) -
     )
 
 
+def _deadline_measurement(
+    context: ScenarioContext, cloud: Cloud, selected: Mapping[str, str]
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Read the persisted pre-release measurement without discarding full events."""
+    path = cloud.artifacts_dir / "measurements/deadline.json"
+    in_memory = getattr(cloud, "deadline_measurement", None)
+    if not path.exists():
+        if in_memory is not None:
+            return None, ["Pre-release deadline measurement file is missing"]
+        return None, []  # Legacy sources retain the strict full-tail validator.
+    try:
+        recorded = json.loads(path.read_text())
+        victim = next(
+            item for item in cloud.invocations if item.get("role") == "victim"
+        )
+        expected = {
+            "runId": context.run_id,
+            "caseId": context.scenario.case_id,
+            "cohortId": context.scenario.cohort_id,
+            "scenario": context.scenario.scenario,
+            "executionArn": victim["arn"],
+            "selectedRequests": dict(selected),
+        }
+        if not isinstance(recorded, dict) or any(
+            recorded.get(key) != value for key, value in expected.items()
+        ):
+            raise ValueError(
+                "stored measurement belongs to another run, case or original cohort"
+            )
+        fields = (
+            "selectedRequests",
+            "deadlineAtMs",
+            "cleanupCutoffAtMs",
+            "observationCutoffAtMs",
+            "observedAtMs",
+        )
+        if in_memory is not None and (
+            not isinstance(in_memory, Mapping)
+            or any(in_memory.get(key) != recorded.get(key) for key in fields)
+        ):
+            raise ValueError(
+                "in-memory and persisted measurement identities/bounds differ"
+            )
+        return {
+            **{key: recorded[key] for key in fields},
+            "sourceEvidenceUri": path.resolve().as_uri(),
+        }, []
+    except (OSError, ValueError, KeyError, StopIteration, TypeError) as error:
+        return None, [f"Invalid pre-release deadline measurement: {error}"]
+
+
 def build_evidence(
     context: ScenarioContext, cloud: Cloud, *, phase: str = "observations"
 ) -> dict[str, Any]:
@@ -440,7 +512,11 @@ def build_evidence(
     attempts, selected, attempt_errors = sources.attempts(events)
     errors.extend(history_errors + attempt_errors)
     _causal_order(events)
-    ended = (cloud.observation_ended_at or 0) * 1000
+    # The final snapshot describes actual retirement collection, independently
+    # of a failed phase's earlier (possibly incomplete) observation window.
+    ended = (
+        (cloud.retired_at if phase == "final" else cloud.observation_ended_at) or 0
+    ) * 1000
     complete = bool(attempts) and all(
         _quiescent(
             item["requestId"], events, telemetry=context.scenario.otel_view is not None
@@ -538,6 +614,13 @@ def build_evidence(
                 "late-operation",
             }:
                 evidence["regression"]["gateId"] = victim["marker"] + suffix
+        if context.scenario.scenario in _ACTIVE_FAULTS:
+            measurement, measurement_errors = _deadline_measurement(
+                context, cloud, selected
+            )
+            errors.extend(measurement_errors)
+            if measurement is not None:
+                evidence["regression"]["deadlineMeasurement"] = measurement
         if context.scenario.scenario in {"warm-lifecycle", "otel-warm-lifecycle"}:
             evidence["regression"]["warmSequence"] = [
                 {"executionArn": item["arn"], "fixture": item["payload"]["scenario"]}
@@ -683,5 +766,7 @@ def build_evidence(
                 for fault in faults
             ],
         }
+    if errors:
+        evidence["collection"]["watermarks"] = {}
     cloud._save(f"shared-{phase}-evidence.json", evidence)
     return evidence

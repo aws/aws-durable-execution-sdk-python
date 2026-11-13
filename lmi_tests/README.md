@@ -2,7 +2,7 @@
 
 The cloud entry point is now the shared runner from
 [conformance PR #186](https://github.com/aws/aws-durable-execution-conformance-tests/pull/186),
-pinned to `6f899679c7eb6ede836c737acb9816e6fd7072fd`. The Python adapter runs
+pinned to `86bcaff49829351b25a1b1ae76f6d6483d37df83`. The Python adapter runs
 `python-lifecycle` (76 cells) and `export-lifecycle` (24 cells) against the same
 persistent c1/c2 functions. The latter covers both OTel views with synchronous
 export and asynchronous export with a bounded flush wait. Shared requirements,
@@ -31,7 +31,7 @@ Use Python 3.14 and Hatch from the repository root:
 ```sh
 # Check out the exact shared runner revision first.
 gh repo clone aws/aws-durable-execution-conformance-tests .conformance
-git -C .conformance checkout 6f899679c7eb6ede836c737acb9816e6fd7072fd
+git -C .conformance checkout 86bcaff49829351b25a1b1ae76f6d6483d37df83
 hatch run lmi:shared-setup
 hatch run lmi:shared-tests
 hatch run lmi:lint
@@ -125,9 +125,13 @@ public SDK and local checkpoint service; they do not establish LMI recovery.
 A non-expiring conditional S3 ownership record under `ownership/<stack>/` fences
 updates to the shared functions. Case controls live under separate run/case
 prefixes. Normal completion releases ownership only when both profiles prove
-quiescence. Interrupted or unproven retirement retains ownership for reconciliation;
-`shared-cleanup` releases only that run's recorded controls and executions and
-cannot turn an unknown retirement into success. Do not delete the record merely
+quiescence. A failed case retains its original observations and errors. Available partial
+observations are captured before fault release; a separate final snapshot can
+prove that every actual launch and owned task/request/export has settled. Only
+that independent audit permits later cases to reuse the target. Interrupted or
+unproven retirement retains ownership for reconciliation; `shared-cleanup`
+releases only that run's recorded controls and executions and cannot turn an
+unknown retirement into success. Do not delete the record merely
 to bypass a blocked deployment.
 
 The fixture's asynchronous processor waits up to five seconds through the real
