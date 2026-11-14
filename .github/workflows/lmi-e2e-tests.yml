@@ -1,0 +1,35 @@
+name: LMI e2e tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Region containing the test LMI capacity provider
+        default: us-west-2
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    permissions:
+      contents: read
+      id-token: write
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/lmi-lifecycle.yml@56e7e444457653775579c120469d931b71c8cfd8
+    with:
+      conformance-ref: 56e7e444457653775579c120469d931b71c8cfd8
+      sdk-script: .github/scripts/lmi-ci.sh
+      runtime-label: Python 3.14
+      lambda-runtime: python3.14
+      stack-name: python-lmi-e2e
+      region: ${{ inputs.region || 'us-west-2' }}
+    secrets:
+      TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
+      TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
+      CAPACITY_PROVIDER_ARN: ${{ secrets.CAPACITY_PROVIDER_ARN }}
