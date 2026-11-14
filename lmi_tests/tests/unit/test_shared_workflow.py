@@ -1,105 +1,8 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-"""Cloud acceptance must use the same pinned runner as local adapter tests."""
-
 from pathlib import Path
-import tomllib
-
 import yaml
-
 from lmi_tests.shared_contract import CONFORMANCE_REVISION
 
 ROOT = Path(__file__).resolve().parents[3]
-
-
-def test_cloud_workflow_uses_pinned_shared_acceptance_and_final_cleanup():
-    workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/lmi-e2e-tests.yml").read_text()
-    )
-    assert workflow["env"]["CONFORMANCE_REVISION"] == CONFORMANCE_REVISION
-    assert "workflow_dispatch" in workflow["jobs"]["cloud"]["if"]
-    for job in workflow["jobs"].values():
-        checkout = next(
-            step
-            for step in job["steps"]
-            if step.get("with", {}).get("repository")
-            == "aws/aws-durable-execution-conformance-tests"
-        )
-        assert checkout["with"]["ref"] == "${{ env.CONFORMANCE_REVISION }}"
-        assert any(
-            step.get("run") == "hatch run lmi:shared-setup" for step in job["steps"]
-        )
-    steps = workflow["jobs"]["cloud"]["steps"]
-    acceptance = next(
-        step for step in steps if step.get("run") == "hatch run lmi:shared"
-    )
-    assert acceptance["timeout-minutes"] == 60
-    cleanup = next(
-        step for step in steps if "lmi:shared-cleanup" in step.get("run", "")
-    )
-    assert cleanup["if"] == "always()"
-    assert not any("lmi:cloud" in step.get("run", "") for step in steps)
-    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["hatch"][
-        "envs"
-    ]["lmi"]["scripts"]
-    assert scripts["shared"].startswith("python -m lmi_tests.shared run")
-    assert scripts["shared-cleanup"].startswith("python -m lmi_tests.shared cleanup")
-
-
-def test_codebuild_runner_has_isolated_python_and_keeps_untrusted_prs_hosted():
-    workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/lmi-e2e-tests.yml").read_text()
-    )
-    assert workflow["jobs"]["harness"]["runs-on"] == (
-        "${{ github.event_name == 'pull_request' && "
-        "(github.event.pull_request.head.repo.full_name != github.repository || "
-        "github.actor == 'dependabot[bot]') && 'ubuntu-latest' || "
-        "format('codebuild-github-actions-runner-{0}-{1}', "
-        "github.run_id, github.run_attempt) }}"
-    )
-    assert workflow["jobs"]["cloud"]["runs-on"] == (
-        "codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}"
-    )
-    assert workflow["env"]["PIP_CONFIG_FILE"] == "/dev/null"
-    assert workflow["env"]["PYTHONPATH"] == ""
-    for job in workflow["jobs"].values():
-        setup = next(
-            step
-            for step in job["steps"]
-            if step.get("uses", "").startswith("astral-sh/setup-uv@")
-        )
-        assert setup["with"]["python-version"] == "3.14"
-        assert setup["with"]["activate-environment"] is True
-        assert any(
-            step.get("run") == "uv pip install hatch==1.16.5" for step in job["steps"]
-        )
-        assert not any(
-            step.get("uses", "").startswith("actions/setup-python@")
-            for step in job["steps"]
-        )
-
-
-def test_cloud_runs_automatically_for_trusted_prs_and_supports_manual_dispatch():
-    workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/lmi-e2e-tests.yml").read_text()
-    )
-    triggers = workflow.get("on", workflow.get(True))
-    assert set(triggers["pull_request"]["types"]) == {
-        "opened",
-        "synchronize",
-        "reopened",
-    }
-    assert "workflow_dispatch" in triggers
-    cloud = workflow["jobs"]["cloud"]
-    assert cloud["if"] == (
-        "github.actor != 'dependabot[bot]' && "
-        "(github.event_name == 'workflow_dispatch' || "
-        "(github.event_name == 'pull_request' && "
-        "github.event.pull_request.head.repo.full_name == github.repository))"
-    )
-    assert cloud["needs"] == "harness"
-    assert cloud["concurrency"]["group"] == "lmi-e2e-shared-capacity-provider"
-    assert cloud["concurrency"]["cancel-in-progress"] is False
 
 
 def test_shared_setup_bootstraps_before_conformance_is_installed():
@@ -134,3 +37,70 @@ def test_shared_setup_bootstraps_before_conformance_is_installed():
         timeout=20,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_workflow_calls_the_pinned_shared_definition():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/lmi-e2e-tests.yml").read_text()
+    )
+    caller = workflow["jobs"]["lifecycle"]
+    assert list(workflow["jobs"]) == ["lifecycle"]
+    assert (
+        caller["uses"]
+        == f"aws/aws-durable-execution-conformance-tests/.github/workflows/lmi-lifecycle.yml@{CONFORMANCE_REVISION}"
+    )
+    assert caller["with"]["conformance-ref"] == CONFORMANCE_REVISION
+    assert (ROOT / caller["with"]["sdk-script"]).is_file()
+    assert set(caller["secrets"]) == {
+        "TEST_ROLE_ARN",
+        "TEST_ACCOUNT_ID",
+        "TEST_LAMBDA_EXECUTION_ROLE_ARN",
+        "CAPACITY_PROVIDER_ARN",
+    }
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers["pull_request"]["types"]) == {
+        "opened",
+        "synchronize",
+        "reopened",
+    }
+    assert "workflow_dispatch" in triggers
+
+
+def test_stage_dispatch_propagates_failure_and_preserves_deployment_identity(tmp_path):
+    import os
+    import subprocess
+
+    fake = tmp_path / "hatch"
+    fake.write_text(
+        '#!/bin/bash\nprintf "%s\\n" "$@" > "$CALL_LOG"\nexit "${HATCH_RESULT:-0}"\n'
+    )
+    fake.chmod(0o755)
+    calls = tmp_path / "calls.txt"
+    env = {
+        **os.environ,
+        "PATH": str(tmp_path) + ":" + os.environ["PATH"],
+        "CALL_LOG": str(calls),
+        "LMI_SHARED_RUN_ID": "123-2",
+        "LMI_RUNTIME": "python3.14",
+        "LMI_STACK_NAME": "python-lmi-e2e",
+    }
+    script = ROOT / ".github/scripts/lmi-ci.sh"
+    subprocess.run(["bash", str(script), "deploy"], env=env, check=True)
+    assert calls.read_text().splitlines() == [
+        "run",
+        "lmi:python",
+        "-m",
+        "lmi_tests.deploy",
+        "deploy",
+        "--run-id",
+        "123-2",
+        "--runtime",
+        "python3.14",
+        "--stack-name",
+        "python-lmi-e2e",
+    ]
+    failed = subprocess.run(
+        ["bash", str(script), "run"], env={**env, "HATCH_RESULT": "17"}, check=False
+    )
+    assert failed.returncode == 17
+    assert calls.read_text().splitlines() == ["run", "lmi:shared"]

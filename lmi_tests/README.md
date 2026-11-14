@@ -16,9 +16,12 @@ shared matrix directly rather than maintaining a second requirement catalog.
 | `lmi-lifecycle-6` | `warm-reuse` | c1 | victim, warm |
 | `lmi-lifecycle-7` | `normal-failure` | c1 | victim |
 
-The shared runner owns assertions, strict reports, placement identity, per-case
-scheduling, launch journals and independent retirement auditing. This repository owns the
-real public SDK handlers, AWS transport, source observations and deployment.
+The shared package owns assertions, AWS transport, persistent deployment, scenario
+choreography, source normalization, strict reports, scheduling and retirement.
+This repository owns the real Python SDK handlers, observation hooks, ZIP build
+and thin runtime bindings. The workflow definition also lives in the shared
+repository; `.github/workflows/lmi-e2e-tests.yml` calls its pinned
+`lmi-lifecycle.yml`, using `.github/scripts/lmi-ci.sh` for Python stage commands.
 OTel/exporter tests and the previous Python-specific matrix are deferred.
 There is no local conformance profile or validator that replaces a shared rule.
 
@@ -29,7 +32,7 @@ and check out the exact `CONFORMANCE_REVISION` from `shared_contract.py`:
 
 ```bash
 git clone https://github.com/aws/aws-durable-execution-conformance-tests.git .conformance
-git -C .conformance checkout --detach 15ea7714de3c06b6552c4bd33fd036272a7e800b
+git -C .conformance checkout --detach 56e7e444457653775579c120469d931b71c8cfd8
 hatch run lmi:shared-setup
 hatch run lmi:lint
 hatch run lmi:shared-tests
@@ -42,7 +45,9 @@ out core SDK and testing library; the Lambda bundle contains the core SDK and
 its dependencies plus fixture/observation modules. It does not include the OTel
 SDK, an OTel plugin, local catalogs, validators or the shared runner itself.
 
-Unit tests cover manifest completeness, case ownership, cancellation, source
+Python unit tests cover pinned workflow delegation, the Python artifact/manifest
+binding, fixture observations and bootstrap. Shared driver regression tests now
+live in the conformance repository and cover case ownership, cancellation, source
 normalization, driver ordering and cleanup. Local e2e tests use the actual public
 SDK and its in-process test service, replacing only AWS transport and evidence
 storage. They verify checkpoint/replay and preserve genuine admission failures.
@@ -112,7 +117,8 @@ invocation must find it in the same process; it observes the old callback using
 the original request identity. Failure to reuse that process is a placement or
 collection failure, not permission to select a replacement victim.
 
-`shared_evidence.py` normalizes retained observations into the shared schema.
+`shared_evidence.py` supplies Python error expectations and process identity to
+the shared source-evidence normalizer.
 Service payload wrappers are decoded consistently with checkpoint snapshots;
 truncated results are rejected. Replay compares a real resume's initial
 checkpoints to the final service history and counts actual user-function entries.

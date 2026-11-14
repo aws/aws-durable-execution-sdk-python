@@ -122,7 +122,9 @@ def test_shared_run_writes_reports_without_an_external_lock(monkeypatch, tmp_pat
     client = Mock(
         side_effect=AssertionError("Run orchestration must not acquire an AWS lock")
     )
-    monkeypatch.setattr(shared, "client", client)
+    from aws_durable_execution_conformance_tests.lmi import runner
+
+    monkeypatch.setattr(runner, "client", client)
     monkeypatch.setattr(app, "live_results", results)
     output = tmp_path / "run"
     assert shared.run(deployment(), output) == 0

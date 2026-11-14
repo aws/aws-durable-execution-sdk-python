@@ -6,8 +6,11 @@ Normal return is requirement 2; normal failure is requirement 7. There is no
 Python-owned replacement catalog, OTel profile or exporter matrix in this PR.
 
 The shared repository owns requirement descriptions, roles, minimum native
-concurrency, scheduling, behavior validators and strict result aggregation. The
-SDK repository maps each scenario to its real public API fixture and retains
+concurrency, scheduling, behavior validators, AWS transport, deployment, scenario
+driving, evidence normalization and strict result aggregation. It also owns the
+reusable `lmi-lifecycle.yml` workflow, called at the same pinned SHA as the shared
+package. The SDK repository keeps `.github/scripts/lmi-ci.sh` for Python toolchain
+and stage commands, and maps each scenario to its real public API fixture and retains
 source observations. `make_manifest` reads the shared matrix, uses c1 for
 single-worker cases and c2 for overlap/recovery, and preserves every required role.
 

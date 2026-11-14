@@ -4,37 +4,17 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any, Mapping
 
 CONFORMANCE_REPOSITORY = "aws/aws-durable-execution-conformance-tests"
 # Updated only with the matching reviewed shared evidence contract.
-CONFORMANCE_REVISION = "15ea7714de3c06b6552c4bd33fd036272a7e800b"
+CONFORMANCE_REVISION = "56e7e444457653775579c120469d931b71c8cfd8"
 
 
 def configuration_identity(deployment: Mapping[str, Any], key: str) -> str:
-    fields = (
-        "runtime",
-        "role",
-        "bucket",
-        "commit",
-        "run",
-        "provider",
-        "codeSha256",
-        "invocationTimeout",
-        "executionTimeout",
+    from aws_durable_execution_conformance_tests.lmi.configuration import (
+        configuration_identity as identity,
     )
-    configuration = {name: deployment[name] for name in fields}
-    configuration.update(
-        function=deployment["functions"][key],
-        nativeConcurrency=deployment["concurrencies"][key],
-        architecture="arm64",
-        memorySize=2048,
-        handler="lmi_tests.fixture.handler",
-        scaling={"MinExecutionEnvironments": 1, "MaxExecutionEnvironments": 1},
-    )
-    return (
-        "sha256:"
-        + hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
-    )
+    from lmi_tests.runtime import RUNTIME
+
+    return identity(deployment, key, RUNTIME)
