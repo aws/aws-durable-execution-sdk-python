@@ -232,7 +232,22 @@ class _JobRunner:
             exchange.respond(400, {"error": str(error)})
             return
         job = request.job
-        with self._lock:
+        session_id = exchange.header(SESSION_ID_HEADER)
+        # The thread waits on this event before it runs the handler. So a
+        # handler that holds the GIL does not delay the answer.
+        answered = threading.Event()
+        thread = threading.Thread(
+            target=self._run_job,
+            args=(job, request.region, session_id, answered),
+            name=f"agentcore-job-{job.callback_id[:16]}",
+            daemon=True,
+        )
+        start_error: Exception | None = None
+        # The ID check, the registration, and Thread.start() hold one lock. A
+        # duplicate request waits for the lock. So it sees the callback ID
+        # only after the start succeeded, and never answers 200 for a job
+        # whose start failed.
+        with self._changed:
             known = job.callback_id in self._running or job.callback_id in (
                 self._finished
             )
@@ -240,32 +255,25 @@ class _JobRunner:
                 if not self._running:
                     self._last_status_change = _now()
                 self._running.add(job.callback_id)
+                try:
+                    thread.start()
+                except Exception as error:  # noqa: BLE001
+                    # The job never ran. The callback ID is forgotten under
+                    # the same lock, so that a waiting duplicate or a later
+                    # delivery can run the job.
+                    start_error = error
+                    self._end_job_locked(job.callback_id, finished=False)
         if known:
             self._logger.info(
                 "ignored a repeated job", extra={"callbackId": job.callback_id}
             )
             exchange.respond(200, {"accepted": True})
             return
-        session_id = exchange.header(SESSION_ID_HEADER)
-        # The thread starts before the answer, so a failed start can answer
-        # 500. The thread waits on this event before it runs the handler. So
-        # a handler that holds the GIL does not delay the answer.
-        answered = threading.Event()
-        try:
-            threading.Thread(
-                target=self._run_job,
-                args=(job, request.region, session_id, answered),
-                name=f"agentcore-job-{job.callback_id[:16]}",
-                daemon=True,
-            ).start()
-        except Exception as error:  # noqa: BLE001
-            # The job never ran. The callback ID is forgotten, so that a
-            # later delivery of the same job can run it.
+        if start_error is not None:
             self._logger.error(
                 "could not start the job's thread",
-                extra={"callbackId": job.callback_id, "error": describe(error)},
+                extra={"callbackId": job.callback_id, "error": describe(start_error)},
             )
-            self._end_job(job.callback_id, finished=False)
             exchange.respond(500, {"error": "could not start the job"})
             return
         try:
@@ -275,14 +283,18 @@ class _JobRunner:
 
     def _end_job(self, callback_id: str, *, finished: bool) -> None:
         with self._changed:
-            self._running.discard(callback_id)
-            if not self._running:
-                self._last_status_change = _now()
-            if finished:
-                self._finished[callback_id] = None
-                if len(self._finished) > MAX_FINISHED_JOBS:
-                    self._finished.popitem(last=False)
-            self._changed.notify_all()
+            self._end_job_locked(callback_id, finished=finished)
+
+    def _end_job_locked(self, callback_id: str, *, finished: bool) -> None:
+        """Forget a running job. The caller holds the lock."""
+        self._running.discard(callback_id)
+        if not self._running:
+            self._last_status_change = _now()
+        if finished:
+            self._finished[callback_id] = None
+            if len(self._finished) > MAX_FINISHED_JOBS:
+                self._finished.popitem(last=False)
+        self._changed.notify_all()
 
     def _run_job(
         self,
@@ -434,8 +446,10 @@ def start_agentcore_worker(
        in process memory only. So a job runs once per process. A new
        process after the idle timeout runs a repeated job again, so the
        handler's side effects must be idempotent.
-    3. Otherwise starts the job's thread, and answers
-       ``{"accepted": true}``. The thread runs the handler only after the
+    3. Otherwise registers the callback ID and starts the job's thread
+       under one lock, and answers ``{"accepted": true}``. A duplicate
+       request waits for the lock, so it never gets 200 for a job whose
+       start failed. The thread runs the handler only after the
        answer is written. So a handler that holds the GIL does not delay
        the answer. A thread that cannot start gets HTTP 500, and the
        callback ID is forgotten, so that a later delivery can run the job.

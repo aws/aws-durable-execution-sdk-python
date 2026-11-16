@@ -195,7 +195,7 @@ The worker listens on port 8080, because AgentCore Runtime sends its requests to
 - Anywhere else, such as a laptop, the worker listens on `127.0.0.1`. The worker has no authentication, so it must not be reachable from the network.
 - A `host` argument overrides both.
 
-- `POST /invocations` reads the job document, starts the job's thread, and answers `{"accepted": true}` at once. The thread runs the handler only after the answer is written. A callback ID that the worker already accepted gets the same answer, and the job does not run again. A document that does not match the contract gets HTTP 400.
+- `POST /invocations` reads the job document. It checks and registers the callback ID and starts the job's thread under one lock, and then answers `{"accepted": true}` at once. The thread runs the handler only after the answer is written. A thread that cannot start gets HTTP 500, and the callback ID is forgotten. A duplicate request that arrives during the start waits for the lock. So it never gets 200 for a job whose start failed. A callback ID that the worker already accepted gets the same answer, and the job does not run again. A document that does not match the contract gets HTTP 400.
 - `GET /ping` answers `{"status": "HealthyBusy"}` while a job runs, and `{"status": "Healthy"}` otherwise. `time_of_last_update` holds the Unix time, in seconds, of the worker's start or of the last change of the status. It does not change between pings with the same status.
 - The job thread sends heartbeats when the job sets a heartbeat timeout, and then the success or failure callback.
 

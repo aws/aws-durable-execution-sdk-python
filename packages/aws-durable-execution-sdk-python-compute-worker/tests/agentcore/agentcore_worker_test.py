@@ -371,6 +371,60 @@ def test_answers_500_and_forgets_a_job_whose_thread_did_not_start(
     assert client.names() == ["success"]
 
 
+def test_a_duplicate_during_a_failing_start_never_gets_200(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first start blocks, and then fails. Every job thread start fails
+    # until the test restores it. A duplicate sent during the block must
+    # not get 200 for a job that never runs. It waits for the lock, and its
+    # own start then fails too.
+    runs: list[Any] = []
+    worker, client, _ = start(lambda job_input, context: runs.append(job_input))
+    original = threading.Thread.start
+    entered = threading.Event()
+    release = threading.Event()
+    starts: list[str] = []
+
+    def block_then_fail(self: threading.Thread) -> None:
+        if self.name.startswith("agentcore-job-"):
+            starts.append(self.name)
+            if len(starts) == 1:
+                entered.set()
+                assert release.wait(WAIT)
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", block_then_fail)
+    answers: dict[str, int] = {}
+
+    def send(key: str) -> None:
+        answers[key] = request(worker, "POST", "/invocations", job_body())[0]
+
+    first = threading.Thread(target=send, args=("first",))
+    first.start()
+    assert entered.wait(WAIT)
+    duplicate = threading.Thread(target=send, args=("duplicate",))
+    duplicate.start()
+    # The duplicate waits while the first start blocks.
+    duplicate.join(0.5)
+    assert "duplicate" not in answers
+    release.set()
+    first.join(WAIT)
+    duplicate.join(WAIT)
+    monkeypatch.setattr(threading.Thread, "start", original)
+
+    assert answers == {"first": 500, "duplicate": 500}
+    assert runs == []
+    assert client.calls == []
+
+    # A later delivery runs the job, because no start succeeded.
+    assert request(worker, "POST", "/invocations", job_body())[0] == 200
+    assert worker.idle(WAIT)
+    assert runs == [{"n": 2}]
+    assert client.names() == ["success"]
+
+
 def test_starts_the_handler_only_after_the_answer_is_written(
     start: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
