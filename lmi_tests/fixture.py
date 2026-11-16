@@ -355,10 +355,36 @@ class Trace:
 
 
 class ObservedClient:
-    """Forward real SDK calls; never fabricate checkpoint acknowledgments."""
+    """Forward real SDK calls; never fabricate checkpoint acknowledgments.
+
+    Evidence publication is isolated from the backend call: a failed record
+    can neither discard a successful response nor replace the backend's own
+    error. It is reported as an observation error instead, which the shared
+    harness treats as incomplete evidence rather than an SDK outcome.
+    """
 
     def __init__(self, client, trace):
         self.client, self.trace = client, trace
+
+    def _record(self, phase, kind, emitted=None, **observed):
+        for publish in (
+            lambda: self.trace.emit(phase, **(emitted or {})),
+            lambda: observe(self.trace, kind, **observed),
+        ):
+            try:
+                publish()
+            except Exception as error:
+                self._publication_failed(phase, error)
+
+    def _publication_failed(self, phase, error):
+        message = (
+            f"Evidence publication failed for {phase}: {type(error).__name__}: {error}"
+        )
+        try:
+            observe(self.trace, "observation_error", message=message)
+        except Exception:
+            # The missing per-request sequence number still marks the loss.
+            print("LMI_TEST_PUBLICATION_ERROR " + message, flush=True)
 
     def get_execution_state(self, **kwargs):
         call_id = (
@@ -366,14 +392,12 @@ class ObservedClient:
             if self.trace.payload.get("coverageProfile")
             else None
         )
-        self.trace.emit("POLL_CALL")
-        observe(self.trace, "poll_call", callId=call_id)
+        self._record("POLL_CALL", "poll_call", callId=call_id)
         try:
             return self.client.get_execution_state(**kwargs)
         finally:
             exited_at = time.time() * 1000
-            self.trace.emit("POLL_EXIT")
-            observe(self.trace, "poll_exit", callId=call_id, atMs=exited_at)
+            self._record("POLL_EXIT", "poll_exit", callId=call_id, atMs=exited_at)
 
     def checkpoint(self, **kwargs):
         updates = [
@@ -390,34 +414,42 @@ class ObservedClient:
             if self.trace.payload.get("coverageProfile")
             else None
         )
-        self.trace.emit("CHECKPOINT_CALL", updates=updates)
-        observe(self.trace, "checkpoint_call", callId=call_id, updates=updates)
+        self._record(
+            "CHECKPOINT_CALL",
+            "checkpoint_call",
+            {"updates": updates},
+            callId=call_id,
+            updates=updates,
+        )
         try:
             response = self.client.checkpoint(**kwargs)
-            acknowledged_at = time.time() * 1000
-            self.trace.emit("CHECKPOINT_ACK", updates=updates)
-            observe(
-                self.trace,
-                "checkpoint_ack",
-                callId=call_id,
-                operationIds=[item["id"] for item in updates],
-                source="service",
-                atMs=acknowledged_at,
-            )
-            return response
         except BaseException as error:
-            self.trace.emit("CHECKPOINT_ERROR", error=type(error).__name__)
-            observe(
-                self.trace,
+            self._record(
+                "CHECKPOINT_ERROR",
                 "checkpoint_error",
+                {"error": type(error).__name__},
                 callId=call_id,
                 error=type(error).__name__,
             )
             raise
+        else:
+            # Recorded outside the backend's try block, so a failed record
+            # cannot be mistaken for a failed checkpoint.
+            self._record(
+                "CHECKPOINT_ACK",
+                "checkpoint_ack",
+                {"updates": updates},
+                callId=call_id,
+                operationIds=[item["id"] for item in updates],
+                source="service",
+                atMs=time.time() * 1000,
+            )
+            return response
         finally:
             exited_at = time.time() * 1000
-            self.trace.emit("CHECKPOINT_EXIT")
-            observe(self.trace, "checkpoint_exit", callId=call_id, atMs=exited_at)
+            self._record(
+                "CHECKPOINT_EXIT", "checkpoint_exit", callId=call_id, atMs=exited_at
+            )
 
 
 def workflow(event, context, trace):

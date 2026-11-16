@@ -103,6 +103,75 @@ def test_checkpoint_proxy_preserves_real_result_and_errors():
     ]
 
 
+class FailingSinkTrace(LocalTrace):
+    """A shared trace whose evidence sink fails for the named records."""
+
+    def __init__(self, *failing):
+        super().__init__()
+        self.payload = {**self.payload, "coverageProfile": "standard"}
+        self.failing = set(failing)
+        self.observed = []
+
+    def emit(self, phase, **fields):
+        if phase in self.failing:
+            raise RuntimeError(f"evidence sink failed for {phase}")
+        super().emit(phase, **fields)
+
+    def observe(self, kind, **fields):
+        if kind in self.failing:
+            raise RuntimeError(f"evidence sink failed for {kind}")
+        self.observed.append({"kind": kind, **fields})
+
+    def next_call_id(self, kind):
+        return f"call:{kind}"
+
+
+def checkpoint_update():
+    return OperationUpdate(
+        "id", OperationType.STEP, OperationAction.SUCCEED, name="step"
+    )
+
+
+@pytest.mark.parametrize(
+    "failing",
+    [
+        ("CHECKPOINT_CALL", "checkpoint_call"),
+        ("CHECKPOINT_ACK", "checkpoint_ack"),
+        ("CHECKPOINT_EXIT", "checkpoint_exit"),
+    ],
+)
+def test_checkpoint_evidence_failure_cannot_change_a_successful_checkpoint(failing):
+    # The SDK must consume the backend's checkpoint token. A failed publication
+    # is a collection error, never an artificial checkpoint failure.
+    trace, backend = FailingSinkTrace(*failing), Mock()
+    result = ObservedClient(backend, trace).checkpoint(updates=[checkpoint_update()])
+    assert result is backend.checkpoint.return_value
+    backend.checkpoint.assert_called_once()
+    assert "CHECKPOINT_ERROR" not in [event["phase"] for event in trace.events]
+    errors = [item for item in trace.observed if item["kind"] == "observation_error"]
+    assert errors and "evidence sink failed" in errors[0]["message"]
+
+
+def test_checkpoint_evidence_failure_cannot_replace_the_backend_error():
+    trace, backend = FailingSinkTrace("CHECKPOINT_ERROR", "CHECKPOINT_EXIT"), Mock()
+    backend.checkpoint.side_effect = RuntimeError("network failure")
+    with pytest.raises(RuntimeError, match="network failure"):
+        ObservedClient(backend, trace).checkpoint(updates=[checkpoint_update()])
+
+
+@pytest.mark.parametrize("failing", ["POLL_CALL", "POLL_EXIT"])
+def test_state_poll_evidence_failure_cannot_change_the_backend_outcome(failing):
+    trace, backend = FailingSinkTrace(failing), Mock()
+    observed = ObservedClient(backend, trace)
+    assert (
+        observed.get_execution_state(arn="arn")
+        is backend.get_execution_state.return_value
+    )
+    backend.get_execution_state.side_effect = RuntimeError("state unavailable")
+    with pytest.raises(RuntimeError, match="state unavailable"):
+        observed.get_execution_state(arn="arn")
+
+
 def test_replay_fixture_uses_real_public_apis_and_preserves_outcomes():
     trace = LocalTrace()
     handler = durable_execution(lambda e, c: workflow(e, c, trace))
