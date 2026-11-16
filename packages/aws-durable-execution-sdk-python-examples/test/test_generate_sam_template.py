@@ -63,6 +63,13 @@ MICROVM_EXAMPLE = {
     "usesMicrovm": True,
     "durableConfig": {"RetentionPeriodInDays": 7, "ExecutionTimeout": 900},
 }
+AGENTCORE_EXAMPLE = {
+    "name": "AgentCore Example",
+    "handler": "agentcore_example.handler",
+    "description": "An AgentCore example",
+    "usesAgentcore": True,
+    "durableConfig": {"RetentionPeriodInDays": 7, "ExecutionTimeout": 900},
+}
 PLAIN_EXAMPLE = {
     "name": "Hello World",
     "handler": "hello_world.handler",
@@ -141,3 +148,35 @@ def test_build_template_sets_timeout_from_catalog():
 
     assert template["Resources"]["HelloWorld"]["Properties"]["Timeout"] == 120
     assert template["Globals"]["Function"]["Timeout"] == 60
+
+
+def test_build_template_declares_the_agent_runtime_parameter_empty():
+    template = generate_sam_template.build_template([PLAIN_EXAMPLE])
+
+    parameter = template["Parameters"]["AgentRuntimeArn"]
+    assert parameter["Default"] == ""
+    assert parameter["Type"] == "String"
+
+
+def test_build_template_requires_the_agent_runtime_for_agentcore_examples():
+    template = generate_sam_template.build_template(
+        [PLAIN_EXAMPLE, MICROVM_EXAMPLE, AGENTCORE_EXAMPLE]
+    )
+
+    assert template["Conditions"]["HasAgentRuntime"] == {
+        "Fn::Not": [{"Fn::Equals": [{"Ref": "AgentRuntimeArn"}, ""]}]
+    }
+    assert "HasMicrovmImage" in template["Conditions"]
+    resources = template["Resources"]
+    assert resources["AgentcoreExample"]["Condition"] == "HasAgentRuntime"
+    assert resources["AgentcoreExampleLogGroup"]["Condition"] == "HasAgentRuntime"
+    assert resources["AgentcoreExample"]["Properties"]["Environment"] == {
+        "Variables": {"AGENT_RUNTIME_ARN": {"Ref": "AgentRuntimeArn"}}
+    }
+    assert "Condition" not in resources["HelloWorld"]
+
+
+def test_build_template_declares_only_the_agentcore_condition():
+    template = generate_sam_template.build_template([AGENTCORE_EXAMPLE])
+
+    assert set(template["Conditions"]) == {"HasAgentRuntime"}

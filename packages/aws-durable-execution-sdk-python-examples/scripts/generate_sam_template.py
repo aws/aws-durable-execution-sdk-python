@@ -10,11 +10,17 @@ DEFAULT_FUNCTION_NAME_PREFIX = "DurablePythonExample-"
 DEFAULT_DURABLE_LOGGING_CONFIG: dict[str, str] = {"LogFormat": "JSON"}
 LOG_RETENTION_DAYS = 7
 MICROVM_CONDITION = "HasMicrovmImage"
+AGENTCORE_CONDITION = "HasAgentRuntime"
 
 
 def uses_microvm(example: dict[str, Any]) -> bool:
     """Return true when the catalog example launches a MicroVM."""
     return example.get("usesMicrovm") is True
+
+
+def uses_agentcore(example: dict[str, Any]) -> bool:
+    """Return true when the catalog example runs a job in AgentCore Runtime."""
+    return example.get("usesAgentcore") is True
 
 
 def load_catalog() -> dict[str, Any]:
@@ -92,6 +98,15 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
                     "examples run with."
                 ),
             },
+            "AgentRuntimeArn": {
+                "Type": "String",
+                "Default": "",
+                "Description": (
+                    "ARN of the AgentCore Runtime agent runtime for the "
+                    "AgentCore examples. Empty leaves the AgentCore examples "
+                    "out of the stack."
+                ),
+            },
         },
         "Resources": {},
     }
@@ -101,19 +116,23 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
     # function and its log group exist only when both parameters are set.
     # CloudFormation linters flag an unused condition. So the template declares
     # the condition only when an example uses it.
+    conditions: dict[str, Any] = {}
     if any(uses_microvm(example) for example in examples):
-        template["Conditions"] = {
-            MICROVM_CONDITION: {
-                "Fn::And": [
-                    {"Fn::Not": [{"Fn::Equals": [{"Ref": "MicrovmImageArn"}, ""]}]},
-                    {
-                        "Fn::Not": [
-                            {"Fn::Equals": [{"Ref": "MicrovmExecutionRoleArn"}, ""]}
-                        ]
-                    },
-                ]
-            }
+        conditions[MICROVM_CONDITION] = {
+            "Fn::And": [
+                {"Fn::Not": [{"Fn::Equals": [{"Ref": "MicrovmImageArn"}, ""]}]},
+                {"Fn::Not": [{"Fn::Equals": [{"Ref": "MicrovmExecutionRoleArn"}, ""]}]},
+            ]
         }
+    # An AgentCore example sends its job to the agent runtime named by
+    # AgentRuntimeArn. So, as for MicroVM, its function and log group exist
+    # only when the parameter is set.
+    if any(uses_agentcore(example) for example in examples):
+        conditions[AGENTCORE_CONDITION] = {
+            "Fn::Not": [{"Fn::Equals": [{"Ref": "AgentRuntimeArn"}, ""]}]
+        }
+    if conditions:
+        template["Conditions"] = conditions
 
     for example in examples:
         logical_id = to_logical_id(example["handler"])
@@ -151,6 +170,8 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
             # SAM merges these variables with the Globals variables.
             variables["MICROVM_IMAGE_ARN"] = {"Ref": "MicrovmImageArn"}
             variables["MICROVM_EXECUTION_ROLE_ARN"] = {"Ref": "MicrovmExecutionRoleArn"}
+        if uses_agentcore(example):
+            variables["AGENT_RUNTIME_ARN"] = {"Ref": "AgentRuntimeArn"}
         if variables:
             properties["Environment"] = {"Variables": variables}
 
@@ -173,6 +194,9 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
             # generates for the function.
             function_resource["Condition"] = MICROVM_CONDITION
             log_group_resource["Condition"] = MICROVM_CONDITION
+        if uses_agentcore(example):
+            function_resource["Condition"] = AGENTCORE_CONDITION
+            log_group_resource["Condition"] = AGENTCORE_CONDITION
 
         template["Resources"][logical_id] = function_resource
         template["Resources"][f"{logical_id}LogGroup"] = log_group_resource

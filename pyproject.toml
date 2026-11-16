@@ -53,7 +53,7 @@ workspace.members = ["packages/*"]
 extra-dependencies = [
   "mypy>=1.0.0",
   "pytest",
-  "boto3-stubs[lambda,lambda-microvms]",
+  "boto3-stubs[bedrock-agentcore,lambda,lambda-microvms]",
   "opentelemetry-sdk>=1.20.0",
   "opentelemetry-propagator-aws-xray",
 ]
@@ -112,7 +112,7 @@ dependencies = [
   "pytest-cov",
   "coverage[toml]",
   "mypy>=1.0.0",
-  "boto3-stubs[lambda,lambda-microvms]",
+  "boto3-stubs[bedrock-agentcore,lambda,lambda-microvms]",
 ]
 
 [tool.hatch.envs.dev-extras.scripts]

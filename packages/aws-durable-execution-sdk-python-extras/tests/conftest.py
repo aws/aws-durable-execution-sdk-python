@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Test doubles for the Lambda MicroVMs client."""
+"""Test doubles for the Lambda MicroVMs and the bedrock-agentcore clients."""
 
 from __future__ import annotations
 
@@ -134,6 +134,79 @@ class FakeMicrovmsClient:
         if self.endpoint is not None:
             response["endpoint"] = self.endpoint
         return response
+
+
+class FakeStream:
+    """The streaming body of an ``InvokeAgentRuntime`` answer."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.closed = False
+
+    def read(self, amt: int | None = None) -> bytes:
+        data, self._data = (
+            (self._data, b"") if amt is None else (self._data[:amt], self._data[amt:])
+        )
+        return data
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeAgentcoreClient:
+    """Records ``bedrock-agentcore`` API calls, and answers from scripted lists.
+
+    ``invokes`` and ``stops`` hold the answers of ``invoke_agent_runtime``
+    and ``stop_runtime_session``, in order. Each answer is an exception to
+    raise, a function that receives the request and returns the answer body,
+    bytes for the answer body, or ``None`` for ``{"accepted":true}``. After a
+    list ends, every call succeeds.
+    """
+
+    def __init__(
+        self,
+        *,
+        invokes: list[Any] | None = None,
+        stops: list[Any] | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.streams: list[FakeStream] = []
+        self._answers: dict[str, list[Any]] = {
+            "invoke_agent_runtime": list(invokes or []),
+            "stop_runtime_session": list(stops or []),
+        }
+        self._lock = threading.Lock()
+
+    def requests(self, name: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [request for call, request in self.calls if call == name]
+
+    def _answer(self, name: str, request: dict[str, Any]) -> Any:
+        with self._lock:
+            self.calls.append((name, request))
+            answers = self._answers[name]
+            answer = answers.pop(0) if answers else None
+        if isinstance(answer, BaseException):
+            raise answer
+        if callable(answer):
+            return answer(request)
+        return answer
+
+    def invoke_agent_runtime(self, **request: Any) -> dict[str, Any]:
+        body = self._answer("invoke_agent_runtime", request)
+        stream = FakeStream(b'{"accepted":true}' if body is None else body)
+        with self._lock:
+            self.streams.append(stream)
+        return {"response": stream, "statusCode": 200}
+
+    def stop_runtime_session(self, **request: Any) -> dict[str, Any]:
+        self._answer("stop_runtime_session", request)
+        return {"statusCode": 200}
+
+
+@pytest.fixture
+def fake_agentcore_client() -> type[FakeAgentcoreClient]:
+    return FakeAgentcoreClient
 
 
 # The fakes are fixtures, not imports. Several packages in this repository
