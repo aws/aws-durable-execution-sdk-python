@@ -643,7 +643,16 @@ def start_admission_probes(trace):
         target=admission_probes, args=(trace,), daemon=True, name="lmi-admission-probes"
     )
     thread.start()
-    thread.join(timeout=0.5)
+    # Every probe observation is a separate S3 publication, and the runtime
+    # freezes this environment as soon as the handler returns. Wait for the
+    # declared admission budget -- the same window the shared validator allows
+    # these records to land in -- so a slow put cannot silently truncate the
+    # ledger or leak this request's sequence into the next invocation.
+    # A probe that is still pending after that window is a real SDK finding the
+    # shared validator already reports as a missing post-closure probe, so do
+    # not add a competing signal here.
+    budget = trace.payload.get("behaviorBudgets", {}).get("admissionMs", 5000)
+    thread.join(timeout=max(0.5, budget / 1000))
 
 
 @dataclass
