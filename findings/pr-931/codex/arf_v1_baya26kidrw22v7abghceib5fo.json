@@ -1,0 +1,1 @@
+{"finding_digest":"08300d79481c6dad57e0098e22203d2b8e24d483fcc41d86890d1150912b3360","finding_id":"arf_v1_baya26kidrw22v7abghceib5fo","identity_key":"lmi_tests/fixture.py::handler::evidence-failure-replaces-sdk-outcome","pull_request_number":931,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
