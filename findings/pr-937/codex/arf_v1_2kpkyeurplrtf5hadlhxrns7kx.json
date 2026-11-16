@@ -1,0 +1,1 @@
+{"finding_digest":"d29eac12917ae332f4e01acf78b65f55df058d3c7c469224cdc2234625b9debc","finding_id":"arf_v1_2kpkyeurplrtf5hadlhxrns7kx","identity_key":"extras/ai/_shared.py::run_step::missing-default-retry-integration-coverage","pull_request_number":937,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
