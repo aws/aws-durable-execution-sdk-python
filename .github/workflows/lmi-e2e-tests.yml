@@ -20,9 +20,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/lmi-lifecycle.yml@56e7e444457653775579c120469d931b71c8cfd8
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/lmi-lifecycle.yml@be07fc5a8f4469e4419a7d33cc4d42bf6bf3966e
     with:
-      conformance-ref: 56e7e444457653775579c120469d931b71c8cfd8
+      conformance-ref: be07fc5a8f4469e4419a7d33cc4d42bf6bf3966e
       sdk-script: .github/scripts/lmi-ci.sh
       runtime-label: Python 3.14
       lambda-runtime: python3.14
