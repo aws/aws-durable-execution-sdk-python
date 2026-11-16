@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 CONFORMANCE_REPOSITORY = "aws/aws-durable-execution-conformance-tests"
 # Updated only with the matching reviewed shared evidence contract.
-CONFORMANCE_REVISION = "793ecdc6b3528433e80da25622c85749ff8b1323"
+CONFORMANCE_REVISION = "41878367192be996cb3414939e15270febedb210"
 
 
 def configuration_identity(deployment: Mapping[str, Any], key: str) -> str:
