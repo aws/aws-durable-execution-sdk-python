@@ -18,16 +18,13 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 
 from aws_durable_execution_sdk_python_extras.ai._shared import (
     LazyClient,
-    call_before_deadline,
     run_step,
     serialize_input,
-    validate_question,
 )
 from aws_durable_execution_sdk_python_extras.ai.errors import (
     LlmMaxTokensError,
     LlmStoppedError,
 )
-from aws_durable_execution_sdk_python_extras.ai.retry import default_ai_retry_strategy
 from aws_durable_execution_sdk_python_extras.ai.subtypes import AiOperationSubType
 
 
@@ -152,7 +149,7 @@ class Llm:
     def __init__(
         self,
         config: BedrockConfig,
-        retry_strategy: Callable[[Exception, int], RetryDecision],
+        retry_strategy: Callable[[Exception, int], RetryDecision] | None,
     ) -> None:
         self._config = config
         self._client = LazyClient("bedrock-runtime", config.client)
@@ -169,18 +166,18 @@ class Llm:
     ) -> str:
         """Return the model's reply as text, in one durable step.
 
-        Limits:
+        Behavior:
 
-        - ``question`` must be a non-empty string.
-        - ``input`` is optional. It must be a string or a value that
-          ``json.dumps`` can encode.
+        - ``input`` is optional. It is a string or a value that ``json.dumps``
+          can encode. The step serializes it, so an input that cannot be
+          encoded fails the step.
         - The reply is at most ``max_tokens``, 1024 by default. A reply that
-          stops there raises :class:`LlmMaxTokensError`, which is not retried.
+          stops there raises :class:`LlmMaxTokensError`.
         - The reply must fit the 256 KB checkpoint limit.
-        - An invalid argument creates no durable operation. The call raises
-          ``TypeError``.
         - The reply is the step result. So a replay returns it without calling
           the model.
+        - ``ask`` does not check its arguments. Bedrock rejects a request that
+          it cannot answer, and the step returns that error.
 
         ``ask`` sends the input inside ``<input>`` tags, and its system prompt
         says that the input is data, not instructions. An instruction in the
@@ -198,19 +195,17 @@ class Llm:
 
         Raises:
             LlmStoppedError: When the model stops for a reason other than the
-                end of its reply, after all retries.
-            LlmMaxTokensError: When the reply stops at ``max_tokens``.
+                end of its reply, or the reply has no stop reason, after all
+                retries.
+            LlmMaxTokensError: When the reply stops at ``max_tokens``, after
+                all retries.
             StepError: When the step fails with any other error after all
                 retries, such as an AWS service error.
         """
-        validate_question(question)
-        message = _user_message(question, input)
         config = self._config.with_call_options(bedrock)
 
-        def body(remaining: float | None) -> str:
-            return call_before_deadline(
-                lambda: self._converse(config, message), remaining
-            )
+        def body() -> str:
+            return self._converse(config, _user_message(question, input))
 
         return str(
             run_step(
@@ -246,7 +241,13 @@ class Llm:
             raise LlmMaxTokensError(
                 message="The reply stopped at the token limit. Raise max_tokens."
             )
-        if stop_reason is not None and stop_reason not in _COMPLETE_STOP_REASONS:
+        if stop_reason is None:
+            # A reply without a stop reason is not known to be complete. So it
+            # is not checkpointed as an answer.
+            raise LlmStoppedError(
+                message="The reply has no stop reason. The reply is not returned."
+            )
+        if stop_reason not in _COMPLETE_STOP_REASONS:
             # A guardrail's message, a filtered reply, or a partial reply is not
             # the model's answer. So it is not checkpointed as one.
             raise LlmStoppedError(stop_reason=stop_reason)
@@ -283,8 +284,8 @@ def llm(
     Args:
         destination: Where the model runs. This release supports
             :class:`BedrockConfig` only.
-        retry_strategy: The step retry strategy. The default is
-            :func:`default_ai_retry_strategy`.
+        retry_strategy: The step retry strategy. The default is the SDK's
+            default step retry strategy.
 
     Raises:
         TypeError: When ``destination`` is not a :class:`BedrockConfig`.
@@ -294,4 +295,4 @@ def llm(
     if not isinstance(destination, BedrockConfig):
         msg = "destination must be a BedrockConfig."
         raise TypeError(msg)
-    return Llm(destination, retry_strategy or default_ai_retry_strategy)
+    return Llm(destination, retry_strategy)

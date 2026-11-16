@@ -17,14 +17,9 @@ from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import RetryDecision
 
 from aws_durable_execution_sdk_python_extras.ai import (
-    MAX_CLASSIFY_OPTIONS,
-    AiTimeoutError,
     DeciderError,
-    DeciderInvalidResponseError,
     DeciderRequest,
-    _shared,
     decider,
-    default_ai_retry_strategy,
 )
 
 
@@ -195,7 +190,7 @@ def test_score_maps_the_position_to_zero_to_one(
 def test_an_unusable_reply_raises_decider_invalid_response_error(
     run_ai: Any, reply: Any, call: str
 ) -> None:
-    decide = decider(transport=FakeDecider(reply))
+    decide = decider(transport=FakeDecider(reply), retry_strategy=no_retry)
 
     def body(context: Any) -> Any:
         if call == "classify":
@@ -207,12 +202,11 @@ def test_an_unusable_reply_raises_decider_invalid_response_error(
     value, _ = run_ai(body)
 
     assert value["error"] == "DeciderInvalidResponseError"
-    assert not default_ai_retry_strategy(DeciderInvalidResponseError(), 1).should_retry
 
 
 def test_a_failed_step_raises_the_same_class_with_its_status(run_ai: Any) -> None:
     error = DeciderError(message="HTTP 422: too long", status=422)
-    decide = decider(transport=FakeDecider(error))
+    decide = decider(transport=FakeDecider(error), retry_strategy=no_retry)
 
     value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
 
@@ -224,17 +218,15 @@ def test_a_failed_step_raises_the_same_class_with_its_status(run_ai: Any) -> Non
     }
 
 
-def test_the_default_strategy_retries_a_server_error_then_succeeds(
-    run_ai: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen: list[tuple[str, int]] = []
+def test_the_retry_strategy_sees_the_error_and_its_status(run_ai: Any) -> None:
+    seen: list[tuple[str, int | None, int]] = []
 
     def quick(error: Exception, attempt: int) -> RetryDecision:
-        seen.append((type(error).__name__, attempt))
-        decision = default_ai_retry_strategy(error, attempt)
-        if decision.should_retry:
+        status = error.status if isinstance(error, DeciderError) else None
+        seen.append((type(error).__name__, status, attempt))
+        if status == 503:
             return RetryDecision.retry(Duration.from_seconds(1))
-        return decision
+        return RetryDecision.no_retry()
 
     fake = FakeDecider(
         DeciderError(message="busy", status=503), answers({"answer": noul(0.9)})
@@ -244,7 +236,7 @@ def test_the_default_strategy_retries_a_server_error_then_succeeds(
     value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
 
     assert value == {"result": True}
-    assert seen == [("DeciderError", 1)]
+    assert seen == [("DeciderError", 503, 1)]
     assert len(fake.requests) == 2
 
 
@@ -259,83 +251,69 @@ def test_another_error_stays_a_step_error(run_ai: Any) -> None:
     assert "boom" in value["message"]
 
 
-def test_a_request_past_the_reserve_raises_ai_timeout_error(
-    run_ai: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(_shared, "remaining_seconds", lambda context: 10.05)
-    release = threading.Event()
+class _CountingList(list[Any]):
+    """A list that counts how often it is iterated."""
 
-    def slow(request: Any) -> Any:
-        release.wait(5)
-        return answers({"answer": noul(0.9)})
+    iterations = 0
 
-    decide = decider(transport=slow, retry_strategy=no_retry)
-    try:
-        value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
-    finally:
-        release.set()
-
-    assert value["error"] == "AiTimeoutError"
-    assert default_ai_retry_strategy(AiTimeoutError(), 1).should_retry
+    def __iter__(self) -> Iterator[Any]:
+        type(self).iterations += 1
+        return super().__iter__()
 
 
-def test_no_time_left_raises_ai_timeout_error_without_a_call(
-    run_ai: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(_shared, "remaining_seconds", lambda context: 9.0)
+def test_the_step_serializes_the_input_once(run_ai: Any) -> None:
+    _CountingList.iterations = 0
+    fake = FakeDecider(answers({"answer": noul(0.9)}))
+    decide = decider(transport=fake)
+
+    value, _ = run_ai(lambda context: decide.check(context, "Q?", _CountingList([1])))
+
+    assert value == {"result": True}
+    assert fake.requests[0]["state"] == "[1]"
+    assert _CountingList.iterations == 1
+
+
+def test_an_input_that_is_not_json_fails_the_step(run_ai: Any) -> None:
     fake = FakeDecider()
     decide = decider(transport=fake, retry_strategy=no_retry)
 
-    value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
+    value, result = run_ai(lambda context: decide.check(context, "Q?", object()))
 
-    assert value["error"] == "AiTimeoutError"
+    assert value["error"] == "StepError"
+    assert steps(result) == [("decider.check", "DeciderCheck")]
     assert fake.requests == []
 
 
-@pytest.mark.parametrize(
-    ("call", "error"),
-    [
-        (lambda d, c: d.check(c, "", "x"), TypeError),
-        (lambda d, c: d.check(c, 1, "x"), TypeError),
-        (lambda d, c: d.check(c, "Q?", object()), TypeError),
-        (lambda d, c: d.classify(c, "Q?", ["a"], "x"), ValueError),
-        (lambda d, c: d.classify(c, "Q?", "ab", "x"), TypeError),
-        (lambda d, c: d.classify(c, "Q?", ["a", " A "], "x"), TypeError),
-        (lambda d, c: d.classify(c, "Q?", ["a", ""], "x"), TypeError),
-        (
-            lambda d, c: d.classify(
-                c, "Q?", [f"o{i}" for i in range(MAX_CLASSIFY_OPTIONS + 1)], "x"
-            ),
-            ValueError,
-        ),
-        (lambda d, c: d.label(c, "Q?", ["a", "a"], "x"), TypeError),
-        (lambda d, c: d.score(c, "Q?", ["only"], "x"), ValueError),
-        (lambda d, c: d.score(c, "Q?", [str(i) for i in range(11)], "x"), ValueError),
-        (lambda d, c: d.score(c, "Q?", ["a", 2], "x"), TypeError),
-    ],
-)
-def test_an_invalid_argument_raises_and_creates_no_operation(
-    run_ai: Any, call: Any, error: type[Exception]
-) -> None:
-    fake = FakeDecider()
+def test_sends_the_arguments_as_they_are(run_ai: Any) -> None:
+    fake = FakeDecider(
+        answers({"answer": choice("a")}),
+        answers({"answer": score(0)}),
+    )
     decide = decider(transport=fake)
 
-    value, result = run_ai(lambda context: call(decide, context))
+    value, _ = run_ai(
+        lambda context: [
+            decide.classify(context, "", ["a", " A "], "x"),
+            decide.score(context, "Q?", [str(i) for i in range(11)], "x"),
+        ]
+    )
 
-    assert value["error"] == error.__name__
-    assert result.operations == []
-    assert fake.requests == []
+    # The model decides what it accepts. So the call does not check first.
+    assert value == {"result": ["a", 0.0]}
+    assert fake.requests[0]["questions"]["answer"]["instructions"] == ""
+    assert len(fake.requests[1]["questions"]["answer"]["criteria"]) == 11
 
 
-@pytest.mark.parametrize("threshold", [-0.1, 1.1])
-def test_a_threshold_outside_zero_to_one_raises(threshold: float) -> None:
-    with pytest.raises(ValueError, match="threshold"):
-        decider(transport=FakeDecider(), threshold=threshold)
+def test_a_transport_takes_precedence_over_an_endpoint(run_ai: Any) -> None:
+    fake = FakeDecider(answers({"answer": noul(0.9)}))
+    decide = decider(
+        endpoint="not a url", headers={"authorization": "t"}, transport=fake
+    )
 
+    value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
 
-def test_takes_only_one_of_endpoint_and_transport() -> None:
-    with pytest.raises(TypeError, match="only one of"):
-        decider(endpoint="https://x.example/v1", transport=FakeDecider())
+    assert value == {"result": True}
+    assert len(fake.requests) == 1
 
 
 def test_needs_a_transport_or_an_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -377,7 +355,9 @@ class _Server:
                 self.send_response(status)
                 for key, value in headers.items():
                     self.send_header(key, value)
-                self.send_header("content-length", str(len(reply)))
+                # A test sets a longer content-length to truncate the body.
+                if "content-length" not in headers:
+                    self.send_header("content-length", str(len(reply)))
                 self.end_headers()
                 self.wfile.write(reply)
 
@@ -468,7 +448,22 @@ def test_a_reply_that_is_not_json_raises_decider_invalid_response_error(
     assert value["error"] == "DeciderInvalidResponseError"
 
 
-def test_an_unreachable_endpoint_raises_a_retryable_decider_error(run_ai: Any) -> None:
+@pytest.mark.parametrize("status", [200, 503])
+def test_a_truncated_body_raises_decider_error(
+    run_ai: Any, server: _Server, status: int
+) -> None:
+    server.replies = [(status, {"content-length": "100"}, b'{"answers"')]
+    decide = decider(endpoint=server.url, retry_strategy=no_retry)
+
+    value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
+
+    assert value["error"] == "DeciderError"
+    assert "IncompleteRead" in value["message"]
+    # Headers arrived with an error status. So the error keeps it.
+    assert value["status"] == (None if status == 200 else status)
+
+
+def test_an_unreachable_endpoint_raises_decider_error(run_ai: Any) -> None:
     probe = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     port = probe.server_port
     probe.server_close()
@@ -485,7 +480,6 @@ def test_an_unreachable_endpoint_raises_a_retryable_decider_error(run_ai: Any) -
     assert value["status"] is None
     assert "could not be reached" in value["message"]
     assert "secret" not in value["message"]
-    assert default_ai_retry_strategy(DeciderError(message="x"), 1).should_retry
 
 
 @pytest.mark.parametrize("probability", [1.5, -0.5, 7, -3])
@@ -521,11 +515,6 @@ def test_a_probability_within_rounding_of_the_range_is_clamped(
     value, _ = run_ai(lambda context: decide.check(context, "Q?", "x"))
 
     assert value == {"result": expected}
-
-
-def test_headers_with_a_transport_raise() -> None:
-    with pytest.raises(TypeError, match="headers only with endpoint"):
-        decider(transport=FakeDecider(), headers={"authorization": "Bearer t"})
 
 
 def test_a_replay_returns_the_checkpointed_answer_without_calling_the_model(

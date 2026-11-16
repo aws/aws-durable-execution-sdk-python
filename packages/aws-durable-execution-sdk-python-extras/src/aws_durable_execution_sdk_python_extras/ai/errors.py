@@ -74,9 +74,9 @@ class DeciderError(AiError):
     Experimental. It can change or be removed in any release.
 
     :attr:`status` is the HTTP status when the model answered. It is ``None``
-    when the model could not be reached. The default retry strategy retries
-    no status, 408, 429, and 5xx. It does not retry another status, such as
-    422 for an input that does not fit the model's window.
+    when the model could not be reached. The step retry strategy sees this
+    error. A custom strategy can read :attr:`status`, for example to stop on
+    422, the status for an input that does not fit the model's window.
     """
 
     def __init__(
@@ -109,17 +109,7 @@ class DeciderInvalidResponseError(AiError):
     The reply is not JSON, has the wrong shape, names an option that the
     caller did not offer, or has a score outside the scale. This usually
     means that the server speaks another version of the ``/v1/systemone``
-    API. It is not retried.
-    """
-
-
-class AiTimeoutError(AiError):
-    """A request was still running 10 seconds before the invocation ends.
-
-    Experimental. It can change or be removed in any release.
-
-    The step stops waiting, so it can record the failure. A later attempt runs
-    in a new invocation. So the default retry strategy retries it.
+    API.
     """
 
 
@@ -128,11 +118,12 @@ class LlmStoppedError(AiError):
 
     Experimental. It can change or be removed in any release.
 
-    Examples are a guardrail that intervened and a filtered reply. The reply is
-    not returned. :attr:`stop_reason` is the Converse ``stopReason``. The
-    default retry strategy retries ``malformed_model_output`` and
-    ``malformed_tool_use``, because a new reply can succeed. It does not retry
-    the other reasons, because the same input stops the same way.
+    Examples are a guardrail that intervened, a filtered reply, and a reply
+    with no ``stopReason``. The reply is not returned. :attr:`stop_reason` is
+    the Converse ``stopReason``, or ``None`` when the reply has none. A custom
+    retry strategy can read it: ``malformed_model_output`` and
+    ``malformed_tool_use`` can succeed on a new reply, and the other reasons
+    repeat for the same input.
     """
 
     def __init__(
@@ -166,8 +157,8 @@ class LlmMaxTokensError(AiError):
 
     Experimental. It can change or be removed in any release.
 
-    A retry with the same limit stops at the same place. So it is not retried.
-    Raise ``max_tokens`` instead.
+    A retry with the same limit stops at the same place. So raise
+    ``max_tokens`` instead.
     """
 
 
@@ -175,7 +166,6 @@ for _error_class in (
     AiError,
     DeciderError,
     DeciderInvalidResponseError,
-    AiTimeoutError,
     LlmStoppedError,
     LlmMaxTokensError,
 ):

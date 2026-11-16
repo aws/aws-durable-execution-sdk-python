@@ -73,13 +73,13 @@ on_a_server = decider(
 )
 ```
 
-- Pass only one of `endpoint` and `transport`. Without either, `decider()` uses the `STRANDS_DECIDER_ENDPOINT` environment variable. It raises `TypeError` when that is not set.
+- A `transport` takes precedence. When it is set, `endpoint` and `headers` are not used. Without either, `decider()` uses the `STRANDS_DECIDER_ENDPOINT` environment variable. It raises `TypeError` when that is not set, because it then has nowhere to send the request.
 - The AWS transports use boto3, which this package already depends on. They sign the call with the function's credentials. Each one takes `client=` to replace the default boto3 client, for example to set a Region.
-- A transport is any callable that takes a `DeciderRequest` dict and returns the JSON reply. An exception it raises goes to the step retry strategy.
+- A transport is any callable that takes a `DeciderRequest` dict and returns the JSON reply. An exception it raises goes to the step retry strategy. The step calls it directly, so a transport that can hang needs its own timeout.
 - On SageMaker and AgentCore Runtime, the call reaches the server's `POST /invocations` route. The Strands Decider server answers that route like `/v1/systemone`. The 0.2.0 release on PyPI has no `/invocations` route, so deploy a later version.
 - On SageMaker, an HTTP error from the server becomes a `DeciderError` with the server's status.
-- On Lambda, the function fails the invocation when it refuses a request, for example an input that does not fit the window. That becomes a `DeciderError` with status 422, which is not retried. Any other function error is retried. `lambda_transport` does not use the function's Function URL. A new execution environment loads the model first, which can take 30 seconds without SnapStart.
-- An endpoint with a user name or password is refused: pass credentials in `headers`. Redirects are not followed, so your headers never reach another server. Errors name the endpoint without its query, because errors are checkpointed.
+- On Lambda, the function fails the invocation when it refuses a request, for example an input that does not fit the window. That becomes a `DeciderError` with status 422. Any other function error becomes a `DeciderError` with no status. `lambda_transport` does not use the function's Function URL. A new execution environment loads the model first, which can take 30 seconds without SnapStart.
+- An endpoint with a user name or password is refused: pass credentials in `headers`. Redirects are not followed, so your headers never reach another server. Errors name the endpoint without its query, because errors are checkpointed. A connection failure or a body that cannot be read, such as a truncated one, becomes a `DeciderError`. It keeps the HTTP status when the server sent one.
 
 ## `llm()`
 
@@ -97,40 +97,39 @@ short = model.ask(context, "Summarize.", text, bedrock=BedrockCallOptions(max_to
 - `bedrock=BedrockCallOptions(...)` changes `model_id`, `temperature`, or `max_tokens` for one call.
 - `ask` sends the input inside `<input>` tags, and its system prompt says that the input is data, not instructions. An instruction in the input can still change the reply. So do not use a reply alone to authorize an action.
 
-## Limits
+## Model limits
+
+The operations do not check their arguments before the step. The step sends them as they are, and the model or the service rejects a request that it cannot answer. The step returns that error, as `context.step` does for any other failure. These are the limits of the model and the service:
 
 | Operation | Limits |
 |---|---|
-| All | `question` is a non-empty string. `input` is a string, `None`, or a value that `json.dumps` can encode. |
-| `decider()` operations | The model reads the input and each question, with its choices, in one context window: 4,096 tokens for Strands Decider 2B. A request that does not fit fails with `DeciderError` and status 422, which is not retried. Shorten the input before the call. |
-| `classify` | 2 to 255 choices (`MAX_CLASSIFY_OPTIONS`). Choices are non-empty and differ after trimming and ignoring case. The model always picks one, so add a choice such as `"other"` when none may fit. |
-| `label` | At least 2 choices, with the same rules. Each choice is one yes-or-no question, so each adds time. |
-| `score` | 2 to 10 entries (`MAX_SCORE_LEVELS`), from lowest to highest. |
+| All | `input` is a string, `None`, or a value that `json.dumps` can encode. The step serializes it once. An input that cannot be encoded fails the step with `StepError`. |
+| `decider()` operations | The model reads the input and each question, with its choices, in one context window: 4,096 tokens for Strands Decider 2B. A request that does not fit fails with `DeciderError` and status 422. Shorten the input before the call. |
+| `classify` | Strands Decider accepts 2 to 255 choices. The reply matches a choice after trimming whitespace and ignoring case, so give choices that differ that way. The model always picks one, so add a choice such as `"other"` when none may fit. |
+| `label` | Each choice is one yes-or-no question, so each adds time. |
+| `score` | Strands Decider accepts 2 to 10 entries, from lowest to highest. |
 | `ask` | The reply is at most `max_tokens`, 1024 by default. The reply must fit the 256 KB checkpoint limit. |
-
-A call that breaks an argument limit creates no durable operation. It raises `TypeError` or `ValueError`.
 
 ## What a call does
 
-1. The call checks its arguments against the limits above.
-2. One step sends one request. The step is named `decider.<operation>` or `llm.ask`. Pass `name=` to rename it. Renaming an existing call breaks executions in flight.
-3. The step has a subtype from `AiOperationSubType`: `DeciderCheck`, `DeciderClassify`, `DeciderLabel`, `DeciderScore`, or `LlmAsk`. The values match the JavaScript SDK.
-4. The step result is the answer, checkpointed as plain JSON. The input is not checkpointed. A replay returns the answer and does not call the model.
-5. The request runs in a daemon thread. The step stops waiting for it 10 seconds before the invocation runs out of time and raises `AiTimeoutError`, so the step can record the failure. boto3 cannot cancel a call, so the thread runs until the call returns, and its result is discarded.
+1. One step sends one request. The step is named `decider.<operation>` or `llm.ask`. Pass `name=` to rename it. Renaming an existing call breaks executions in flight.
+2. The step has a subtype from `AiOperationSubType`: `DeciderCheck`, `DeciderClassify`, `DeciderLabel`, `DeciderScore`, or `LlmAsk`. The values match the JavaScript SDK.
+3. The step calls the transport or boto3 directly. It sets no deadline of its own.
+4. The step checks the model's reply. A reply that is not usable fails the attempt with an error from the table below.
+5. The step result is the answer, checkpointed as plain JSON. The input is not checkpointed. A replay returns the answer and does not call the model.
 
 ## Errors and retries
 
 Every error class extends `AiError`, which extends the SDK's `DurableOperationError`. The call raises the class that the step's last attempt raised, on the first run and on replay. Its `status` or `stop_reason` is stored in the error's `data`, so it survives replay. A step that fails with any other error, such as an AWS access-denied error, raises the SDK's `StepError`.
 
-| Error | When | Retried |
-|---|---|---|
-| `AiTimeoutError` | A request is still running 10 seconds before the invocation runs out of time | Yes, in a new invocation |
-| `DeciderError` | The decision model cannot be reached, or answers with an error. `status` is the HTTP status, or `None` when it did not answer. | On no answer, 408, 429, and 5xx |
-| `DeciderInvalidResponseError` | The decision model's reply is not JSON, has the wrong shape, or has a score outside the scale | No |
-| `LlmMaxTokensError` | The `ask` reply stops at `max_tokens` | No |
-| `LlmStoppedError` | The `ask` reply stops for another reason, such as a guardrail that intervened. `stop_reason` says why. | Only `malformed_model_output` and `malformed_tool_use` |
+| Error | When |
+|---|---|
+| `DeciderError` | The decision model cannot be reached, or answers with an error. `status` is the HTTP status, or `None` when it did not answer. |
+| `DeciderInvalidResponseError` | The decision model's reply is not JSON, has no answers, has the wrong type, has a number that is not finite, has a probability outside 0 to 1 or a score outside the scale (by more than 0.01), or names a choice that is not one of the options |
+| `LlmMaxTokensError` | The `ask` reply stops at `max_tokens`. A retry with the same limit stops at the same place. |
+| `LlmStoppedError` | The `ask` reply stops for another reason, such as a guardrail that intervened, or has no `stopReason`. `stop_reason` says why, or is `None` when the reply had none. |
 
-The step retry strategy is `default_ai_retry_strategy`. It also retries AWS throttling and server errors, such as `ThrottlingException`, `TooManyRequestsException`, `ServiceUnavailable`, and any status of 429 or 5xx, and connection failures. It allows up to 5 attempts, with a delay of 2, 4, 8, and 16 seconds. It does not retry access-denied or validation errors, because they repeat. Pass `retry_strategy=` to `decider()` or `llm()` to replace it.
+The step uses the SDK's default step retry strategy, as `context.step` does. Pass `retry_strategy=` to `decider()` or `llm()` to replace it. A custom strategy can read `DeciderError.status` and `LlmStoppedError.stop_reason`. For example, it can stop on status 422, `LlmMaxTokensError`, and `DeciderInvalidResponseError`, because they repeat.
 
 ## Permissions
 

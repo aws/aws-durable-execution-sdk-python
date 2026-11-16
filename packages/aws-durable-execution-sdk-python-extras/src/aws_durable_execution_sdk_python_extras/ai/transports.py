@@ -20,6 +20,7 @@ takes a :class:`DeciderRequest` and returns the JSON reply is a transport too.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -50,9 +51,8 @@ DeciderTransport = Callable[[DeciderRequest], Any]
 
 Experimental. It can change or be removed in any release.
 
-``decider()`` runs the transport in the step, and stops waiting for it 10
-seconds before the invocation ends. An exception that the transport raises
-goes to the step retry strategy.
+``decider()`` calls the transport in the step. An exception that the
+transport raises goes to the step retry strategy.
 """
 
 
@@ -143,8 +143,7 @@ def sagemaker_transport(endpoint_name: str, *, client: Any = None) -> DeciderTra
 
     When the server answers with an HTTP error, SageMaker raises
     ``ModelError``. The transport turns it into a :class:`DeciderError` with
-    the server's status. So a 422 for an input that is too long is not
-    retried.
+    the server's status, such as 422 for an input that is too long.
 
     Example::
 
@@ -214,8 +213,8 @@ def lambda_transport(
     The function fails the invocation when it refuses a request, for example
     when the input does not fit the model's window. The transport turns that
     failure into a :class:`DeciderError` with status 422, the status that the
-    server answers over HTTP. So it is not retried. Any other function error
-    becomes a :class:`DeciderError` with no status, which is retried.
+    server answers over HTTP. Any other function error becomes a
+    :class:`DeciderError` with no status.
 
     A request waits while a new execution environment loads the model, up to
     30 seconds without SnapStart.
@@ -310,6 +309,9 @@ def _http_transport(
 
     Errors are checkpointed. So they name the endpoint without its query or
     fragment, which can hold a secret.
+
+    A failure to connect or to read a body becomes a :class:`DeciderError`.
+    When the server sent an HTTP error status, the error keeps it.
     """
     where = f"{url.scheme}://{url.netloc}{url.path}"
     href = urllib.parse.urlunsplit(url)
@@ -323,21 +325,10 @@ def _http_transport(
         )
         try:
             with _OPENER.open(http_request) as response:
-                return parse_reply(response.read())
+                body = response.read()
         except urllib.error.HTTPError as error:
-            status = error.code
-            if 300 <= status < 400:
-                message = (
-                    f"The decision model at {where} answered HTTP {status}. "
-                    "Redirects are not followed."
-                )
-            else:
-                text = error.read().decode(errors="replace")[:200]
-                message = (
-                    f"The decision model at {where} answered HTTP {status}: {text}"
-                )
-            raise DeciderError(message=message, status=status) from error
-        except (urllib.error.URLError, OSError) as error:
+            raise _status_error(where, error) from error
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
             # The cause's message can repeat the full URL, and the message is
             # checkpointed. So the message names only the cause's type.
             reason = getattr(error, "reason", error)
@@ -347,5 +338,26 @@ def _http_transport(
                     f"({type(reason).__name__})."
                 )
             ) from error
+        return parse_reply(body)
 
     return send
+
+
+def _status_error(where: str, error: urllib.error.HTTPError) -> DeciderError:
+    """Return the error for an HTTP error status, with that status.
+
+    A body that cannot be read, such as a truncated one, keeps the status.
+    """
+    status = error.code
+    if 300 <= status < 400:
+        message = (
+            f"The decision model at {where} answered HTTP {status}. "
+            "Redirects are not followed."
+        )
+    else:
+        try:
+            text = error.read().decode(errors="replace")[:200]
+        except (OSError, http.client.HTTPException) as read_error:
+            text = f"the body could not be read ({type(read_error).__name__})"
+        message = f"The decision model at {where} answered HTTP {status}: {text}"
+    return DeciderError(message=message, status=status)

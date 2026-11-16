@@ -20,7 +20,6 @@ from aws_durable_execution_sdk_python_extras.ai import (
     DeciderInvalidResponseError,
     agentcore_transport,
     decider,
-    default_ai_retry_strategy,
     lambda_transport,
     sagemaker_transport,
 )
@@ -119,7 +118,6 @@ def test_agentcore_turns_a_non_2xx_status_into_decider_error() -> None:
 
     assert caught.value.status == 422
     assert "context window" in str(caught.value)
-    assert not default_ai_retry_strategy(caught.value, 1).should_retry
 
 
 def test_agentcore_turns_a_reply_that_is_not_json_into_invalid_response() -> None:
@@ -163,9 +161,9 @@ def test_sagemaker_sends_the_request_and_returns_the_reply() -> None:
     }
 
 
-@pytest.mark.parametrize(("status", "retried"), [(422, False), (503, True)])
+@pytest.mark.parametrize("status", [422, 503])
 def test_sagemaker_turns_a_model_error_into_decider_error_with_its_status(
-    status: int, retried: bool
+    status: int,
 ) -> None:
     error = client_error(
         "ModelError",
@@ -181,22 +179,13 @@ def test_sagemaker_turns_a_model_error_into_decider_error_with_its_status(
     assert caught.value.status == status
     assert "context window" in str(caught.value)
     assert caught.value.__cause__ is error
-    assert default_ai_retry_strategy(caught.value, 1).should_retry is retried
 
 
 @pytest.mark.parametrize(
-    ("code", "status", "retried"),
-    [
-        ("ModelNotReadyException", 429, True),
-        ("ServiceUnavailable", 503, True),
-        ("InternalFailure", 500, True),
-        ("InternalDependencyException", 530, True),
-        ("ValidationError", 400, False),
-    ],
+    ("code", "status"),
+    [("ModelNotReadyException", 429), ("ValidationError", 400)],
 )
-def test_sagemaker_passes_other_service_errors_through(
-    code: str, status: int, retried: bool
-) -> None:
+def test_sagemaker_passes_other_service_errors_through(code: str, status: int) -> None:
     error = client_error(code, status)
     client = FakeClient("invoke_endpoint", error)
 
@@ -204,7 +193,6 @@ def test_sagemaker_passes_other_service_errors_through(
         sagemaker_transport(ENDPOINT, client=client)(REQUEST)
 
     assert caught.value is error
-    assert default_ai_retry_strategy(error, 1).should_retry is retried
 
 
 def test_sagemaker_turns_a_reply_that_is_not_json_into_invalid_response() -> None:
@@ -266,7 +254,6 @@ def test_lambda_turns_a_refused_request_into_status_422(error_type: str) -> None
     assert caught.value.status == 422
     assert error_type in str(caught.value)
     assert "context window" in str(caught.value)
-    assert not default_ai_retry_strategy(caught.value, 1).should_retry
 
 
 @pytest.mark.parametrize(
@@ -282,7 +269,7 @@ def test_lambda_turns_a_refused_request_into_status_422(error_type: str) -> None
         ("[1]", "Unhandled"),
     ],
 )
-def test_lambda_turns_another_function_error_into_a_retryable_error(
+def test_lambda_turns_another_function_error_into_decider_error(
     payload: str, kind: str
 ) -> None:
     client = FakeClient(
@@ -295,16 +282,13 @@ def test_lambda_turns_another_function_error_into_a_retryable_error(
 
     assert caught.value.status is None
     assert kind in str(caught.value)
-    assert default_ai_retry_strategy(caught.value, 1).should_retry
 
 
 @pytest.mark.parametrize(
     ("code", "status"),
     [("TooManyRequestsException", 429), ("ServiceException", 500)],
 )
-def test_lambda_passes_throttling_and_server_errors_through_for_a_retry(
-    code: str, status: int
-) -> None:
+def test_lambda_passes_service_errors_through(code: str, status: int) -> None:
     error = client_error(code, status)
     client = FakeClient("invoke", error)
 
@@ -312,7 +296,6 @@ def test_lambda_passes_throttling_and_server_errors_through_for_a_retry(
         lambda_transport(FUNCTION, client=client)(REQUEST)
 
     assert caught.value is error
-    assert default_ai_retry_strategy(error, 1).should_retry
 
 
 def test_lambda_turns_a_reply_that_is_not_json_into_invalid_response() -> None:
