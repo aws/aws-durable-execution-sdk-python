@@ -28,7 +28,11 @@ def test_real_sdk_replay_and_service_history_normalize_for_shared_acceptance(
     payload = shared_payload("replay")
     payload["sharedScenario"] = "suspension-retry"
     payload["behaviorBudgets"] = {"observationGraceMs": 1}
-    with DurableFunctionTestRunner(handler=fixture.handler) as runner:
+    # The shared evidence uses one observation clock, and callback retirement
+    # is timed from the service history. The local runner's default virtual
+    # clock skips this fixture's durable wait, which would date service events
+    # ahead of the wall-clock retirement they are compared against.
+    with DurableFunctionTestRunner(handler=fixture.handler, skip_time=False) as runner:
         arn = runner.run_async(input=json.dumps(payload), execution_timeout=30)
         callback = runner.wait_for_callback(arn, name="completion", timeout=20)
         runner.send_callback_success(callback, result=b"marker")
