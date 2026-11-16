@@ -32,7 +32,7 @@ and check out the exact `CONFORMANCE_REVISION` from `shared_contract.py`:
 
 ```bash
 git clone https://github.com/aws/aws-durable-execution-conformance-tests.git .conformance
-git -C .conformance checkout --detach 76732458015d4437e06de061636a61ca2c9558d2
+git -C .conformance checkout --detach 793ecdc6b3528433e80da25622c85749ff8b1323
 hatch run lmi:shared-setup
 hatch run lmi:lint
 hatch run lmi:shared-tests
