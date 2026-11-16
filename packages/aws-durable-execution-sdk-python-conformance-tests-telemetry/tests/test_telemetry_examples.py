@@ -34,7 +34,12 @@ TEMPLATE_PATH = PKG_DIR / "template.yaml"
 
 SDK_REPOSITORY_URL = "git+https://github.com/aws/aws-durable-execution-sdk-python.git"
 EXPECTED_MODULES: frozenset[str] = frozenset(
-    {"telemetry_1_success", "telemetry_2_failure", "telemetry_3_result_select"}
+    {
+        "telemetry_1_success",
+        "telemetry_2_failure",
+        "telemetry_3_result_select",
+        "telemetry_4_full_tree_map",
+    }
 )
 # Logical ID -> requirement ID. The function name suffix must equal the
 # requirement ID, so the runner can match the deployed function to its test.
@@ -42,6 +47,7 @@ EXPECTED_FUNCTIONS: dict[str, str] = {
     "Telemetry1Success": "telemetry-1",
     "Telemetry2Failure": "telemetry-2",
     "Telemetry3ResultSelect": "telemetry-3",
+    "Telemetry4FullTreeMap": "telemetry-4",
 }
 
 
@@ -128,6 +134,18 @@ def test_makefile_has_a_build_target_per_function(
 
 def test_handler_modules_are_exactly_the_expected_set() -> None:
     assert {path.stem for path in SRC_DIR.glob("*.py")} == EXPECTED_MODULES
+
+
+def test_every_handler_module_is_deployed_by_exactly_one_function(
+    template: dict[str, Any],
+) -> None:
+    """Two functions on one module would leave one requirement untested."""
+    deployed_modules = sorted(
+        resource["Properties"]["Handler"].partition(".")[0]
+        for resource in functions(template).values()
+    )
+
+    assert deployed_modules == sorted(EXPECTED_MODULES)
 
 
 def test_requirements_install_both_packages_from_one_commit() -> None:
@@ -350,3 +368,53 @@ def test_telemetry_3_handler_exports_only_the_selected_result_key(
     assert fetch_user["status"] == "SUCCEEDED"
     assert fetch_user["count"] == 1
     assert fetch_user["result"] == {"userId": "u-123"}
+
+
+def test_telemetry_4_handler_records_the_full_operation_tree(
+    logs_client: FakeLogsClient,
+) -> None:
+    """telemetry-4 pins five operationsByName keys under full-tree detail."""
+    module = load_handler_module("telemetry_4_full_tree_map")
+
+    with DurableFunctionTestRunner(
+        handler=module.handler, execution_timeout=15
+    ) as runner:
+        result = runner.run(input="[1, 2]")
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.result is not None
+    assert json.loads(result.result) == ["Hello, 1!", "Hello, 2!"]
+    assert len(logs_client.put_log_events_calls) == 1
+    assert logs_client.put_log_events_calls[0]["logGroupName"] == LOG_GROUP_NAME
+    record = logs_client.records()[0]
+    assert record["status"] == "SUCCEEDED"
+    assert record["input"] == [1, 2]
+    assert record["output"] == ["Hello, 1!", "Hello, 2!"]
+    operations = record["operationsByName"]
+    assert set(operations) == {
+        "process-items",
+        "item-1",
+        "item-2",
+        "greet-1",
+        "greet-2",
+    }
+    expected_kinds = {
+        "process-items": ("CONTEXT", "Map"),
+        "item-1": ("CONTEXT", "MapIteration"),
+        "item-2": ("CONTEXT", "MapIteration"),
+        "greet-1": ("STEP", "Step"),
+        "greet-2": ("STEP", "Step"),
+    }
+    for name, (operation_type, sub_type) in expected_kinds.items():
+        operation = operations[name]
+        assert operation["type"] == operation_type
+        assert operation["subType"] == sub_type
+        assert operation["status"] == "SUCCEEDED"
+        assert operation["count"] == 1
+        assert operation["failedCount"] == 0
+        assert "result" not in operation
+        assert "error" not in operation
+        if operation_type == "CONTEXT":
+            assert "maxAttempt" not in operation
+        else:
+            assert operation["maxAttempt"] == 1

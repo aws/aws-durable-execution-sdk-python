@@ -1,4 +1,4 @@
-.PHONY: build-Telemetry1Success build-Telemetry2Failure build-Telemetry3ResultSelect build-handlers
+.PHONY: build-Telemetry1Success build-Telemetry2Failure build-Telemetry3ResultSelect build-Telemetry4FullTreeMap build-handlers
 
 # Every function builds from the same src/ directory with the same recipe.
 # SAM calls one target per logical ID, so each target points at the shared one.
@@ -7,6 +7,8 @@ build-Telemetry1Success: build-handlers
 build-Telemetry2Failure: build-handlers
 
 build-Telemetry3ResultSelect: build-handlers
+
+build-Telemetry4FullTreeMap: build-handlers
 
 build-handlers:
 	python3 -m pip install --upgrade \

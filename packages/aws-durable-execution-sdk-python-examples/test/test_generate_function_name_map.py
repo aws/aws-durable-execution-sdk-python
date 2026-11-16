@@ -26,6 +26,11 @@ EXAMPLES = [
         "handler": "microvm_run_job.handler",
         "usesMicrovm": True,
     },
+    {
+        "name": "AgentCore Run Job",
+        "handler": "agentcore_run_job.handler",
+        "usesAgentcore": True,
+    },
 ]
 
 
@@ -44,12 +49,22 @@ def test_map_includes_microvm_examples_on_request():
     }
 
 
-def test_map_covers_every_catalog_example_without_microvm():
+def test_map_includes_agentcore_examples_on_request():
+    assert generate_function_name_map.build_function_name_map(
+        EXAMPLES, "Py313-", include_agentcore=True
+    ) == {
+        "Hello World": "Py313-HelloWorld:$LATEST",
+        "AgentCore Run Job": "Py313-AgentcoreRunJob:$LATEST",
+    }
+
+
+def test_map_covers_every_catalog_example_without_microvm_or_agentcore():
     catalog = generate_function_name_map.load_catalog()["examples"]
     expected = {
         example["name"]
         for example in catalog
         if not generate_function_name_map.uses_microvm(example)
+        and not generate_function_name_map.uses_agentcore(example)
     }
 
     assert set(generate_function_name_map.generate_function_name_map("P-")) == (
