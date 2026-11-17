@@ -188,7 +188,7 @@ class AgentcoreInvokeOptions:
     """The longest time between two heartbeats from the agent for this job.
 
     Set it. It ends the job when the worker crashes or stops reporting. The
-    first period must cover the request step with its retries, so 30
-    seconds or more is a safe value. See
+    first period must cover the request step with its retries and a cold
+    session start, so 30 seconds or more is a safe value. See
     :attr:`AgentcoreConfig.heartbeat_timeout`.
     """

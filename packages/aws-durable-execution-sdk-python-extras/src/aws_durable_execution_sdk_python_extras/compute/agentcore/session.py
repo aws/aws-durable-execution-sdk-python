@@ -26,8 +26,8 @@ class AgentcoreSession(Protocol):
     """
 
     @property
-    def session_id(self) -> str:
-        """The ``runtimeSessionId`` of the session."""
+    def runtime_session_id(self) -> str:
+        """The ``runtimeSessionId`` that every job of the session uses."""
         ...
 
     def invoke(
@@ -51,5 +51,11 @@ class AgentcoreSession(Protocol):
         Returns:
             The value that the agent passed to
             ``SendDurableExecutionCallbackSuccess``, parsed as JSON.
+
+        Raises:
+            AgentcoreJobFailedError: When the agent reports a failure.
+            AgentcoreTimeoutError: When the job or its heartbeat times out.
+            AgentcoreDeliveryError: When the request fails after all
+                retries, or the agent does not accept the job.
         """
         ...
