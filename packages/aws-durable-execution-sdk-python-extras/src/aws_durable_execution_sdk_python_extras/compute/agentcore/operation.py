@@ -224,10 +224,7 @@ class _AgentcoreScope:
         if not isinstance(name, str) or not name:
             msg = "an AgentCore operation requires a non-empty name"
             raise ValidationError(msg)
-        timeout_seconds = config.timeout.to_seconds()
-        if timeout_seconds < 1:
-            msg = f'AgentCore "{name}": timeout must be at least 1 second'
-            raise ValidationError(msg)
+        timeout_seconds = _validate_timeout(name, config.timeout)
         heartbeat_timeout_seconds = (
             None
             if config.heartbeat_timeout is None
@@ -541,6 +538,19 @@ def _reported_error_type(callback: Callback) -> str | None:
     if not isinstance(reported, str) or reported in {"", "Error"}:
         return None
     return reported
+
+
+def _validate_timeout(name: str, timeout: Duration) -> int:
+    """Return the timeout in seconds.
+
+    Raises:
+        ValidationError: When it is less than 1 second.
+    """
+    timeout_seconds = timeout.to_seconds()
+    if timeout_seconds < 1:
+        msg = f'AgentCore "{name}": timeout must be at least 1 second'
+        raise ValidationError(msg)
+    return timeout_seconds
 
 
 def _validate_input(name: str, job_input: Any) -> None:
