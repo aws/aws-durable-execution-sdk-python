@@ -258,17 +258,7 @@ class _AgentcoreScope:
     def run_job(self, child: DurableContext, job_input: Any) -> Any:
         """Run the operation's durable operations in its child context."""
         name = self.name
-        session_id: str = child.step(
-            # A UUID has 36 characters. InvokeAgentRuntime requires a session
-            # ID of at least 33.
-            lambda _: str(uuid.uuid4()),
-            name=f"{name}.session",
-            # Plain JSON, so a reader of the execution history finds the
-            # session ID.
-            config=StepConfig(
-                serdes=JsonSerDes(), sub_type=AgentcoreOperationSubType.SESSION_ID
-            ),
-        )
+        session_id = _create_session_id(child, name)
         callback = child.create_callback(
             name=f"{name}.callback",
             config=CallbackConfig(
@@ -349,7 +339,7 @@ class _AgentcoreScope:
             def call() -> None:
                 # The answer is a stream. A stalled read must end before the
                 # reserve too. So the read runs inside the same call.
-                response = self._client().invoke_agent_runtime(**request)
+                response = _client(self.config).invoke_agent_runtime(**request)
                 _check_accepted(response)
 
             _call_before_reserve("InvokeAgentRuntime", call, remaining_seconds)
@@ -373,80 +363,110 @@ class _AgentcoreScope:
             ) from error
 
     def _stop(self, child: DurableContext, session_id: str) -> None:
-        """Run the stop step, and log a final failure instead of raising.
+        _stop_session(child, self.name, self.config, self.retry_strategy, session_id)
 
-        The job's outcome is already recorded when stop runs. AgentCore ends
-        an idle session at the agent runtime's idle timeout. So a stop
-        failure must not discard the outcome. The step's failure is
-        checkpointed. So on replay the step fails again at once, with the
-        same outcome.
 
-        Each attempt ends before the invocation reserve. A stalled call
-        then fails the attempt with a retryable ``TimeoutError``, instead of
-        running until Lambda ends the invocation. So the step records an
-        outcome, and a later replay returns the job's outcome.
-        """
-        remaining_seconds = _remaining_seconds(child)
-        try:
-            child.step(
-                lambda _: _call_before_reserve(
-                    "StopRuntimeSession",
-                    lambda: self._stop_call(session_id),
-                    remaining_seconds,
-                ),
-                name=f"{self.name}.stop",
-                config=StepConfig(
-                    retry_strategy=self.retry_strategy,
-                    sub_type=AgentcoreOperationSubType.STOP,
-                ),
-            )
-        except StepError as error:
-            # The session keeps running, and is billed, until AgentCore ends
-            # it. A missing permission fails every stop this way. This log
-            # is the only sign of it. So it is an error, not a warning. The
-            # permission hint is added only for an AccessDenied answer. A
-            # stop that never ran, for example for lack of invocation time,
-            # names its own cause in the error.
-            detail = error.message or error.error_type
-            hint = (
-                " A missing permission needs "
-                "bedrock-agentcore:StopRuntimeSession in the function's "
-                "execution role, on the runtime ARN and on "
-                "<runtime ARN>/runtime-endpoint/*."
-                if "AccessDenied" in (detail or "")
-                else ""
-            )
-            child.logger.error(
-                f'AgentCore "{self.name}": StopRuntimeSession failed for '
-                f"session {session_id}. The session keeps running until the "
-                "agent runtime's idle timeout or maximum lifetime ends it."
-                f"{hint} Error: {detail}",
-                extra={"runtimeSessionId": session_id, "error": error.message},
-            )
+def _create_session_id(child: DurableContext, name: str) -> str:
+    """Run the session step, ``<name>.session``, and return the session ID.
 
-    def _stop_call(self, session_id: str) -> None:
-        request: dict[str, Any] = {
-            "agentRuntimeArn": self.config.agent_runtime_arn,
-            "runtimeSessionId": session_id,
-        }
-        if self.config.qualifier is not None:
-            request["qualifier"] = self.config.qualifier
-        try:
-            self._client().stop_runtime_session(**request)
-        except ClientError as error:
-            # The service answers 404 ResourceNotFoundException for a
-            # session that was stopped or never started, measured live. A
-            # session that the idle timeout ended answers 200. Either way,
-            # no session runs.
-            if error.response.get("Error", {}).get("Code") != (
-                "ResourceNotFoundException"
-            ):
-                raise
+    The SDK checkpoints the ID. So every retry and replay uses the same
+    session.
+    """
+    session_id: str = child.step(
+        # A UUID has 36 characters. InvokeAgentRuntime requires a session
+        # ID of at least 33.
+        lambda _: str(uuid.uuid4()),
+        name=f"{name}.session",
+        # Plain JSON, so a reader of the execution history finds the
+        # session ID.
+        config=StepConfig(
+            serdes=JsonSerDes(), sub_type=AgentcoreOperationSubType.SESSION_ID
+        ),
+    )
+    return session_id
 
-    def _client(self) -> BedrockAgentcoreClient:
-        if self.config.client is not None:
-            return self.config.client
-        return _DEFAULT_CLIENTS.get(_arn_region(self.config.agent_runtime_arn))
+
+def _stop_session(
+    child: DurableContext,
+    name: str,
+    config: AgentcoreConfig,
+    retry_strategy: Callable[[Exception, int], RetryDecision],
+    session_id: str,
+) -> None:
+    """Run the stop step, and log a final failure instead of raising.
+
+    The job's outcome is already recorded when stop runs. AgentCore ends
+    an idle session at the agent runtime's idle timeout. So a stop
+    failure must not discard the outcome. The step's failure is
+    checkpointed. So on replay the step fails again at once, with the
+    same outcome.
+
+    Each attempt ends before the invocation reserve. A stalled call
+    then fails the attempt with a retryable ``TimeoutError``, instead of
+    running until Lambda ends the invocation. So the step records an
+    outcome, and a later replay returns the job's outcome.
+    """
+    remaining_seconds = _remaining_seconds(child)
+    try:
+        child.step(
+            lambda _: _call_before_reserve(
+                "StopRuntimeSession",
+                lambda: _stop_call(config, session_id),
+                remaining_seconds,
+            ),
+            name=f"{name}.stop",
+            config=StepConfig(
+                retry_strategy=retry_strategy,
+                sub_type=AgentcoreOperationSubType.STOP,
+            ),
+        )
+    except StepError as error:
+        # The session keeps running, and is billed, until AgentCore ends
+        # it. A missing permission fails every stop this way. This log
+        # is the only sign of it. So it is an error, not a warning. The
+        # permission hint is added only for an AccessDenied answer. A
+        # stop that never ran, for example for lack of invocation time,
+        # names its own cause in the error.
+        detail = error.message or error.error_type
+        hint = (
+            " A missing permission needs "
+            "bedrock-agentcore:StopRuntimeSession in the function's "
+            "execution role, on the runtime ARN and on "
+            "<runtime ARN>/runtime-endpoint/*."
+            if "AccessDenied" in (detail or "")
+            else ""
+        )
+        child.logger.error(
+            f'AgentCore "{name}": StopRuntimeSession failed for '
+            f"session {session_id}. The session keeps running until the "
+            "agent runtime's idle timeout or maximum lifetime ends it."
+            f"{hint} Error: {detail}",
+            extra={"runtimeSessionId": session_id, "error": error.message},
+        )
+
+
+def _stop_call(config: AgentcoreConfig, session_id: str) -> None:
+    request: dict[str, Any] = {
+        "agentRuntimeArn": config.agent_runtime_arn,
+        "runtimeSessionId": session_id,
+    }
+    if config.qualifier is not None:
+        request["qualifier"] = config.qualifier
+    try:
+        _client(config).stop_runtime_session(**request)
+    except ClientError as error:
+        # The service answers 404 ResourceNotFoundException for a
+        # session that was stopped or never started, measured live. A
+        # session that the idle timeout ended answers 200. Either way,
+        # no session runs.
+        if error.response.get("Error", {}).get("Code") != ("ResourceNotFoundException"):
+            raise
+
+
+def _client(config: AgentcoreConfig) -> BedrockAgentcoreClient:
+    if config.client is not None:
+        return config.client
+    return _DEFAULT_CLIENTS.get(_arn_region(config.agent_runtime_arn))
 
 
 def _check_accepted(response: Any) -> None:
