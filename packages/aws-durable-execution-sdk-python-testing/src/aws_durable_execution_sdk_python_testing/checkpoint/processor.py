@@ -157,6 +157,21 @@ class CheckpointProcessor:
             next_marker=None,
         )
 
+    def pause_execution(self, durable_execution_arn: str) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Pause an execution without waiting for its invocation to stop.
+
+        The running invocation's next checkpoint is answered without a
+        token, like Lambda does after PauseDurableExecution. Completed or
+        already paused executions are unchanged.
+        """
+        execution: Execution = self._store.load(durable_execution_arn)
+        if execution.is_complete or execution.is_paused:
+            return
+        execution.pause()
+        self._store.update(execution)
+
 
 def _maybe_replay_cached(
     execution: Execution,

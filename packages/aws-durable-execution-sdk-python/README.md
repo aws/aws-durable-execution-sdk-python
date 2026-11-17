@@ -170,6 +170,22 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 `RetryPresets` in `aws_durable_execution_sdk_python.retries` holds ready-made strategies.
 
+### Pause after repeated failures (experimental)
+
+`StepConfig(pause_every=N)` pauses the durable execution after every Nth failed attempt that the retry strategy retries. For example, `pause_every=5` pauses after attempts 5, 10, 15, and so on. The step records its normal retry, and the invocation ends. An operator resumes the execution with the Lambda `ResumeDurableExecution` API, and the next attempt runs.
+
+```python
+RETRY_AND_PAUSE = StepConfig(
+    retry_strategy=create_retry_strategy(RetryStrategyConfig(max_attempts=20)),
+    pause_every=5,
+)
+```
+
+- The option does not change how many attempts run. When the retry strategy stops, the step fails as usual.
+- Give the function's execution role `lambda:PauseDurableExecution` on its own durable executions. Without the permission, the SDK logs a warning and the step retries as usual.
+- The pause is asynchronous. So one more attempt can start before Lambda applies it.
+- This option is experimental. It may change or be removed in a future release.
+
 ### Replay rules
 
 The function runs again from the start after each wait, retry, or resume. So:

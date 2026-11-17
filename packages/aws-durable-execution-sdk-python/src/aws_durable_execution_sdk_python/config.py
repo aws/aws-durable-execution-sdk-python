@@ -535,12 +535,35 @@ class StepConfig:
             Replay compares the subtype with the checkpoint. So changing the
             subtype of an existing step is a breaking change for executions
             in flight.
+
+        pause_every: Experimental; may change or be removed in a future
+            release. Pause the durable execution after every Nth failed
+            attempt that the retry strategy retries. For example, 5 pauses
+            after attempts 5, 10, 15, and so on. None (the default) never
+            pauses. Use a positive integer. The SDK does not validate the
+            value.
+            On a pause, the SDK calls the Lambda PauseDurableExecution API,
+            records the normal retry checkpoint, and ends the invocation with
+            PENDING. The step resumes with its next attempt after an operator
+            calls ResumeDurableExecution. The option does not change how many
+            attempts run. When the retry strategy stops, the step fails as
+            usual and does not pause.
+            Only an attempt that raised in the current invocation counts. An
+            AT_MOST_ONCE_PER_RETRY attempt that was interrupted does not pause.
+            You must give the function's execution role permission for
+            lambda:PauseDurableExecution on its own durable executions. If
+            the pause call fails, for example because the permission is
+            missing, the SDK logs a warning and the step retries as usual.
+            A service client without pause support also retries as usual.
+            The pause is asynchronous. So one more attempt can start before
+            Lambda applies it.
     """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE_PER_RETRY
     serdes: SerDes | None = None
     sub_type: str | None = field(default=None, kw_only=True)
+    pause_every: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         _validate_sub_type(self.sub_type)

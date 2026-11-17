@@ -20,6 +20,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationUpdate,
+    PauseExecutionRequest,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.base import (
@@ -304,7 +305,7 @@ class StepOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier.name,
             )
 
-            self.retry_handler(e, checkpointed_result)
+            self.retry_handler(e, checkpointed_result, may_pause=True)
             # If we've failed to raise an exception from the retry_handler, then we are in a
             # weird state, and should crash terminate the execution
             msg = "retry handler should have raised an exception, but did not."
@@ -314,12 +315,16 @@ class StepOperationExecutor(OperationExecutor[T]):
         self,
         error: Exception,
         checkpointed_result: CheckpointedResult,
+        *,
+        may_pause: bool = False,
     ):
         """Checkpoint and suspend for replay if retry required, otherwise raise error.
 
         Args:
             error: The exception that occurred during step execution
             checkpointed_result: The checkpoint data containing operation state
+            may_pause: True when the step function raised in this invocation.
+                Only then does StepConfig.pause_every apply.
 
         Raises:
             SuspendExecution: If retry is scheduled
@@ -377,10 +382,25 @@ class StepOperationExecutor(OperationExecutor[T]):
                 next_attempt_delay_seconds=delay_seconds,
             )
 
+            # Request the pause before the RETRY checkpoint. Lambda then
+            # answers that checkpoint without a token once the pause applies.
+            paused: bool = may_pause and self._pause_if_due(retry_attempt + 1)
+
             # Checkpoint RETRY operation with blocking (is_sync=True, default).
             # Must ensure retry state is persisted before suspending execution.
             # This guarantees the retry attempt count and next attempt timestamp are durable.
             self.state.create_checkpoint(operation_update=retry_operation)
+
+            if paused:
+                # Suspend without a resume time. The next attempt runs after
+                # the execution is resumed, in a new invocation.
+                suspend_with_optional_resume_delay(
+                    msg=(
+                        f"Paused execution after attempt {retry_attempt + 1} of "
+                        f"step {self.operation_identifier.operation_id}"
+                    ),
+                    delay_seconds=None,
+                )
 
             suspend_with_optional_resume_delay(
                 msg=(
@@ -405,3 +425,34 @@ class StepOperationExecutor(OperationExecutor[T]):
         # exhausted StepInterruptedError surfaces the same way as any other
         # step failure.)
         error_object.raise_as_operation_error(StepError)
+
+    def _pause_if_due(self, attempt: int) -> bool:
+        """Request a pause when attempt is a multiple of pause_every.
+
+        Args:
+            attempt: The 1-based attempt that just failed.
+
+        Returns:
+            True if the pause request was sent. False if no pause is due, the
+            service client cannot pause, or the request failed.
+        """
+        pause_every: int | None = self.config.pause_every
+        if pause_every is None or attempt % pause_every != 0:
+            return False
+
+        request: PauseExecutionRequest = PauseExecutionRequest.create_for_step_attempt(
+            self.operation_identifier, attempt
+        )
+        try:
+            return self.state.pause_execution(request)
+        except Exception as e:  # noqa: BLE001 - a failed pause falls back to a normal retry
+            self.context_logger.warning(
+                "Could not pause the execution after attempt %s of step %s. "
+                "Retrying as usual. Check that the execution role allows "
+                "lambda:PauseDurableExecution. Error: %s",
+                attempt,
+                self.operation_identifier.name
+                or self.operation_identifier.operation_id,
+                e,
+            )
+            return False
