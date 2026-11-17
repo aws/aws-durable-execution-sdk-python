@@ -18,8 +18,6 @@ from aws_durable_execution_sdk_python_extras.ai import (
     BedrockCallOptions,
     BedrockConfig,
     BedrockGuardrail,
-    LlmStoppedError,
-    default_ai_retry_strategy,
     llm,
 )
 
@@ -147,7 +145,10 @@ def test_ask_uses_the_config_and_the_call_overrides(run_ai: Any) -> None:
 
 
 def test_a_reply_at_the_token_limit_raises_llm_max_tokens_error(run_ai: Any) -> None:
-    model = llm(BedrockConfig(client=FakeBedrock(reply("par", "max_tokens"))))
+    model = llm(
+        BedrockConfig(client=FakeBedrock(reply("par", "max_tokens"))),
+        retry_strategy=no_retry,
+    )
 
     value, _ = run_ai(lambda context: model.ask(context, "Q?"))
 
@@ -156,16 +157,16 @@ def test_a_reply_at_the_token_limit_raises_llm_max_tokens_error(run_ai: Any) -> 
 
 
 @pytest.mark.parametrize(
-    ("stop_reason", "retried"),
+    "stop_reason",
     [
-        ("guardrail_intervened", False),
-        ("content_filtered", False),
-        ("malformed_model_output", True),
-        ("malformed_tool_use", True),
+        "guardrail_intervened",
+        "content_filtered",
+        "malformed_model_output",
+        "malformed_tool_use",
     ],
 )
 def test_another_stop_reason_raises_llm_stopped_error(
-    run_ai: Any, stop_reason: str, retried: bool
+    run_ai: Any, stop_reason: str
 ) -> None:
     model = llm(
         BedrockConfig(client=FakeBedrock(reply("blocked", stop_reason))),
@@ -176,31 +177,37 @@ def test_another_stop_reason_raises_llm_stopped_error(
 
     assert value["error"] == "LlmStoppedError"
     assert value["stop_reason"] == stop_reason
-    error = LlmStoppedError(stop_reason=stop_reason)
-    assert default_ai_retry_strategy(error, 1).should_retry is retried
 
 
-@pytest.mark.parametrize("question", ["", "  ", None, 3])
-def test_an_invalid_question_raises_and_creates_no_operation(
-    run_ai: Any, question: Any
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"output": {"message": {"role": "assistant", "content": [{"text": "x"}]}}},
+        {"output": {"message": {"role": "assistant", "content": []}}},
+        {},
+    ],
+)
+def test_a_reply_without_a_stop_reason_raises_llm_stopped_error(
+    run_ai: Any, response: dict[str, Any]
 ) -> None:
+    model = llm(BedrockConfig(client=FakeBedrock(response)), retry_strategy=no_retry)
+
+    value, _ = run_ai(lambda context: model.ask(context, "Q?"))
+
+    assert value["error"] == "LlmStoppedError"
+    assert value["stop_reason"] is None
+    assert "no stop reason" in value["message"]
+
+
+def test_an_input_that_is_not_json_fails_the_step(run_ai: Any) -> None:
     client = FakeBedrock()
-    model = llm(BedrockConfig(client=client))
-
-    value, result = run_ai(lambda context: model.ask(context, question))
-
-    assert value["error"] == "TypeError"
-    assert result.operations == []
-    assert client.calls == []
-
-
-def test_an_input_that_is_not_json_raises_type_error(run_ai: Any) -> None:
-    model = llm(BedrockConfig(client=FakeBedrock()))
+    model = llm(BedrockConfig(client=client), retry_strategy=no_retry)
 
     value, result = run_ai(lambda context: model.ask(context, "Q?", {1, 2}))
 
-    assert value["error"] == "TypeError"
-    assert result.operations == []
+    assert value["error"] == "StepError"
+    assert [op.name for op in result.operations] == ["llm.ask"]
+    assert client.calls == []
 
 
 def test_destination_must_be_a_bedrock_config() -> None:

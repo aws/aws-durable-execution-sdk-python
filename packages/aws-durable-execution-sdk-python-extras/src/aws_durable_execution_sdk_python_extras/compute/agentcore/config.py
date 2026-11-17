@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""The configuration of :func:`agentcore`."""
+"""The configuration of :func:`agentcore` and :func:`agentcore_session`."""
 
 from __future__ import annotations
 
@@ -114,4 +114,81 @@ class AgentcoreConfig:
     from the agent runtime ARN. The default client has a 5-second connect
     timeout, a 60-second read timeout, and 3 attempts in botocore's standard
     retry mode. A client that you pass keeps its own settings.
+    """
+
+
+@dataclass(frozen=True, kw_only=True)
+class AgentcoreSessionConfig:
+    """The agent runtime of :func:`agentcore_session`.
+
+    The session sends all its jobs to one AgentCore Runtime session. The jobs
+    share the files and the memory of that session's microVM.
+
+    The rules of :class:`AgentcoreConfig` for ``agent_runtime_arn``,
+    ``qualifier``, ``retry_strategy`` and ``client`` apply here too.
+    """
+
+    agent_runtime_arn: str
+    """The ARN of the AgentCore Runtime agent runtime that runs the jobs.
+
+    The agent runtime and the two execution roles need the same setup as
+    :attr:`AgentcoreConfig.agent_runtime_arn`.
+
+    After the agent runtime's ``idleRuntimeSessionTimeout``, a session with
+    no running job ends. A later job with the same session ID then gets a
+    new microVM without an error, and the memory and files of the old one
+    are lost. So set the idle timeout longer than any wait between two jobs
+    of the session.
+    """
+
+    timeout: Duration
+    """The lifetime of the session, including durable waits between jobs.
+
+    It must be at least 1 second. AgentCore ends a session at the agent
+    runtime's ``maxLifetime``: at most 8 hours for a microVM session, and at
+    most 14 days on Instances. So keep the timeout within the runtime's
+    ``maxLifetime``.
+    """
+
+    qualifier: str | None = None
+    """The endpoint qualifier of the agent runtime, such as ``DEFAULT``.
+
+    ``None`` sends no qualifier, and AgentCore uses its default endpoint.
+    """
+
+    retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
+    """The step retry strategy of the request and stop steps.
+
+    Defaults to :func:`default_agentcore_retry_strategy`. A retried request
+    step can deliver the same job twice, so the job handler's side effects
+    must be idempotent.
+    """
+
+    client: BedrockAgentcoreClient | None = None
+    """The boto3 ``bedrock-agentcore`` client.
+
+    Defaults to one client per Region, created on first use, as in
+    :attr:`AgentcoreConfig.client`.
+    """
+
+
+@dataclass(frozen=True, kw_only=True)
+class AgentcoreInvokeOptions:
+    """One job of :meth:`AgentcoreSession.invoke`."""
+
+    timeout: Duration
+    """The longest time to wait for this job's result.
+
+    It must be at least 1 second. The session's ``timeout`` does not shorten
+    it. A job that runs after the session ends can never report. So keep the
+    job within the session's ``timeout``.
+    """
+
+    heartbeat_timeout: Duration | None = None
+    """The longest time between two heartbeats from the agent for this job.
+
+    Set it. It ends the job when the worker crashes or stops reporting. The
+    first period must cover the request step with its retries and a cold
+    session start, so 30 seconds or more is a safe value. See
+    :attr:`AgentcoreConfig.heartbeat_timeout`.
     """

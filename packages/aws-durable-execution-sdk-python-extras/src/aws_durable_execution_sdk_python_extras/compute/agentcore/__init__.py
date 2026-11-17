@@ -10,6 +10,8 @@ The exports match ``@aws/durable-execution-sdk-js-extras/compute/agentcore``.
 
 from aws_durable_execution_sdk_python_extras.compute.agentcore.config import (
     AgentcoreConfig,
+    AgentcoreInvokeOptions,
+    AgentcoreSessionConfig,
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore.errors import (
     AgentcoreDeliveryError,
@@ -23,6 +25,9 @@ from aws_durable_execution_sdk_python_extras.compute.agentcore.operation import 
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore.retry import (
     default_agentcore_retry_strategy,
+)
+from aws_durable_execution_sdk_python_extras.compute.agentcore.session import (
+    AgentcoreSession,
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore.subtypes import (
     AgentcoreOperationSubType,
@@ -38,9 +43,12 @@ __all__ = [
     "AgentcoreConfig",
     "AgentcoreDeliveryError",
     "AgentcoreError",
+    "AgentcoreInvokeOptions",
     "AgentcoreJobFailedError",
     "AgentcoreNotAcceptedError",
     "AgentcoreOperationSubType",
+    "AgentcoreSession",
+    "AgentcoreSessionConfig",
     "AgentcoreTimeoutError",
     "ComputeError",
     "agentcore",

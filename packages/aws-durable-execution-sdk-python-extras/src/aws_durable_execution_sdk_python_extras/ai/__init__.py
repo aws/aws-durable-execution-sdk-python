@@ -16,14 +16,9 @@ The exports match ``@aws/durable-execution-sdk-js-extras/ai``:
   :func:`lambda_transport` reach a Strands Decider on AWS.
 """
 
-from aws_durable_execution_sdk_python_extras.ai._shared import (
-    MAX_CLASSIFY_OPTIONS,
-    MAX_SCORE_LEVELS,
-)
 from aws_durable_execution_sdk_python_extras.ai.decider import Decider, decider
 from aws_durable_execution_sdk_python_extras.ai.errors import (
     AiError,
-    AiTimeoutError,
     DeciderError,
     DeciderInvalidResponseError,
     LlmMaxTokensError,
@@ -37,7 +32,6 @@ from aws_durable_execution_sdk_python_extras.ai.llm import (
     Llm,
     llm,
 )
-from aws_durable_execution_sdk_python_extras.ai.retry import default_ai_retry_strategy
 from aws_durable_execution_sdk_python_extras.ai.subtypes import AiOperationSubType
 from aws_durable_execution_sdk_python_extras.ai.transports import (
     DeciderRequest,
@@ -50,11 +44,8 @@ from aws_durable_execution_sdk_python_extras.ai.transports import (
 
 __all__ = [
     "DEFAULT_LLM_MODEL_ID",
-    "MAX_CLASSIFY_OPTIONS",
-    "MAX_SCORE_LEVELS",
     "AiError",
     "AiOperationSubType",
-    "AiTimeoutError",
     "BedrockCallOptions",
     "BedrockConfig",
     "BedrockGuardrail",
@@ -68,7 +59,6 @@ __all__ = [
     "LlmStoppedError",
     "agentcore_transport",
     "decider",
-    "default_ai_retry_strategy",
     "lambda_transport",
     "llm",
     "sagemaker_transport",
