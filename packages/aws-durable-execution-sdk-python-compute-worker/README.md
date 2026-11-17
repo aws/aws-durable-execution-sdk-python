@@ -203,6 +203,19 @@ The worker remembers the callback IDs of accepted jobs only in its process memor
 
 While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
+### Several jobs in one session
+
+A durable function can send several jobs to one AgentCore session. The worker runs every job of the session in the same process. So the jobs share state:
+
+- Files that a job writes to disk stay there for the next job.
+- Values that a handler keeps in module-level variables stay in memory for the next job.
+
+The worker clears no state between jobs. A handler that needs a clean start must clean up itself.
+
+The state lasts until the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) ends the session. The idle timeout counts only time with no running job. So a wait between two jobs that is longer than the idle timeout ends the session. The next job then gets a new microVM and a new process, and the files and memory of the old session are lost. The job still runs, without an error. So set the idle timeout longer than any wait between the jobs of one session.
+
+The [extras README](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras#run-a-job-in-agentcore-runtime) describes how a durable function sends jobs to AgentCore.
+
 ### Rules for AgentCore jobs
 
 1. Set `heartbeat_timeout`. It ends the job when the worker crashes or stops reporting. The first heartbeat period starts when the callback is created, before the job is delivered. So it must cover the request step with its retries and a cold session start, which took 1.4 to 3.1 seconds in a live test. 30 seconds or more is a safe value.
