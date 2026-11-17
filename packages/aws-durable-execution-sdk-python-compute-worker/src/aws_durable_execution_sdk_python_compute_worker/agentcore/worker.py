@@ -180,6 +180,9 @@ class _JobRunner:
         # The Unix time, in seconds, of the last change between Healthy and
         # HealthyBusy. The worker's start counts as a change.
         self._last_status_change = _now()
+        # The number of jobs that this process has run, counting the jobs
+        # that still run. Each job's log lines carry it.
+        self._job_count = 0
 
     def ping(self) -> dict[str, object]:
         """The answer to ``GET /ping``.
@@ -304,9 +307,13 @@ class _JobRunner:
         answered: threading.Event,
     ) -> None:
         answered.wait()
+        with self._lock:
+            self._job_count += 1
+            job_count = self._job_count
         fields: dict[str, object] = {
             "callbackId": job.callback_id,
             "runtimeSessionId": session_id,
+            "jobCount": job_count,
         }
         try:
             self._run_job_and_report(job, region, session_id, fields)

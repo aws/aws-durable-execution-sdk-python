@@ -185,6 +185,27 @@ def test_reports_the_result_to_the_callback_of_the_job(start: Any) -> None:
     assert context.region == "us-west-2"
 
 
+def test_logs_the_session_id_and_the_job_count_when_a_job_starts(
+    start: Any, logger: Any
+) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+    for callback_id, session_id in (("cb-1", "s" * 36), ("cb-2", "t" * 36)):
+        request(
+            worker,
+            "POST",
+            "/invocations",
+            job_body(callback_id),
+            {"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id},
+        )
+        assert worker.idle(WAIT)
+
+    started = [data for _, message, data in logger.lines if message == "job started"]
+    assert started == [
+        {"callbackId": "cb-1", "runtimeSessionId": "s" * 36, "jobCount": 1},
+        {"callbackId": "cb-2", "runtimeSessionId": "t" * 36, "jobCount": 2},
+    ]
+
+
 def test_reports_the_error_of_a_failed_job(start: Any) -> None:
     def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
         msg = "3 tests failed"
