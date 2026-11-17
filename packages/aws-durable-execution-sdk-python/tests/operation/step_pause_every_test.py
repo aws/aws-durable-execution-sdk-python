@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import Mock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from aws_durable_execution_sdk_python.config import (
     Duration,
@@ -18,6 +20,8 @@ from aws_durable_execution_sdk_python.exceptions import (
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
+    CheckpointOutput,
+    CheckpointUpdatedExecutionState,
     LambdaClient,
     Operation,
     OperationAction,
@@ -26,6 +30,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     PausableDurableServiceClient,
     PauseExecutionRequest,
+    StateOutput,
     StepDetails,
 )
 from aws_durable_execution_sdk_python.logger import Logger
@@ -96,6 +101,14 @@ def _retry(_error: Exception, _attempt: int) -> RetryDecision:
     return RetryDecision.retry(Duration.from_seconds(5))
 
 
+def _request(
+    identifier: OperationIdentifier, attempt: int, arn: str = "test_arn"
+) -> PauseExecutionRequest:
+    return PauseExecutionRequest.create_for_step_attempt(
+        identifier, attempt, durable_execution_arn=arn
+    )
+
+
 def _stop(_error: Exception, _attempt: int) -> RetryDecision:
     return RetryDecision.no_retry()
 
@@ -107,8 +120,8 @@ def _actions(state: Mock) -> list[OperationAction]:
     ]
 
 
-def test_pauses_on_attempt_multiple_then_checkpoints_retry_and_suspends():
-    """Attempt 2 with pause_every=2 pauses, sends RETRY, and suspends untimed."""
+def test_checkpoints_retry_then_pauses_on_attempt_multiple_and_suspends():
+    """Attempt 2 with pause_every=2 sends RETRY, pauses, and suspends untimed."""
     state = _state(_checkpoint(OperationStatus.READY, previous_attempts=1))
     order = Mock()
     order.attach_mock(state.pause_execution, "pause")
@@ -118,13 +131,11 @@ def test_pauses_on_attempt_multiple_then_checkpoints_retry_and_suspends():
         _run(state, StepConfig(retry_strategy=_retry, pause_every=2))
 
     assert not isinstance(exc_info.value, TimedSuspendExecution)
-    state.pause_execution.assert_called_once_with(
-        PauseExecutionRequest.create_for_step_attempt(_IDENTIFIER, 2)
-    )
+    state.pause_execution.assert_called_once_with(_request(_IDENTIFIER, 2))
     assert _actions(state) == [OperationAction.START, OperationAction.RETRY]
-    # The pause request precedes the RETRY checkpoint.
+    # The pause request follows the RETRY checkpoint.
     names = [c[0] for c in order.mock_calls]
-    assert names == ["checkpoint", "pause", "checkpoint"]
+    assert names == ["checkpoint", "checkpoint", "pause"]
     retry_update = state.create_checkpoint.call_args_list[1].kwargs["operation_update"]
     assert retry_update.error.type == "RuntimeError"
     assert retry_update.step_options.next_attempt_delay_seconds == 5
@@ -140,9 +151,7 @@ def test_pauses_on_later_multiples(previous_attempts: int):
 
     assert not isinstance(exc_info.value, TimedSuspendExecution)
     state.pause_execution.assert_called_once_with(
-        PauseExecutionRequest.create_for_step_attempt(
-            _IDENTIFIER, previous_attempts + 1
-        )
+        _request(_IDENTIFIER, previous_attempts + 1)
     )
 
 
@@ -190,8 +199,63 @@ def test_pause_failure_logs_warning_and_retries_as_usual():
 
     logger.warning.assert_called_once()
     warning_args = logger.warning.call_args.args
-    assert "lambda:PauseDurableExecution" in warning_args[0]
+    message = warning_args[0] % warning_args[1:]
     assert warning_args[1:3] == (1, "charge")
+    assert "Error: RuntimeError: AccessDeniedException." in message
+    assert "missing lambda:PauseDurableExecution permission" in message
+    assert "one possible cause" in message
+    assert _actions(state) == [OperationAction.START, OperationAction.RETRY]
+
+
+def test_pause_client_error_warning_names_the_service_error_code():
+    """A botocore ClientError is named by its service error code."""
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+    state.pause_execution.side_effect = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "not allowed"}},
+        "PauseDurableExecution",
+    )
+    logger = _logger()
+
+    with pytest.raises(TimedSuspendExecution):
+        _run(state, StepConfig(retry_strategy=_retry, pause_every=1), logger)
+
+    warning_args = logger.warning.call_args.args
+    message = warning_args[0] % warning_args[1:]
+    assert "Error: AccessDeniedException: " in message
+    assert "not allowed" in message
+    assert "one possible cause" in message
+
+
+def test_pause_conflict_warning_does_not_blame_permissions():
+    """A ResourceConflictException says the execution is already pausing."""
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+    state.pause_execution.side_effect = ClientError(
+        {"Error": {"Code": "ResourceConflictException", "Message": "paused"}},
+        "PauseDurableExecution",
+    )
+    logger = _logger()
+
+    with pytest.raises(TimedSuspendExecution):
+        _run(state, StepConfig(retry_strategy=_retry, pause_every=1), logger)
+
+    warning_args = logger.warning.call_args.args
+    message = warning_args[0] % warning_args[1:]
+    assert "Error: ResourceConflictException: " in message
+    assert "already pausing or paused" in message
+    assert "permission" not in message
+
+
+def test_pause_client_error_without_code_uses_type_name():
+    """A ClientError without an error code falls back to the type name."""
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+    state.pause_execution.side_effect = ClientError({}, "PauseDurableExecution")
+    logger = _logger()
+
+    with pytest.raises(TimedSuspendExecution):
+        _run(state, StepConfig(retry_strategy=_retry, pause_every=1), logger)
+
+    warning_args = logger.warning.call_args.args
+    assert "Error: ClientError: " in warning_args[0] % warning_args[1:]
     assert _actions(state) == [OperationAction.START, OperationAction.RETRY]
 
 
@@ -235,14 +299,98 @@ def test_revoked_token_on_retry_checkpoint_suspends():
         _run(state, StepConfig(retry_strategy=_retry, pause_every=1))
 
     assert exc_info.value is revoked
+    # The execution is already pausing, so the step does not pause it again.
+    state.pause_execution.assert_not_called()
+
+
+def test_pause_waits_until_retry_checkpoint_is_accepted():
+    """The pause request starts only after the blocking RETRY checkpoint returns."""
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+    accepted: list[OperationAction] = []
+
+    def checkpoint(operation_update: object, **_kwargs: object) -> None:
+        accepted.append(operation_update.action)  # type: ignore[attr-defined]
+
+    def pause(_request: PauseExecutionRequest) -> bool:
+        assert accepted == [OperationAction.START, OperationAction.RETRY]
+        return True
+
+    state.create_checkpoint.side_effect = checkpoint
+    state.pause_execution.side_effect = pause
+
+    with pytest.raises(SuspendExecution) as exc_info:
+        _run(state, StepConfig(retry_strategy=_retry, pause_every=1))
+
+    assert not isinstance(exc_info.value, TimedSuspendExecution)
     state.pause_execution.assert_called_once()
 
 
+class _RecordingClient:
+    """Checkpoint client that records each request and when pause is called."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def checkpoint(
+        self,
+        durable_execution_arn: str,  # noqa: ARG002
+        checkpoint_token: str,  # noqa: ARG002
+        updates: list[object],
+        client_token: str | None,  # noqa: ARG002
+    ) -> CheckpointOutput:
+        actions = ",".join(u.action.value for u in updates)  # type: ignore[attr-defined]
+        self.events.append(f"checkpoint[{actions}]")
+        return CheckpointOutput(
+            checkpoint_token="next",  # noqa: S106
+            new_execution_state=CheckpointUpdatedExecutionState(operations=[]),
+        )
+
+    def get_execution_state(self, *args: object, **kwargs: object) -> StateOutput:
+        return StateOutput(operations=[], next_marker=None)
+
+    def pause_durable_execution(
+        self,
+        durable_execution_arn: str,  # noqa: ARG002
+        request: PauseExecutionRequest,  # noqa: ARG002
+    ) -> None:
+        self.events.append("pause")
+
+
+def test_real_state_sends_start_and_retry_before_pause():
+    """With the real batcher, the async START and the RETRY are sent before the pause."""
+    client = _RecordingClient()
+    state = _execution_state(client)
+    thread = threading.Thread(target=state.checkpoint_batches_forever, daemon=True)
+    thread.start()
+
+    def failing_step(_ctx: object) -> str:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    try:
+        with pytest.raises(SuspendExecution) as exc_info:
+            StepOperationExecutor(
+                func=failing_step,
+                config=StepConfig(retry_strategy=_retry, pause_every=1),
+                state=state,
+                operation_identifier=_IDENTIFIER,
+                context_logger=_logger(),
+            ).process()
+    finally:
+        state.stop_checkpointing()
+        thread.join(2)
+
+    assert not isinstance(exc_info.value, TimedSuspendExecution)
+    assert client.events[-1] == "pause"
+    sent = "".join(client.events[:-1])
+    assert sent.index("START") < sent.index("RETRY")
+
+
 def test_pause_request_client_token_is_stable_per_attempt():
-    """The client token depends only on the operation id and the attempt."""
-    first = PauseExecutionRequest.create_for_step_attempt(_IDENTIFIER, 5)
-    again = PauseExecutionRequest.create_for_step_attempt(_IDENTIFIER, 5)
-    renamed = PauseExecutionRequest.create_for_step_attempt(
+    """The client token depends on the execution ARN, operation id and attempt."""
+    first = _request(_IDENTIFIER, 5)
+    again = _request(_IDENTIFIER, 5)
+    renamed = _request(
         OperationIdentifier(
             _OPERATION_ID,
             OperationSubType.STEP,
@@ -252,7 +400,7 @@ def test_pause_request_client_token_is_stable_per_attempt():
         ),
         5,
     )
-    next_attempt = PauseExecutionRequest.create_for_step_attempt(_IDENTIFIER, 10)
+    next_attempt = _request(_IDENTIFIER, 10)
 
     assert first == again
     assert first.client_token == renamed.client_token
@@ -263,6 +411,32 @@ def test_pause_request_client_token_is_stable_per_attempt():
     assert first.reason == 'Step "charge" failed attempt 5'
 
 
+def test_pause_request_client_token_differs_per_execution():
+    """The same step attempt in two executions gets two different tokens."""
+    first = _request(_IDENTIFIER, 5, arn="arn:aws:lambda:us-west-2:1:function:f/a")
+    second = _request(_IDENTIFIER, 5, arn="arn:aws:lambda:us-west-2:1:function:f/b")
+
+    assert first.client_token != second.client_token
+    assert len(second.client_token) == 64
+    assert first == _request(
+        _IDENTIFIER, 5, arn="arn:aws:lambda:us-west-2:1:function:f/a"
+    )
+
+
+def test_step_pause_request_uses_the_execution_arn():
+    """The step builds the pause request from the state's execution ARN."""
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+    state.durable_execution_arn = "other_arn"
+
+    with pytest.raises(SuspendExecution):
+        _run(state, StepConfig(retry_strategy=_retry, pause_every=1))
+
+    state.pause_execution.assert_called_once_with(
+        _request(_IDENTIFIER, 1, arn="other_arn")
+    )
+    assert state.pause_execution.call_args.args[0] != _request(_IDENTIFIER, 1)
+
+
 def test_pause_request_reason_uses_operation_id_without_name():
     identifier = OperationIdentifier(
         _OPERATION_ID,
@@ -270,7 +444,7 @@ def test_pause_request_reason_uses_operation_id_without_name():
         operation_type=OperationType.STEP,
     )
 
-    request = PauseExecutionRequest.create_for_step_attempt(identifier, 3)
+    request = _request(identifier, 3)
 
     assert request.reason == f'Step "{_OPERATION_ID}" failed attempt 3'
 
@@ -284,7 +458,7 @@ def test_pause_request_reason_fits_api_limit():
         operation_type=OperationType.STEP,
     )
 
-    request = PauseExecutionRequest.create_for_step_attempt(identifier, 1)
+    request = _request(identifier, 1)
 
     assert len(request.reason) == 1024
 

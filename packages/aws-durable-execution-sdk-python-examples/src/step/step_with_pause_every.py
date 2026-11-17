@@ -10,7 +10,11 @@ An operator resumes a paused execution with ResumeDurableExecution.
 
 from typing import Any
 
-from aws_durable_execution_sdk_python.config import Duration, StepConfig
+from aws_durable_execution_sdk_python.config import (
+    Duration,
+    JitterStrategy,
+    StepConfig,
+)
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     StepContext,
@@ -38,7 +42,14 @@ def handler(_event: Any, context: DurableContext) -> str:
         retry_strategy=create_retry_strategy(
             RetryStrategyConfig(
                 max_attempts=10,
-                initial_delay=Duration.from_seconds(1),
+                # pause_every needs a long retry delay. Lambda saves the retry
+                # first, and the pause takes effect a short time later. A short
+                # delay can let one more attempt run before the pause. No
+                # jitter and no backoff keep every delay at 60 seconds. The
+                # local test runner skips the delays, so tests stay fast.
+                initial_delay=Duration.from_seconds(60),
+                backoff_rate=1,
+                jitter_strategy=JitterStrategy.NONE,
                 retryable_error_types=[RuntimeError],
             )
         ),

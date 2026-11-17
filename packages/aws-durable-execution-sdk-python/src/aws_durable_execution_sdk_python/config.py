@@ -542,21 +542,35 @@ class StepConfig:
             after attempts 5, 10, 15, and so on. None (the default) never
             pauses. Use a positive integer. The SDK does not validate the
             value.
-            On a pause, the SDK calls the Lambda PauseDurableExecution API,
-            records the normal retry checkpoint, and ends the invocation with
-            PENDING. The step resumes with its next attempt after an operator
-            calls ResumeDurableExecution. The option does not change how many
-            attempts run. When the retry strategy stops, the step fails as
-            usual and does not pause.
+            On a pause, the SDK records the normal retry checkpoint, then
+            calls the Lambda PauseDurableExecution API, and ends the
+            invocation with PENDING. The step resumes with its next attempt
+            after an operator calls ResumeDurableExecution. The option does
+            not change how many attempts run. When the retry strategy stops,
+            the step fails as usual and does not pause.
             Only an attempt that raised in the current invocation counts. An
             AT_MOST_ONCE_PER_RETRY attempt that was interrupted does not pause.
+            Use pause_every with a retry strategy whose delay is much longer
+            than the pause call, for example 30 seconds or more. Do not use
+            it with short delays of a few seconds. The default FULL jitter
+            can pick any delay from zero up, so use HALF or NONE jitter.
+            Lambda saves the retry
+            first, and then the SDK asks to pause. The pause takes effect a
+            short time later. If the retry delay ends first, Lambda can run
+            one more attempt before the execution pauses. For short waits
+            between attempts, retry without pause_every. The SDK then waits
+            inside the invocation.
+            The pause applies to the whole durable execution. A step in a map
+            or parallel branch can still pause the execution after the map or
+            parallel operation has finished, for example when its completion
+            config needs only some branches. No checkpointed data is lost.
+            Resume the execution to continue.
             You must give the function's execution role permission for
             lambda:PauseDurableExecution on its own durable executions. If
-            the pause call fails, for example because the permission is
-            missing, the SDK logs a warning and the step retries as usual.
-            A service client without pause support also retries as usual.
-            The pause is asynchronous. So one more attempt can start before
-            Lambda applies it.
+            the pause call fails, the SDK logs a warning with the error and
+            the step retries as usual. A missing permission is one possible
+            cause. A service client without pause support also retries as
+            usual.
     """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None

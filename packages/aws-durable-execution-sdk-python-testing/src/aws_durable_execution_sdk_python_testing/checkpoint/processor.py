@@ -163,11 +163,12 @@ class CheckpointProcessor:
         Pause an execution without waiting for its invocation to stop.
 
         The running invocation's next checkpoint is answered without a
-        token, like Lambda does after PauseDurableExecution. Completed or
-        already paused executions are unchanged.
+        token, like Lambda does after PauseDurableExecution. Completed
+        executions are unchanged. An already paused execution stays as it is,
+        because Execution.pause() does nothing then.
         """
         execution: Execution = self._store.load(durable_execution_arn)
-        if execution.is_complete or execution.is_paused:
+        if execution.is_complete:
             return
         execution.pause()
         self._store.update(execution)

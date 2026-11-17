@@ -1195,16 +1195,22 @@ class PauseExecutionRequest:
 
     @classmethod
     def create_for_step_attempt(
-        cls, identifier: OperationIdentifier, attempt: int
+        cls,
+        identifier: OperationIdentifier,
+        attempt: int,
+        *,
+        durable_execution_arn: str,
     ) -> PauseExecutionRequest:
         """Create the pause request for a failed step attempt.
 
-        The client token is a 64-character hash of the operation id and the
-        attempt. So a repeated request for the same attempt is idempotent,
-        and each attempt gets its own token.
+        The client token is a 64-character hash of the durable execution ARN,
+        the operation id and the attempt. So a repeated request for the same
+        attempt of the same execution is idempotent. Each attempt and each
+        execution gets its own token.
         """
         client_token: str = hashlib.blake2b(
-            f"pause:{identifier.operation_id}:{attempt}".encode(), digest_size=32
+            f"pause:{durable_execution_arn}:{identifier.operation_id}:{attempt}".encode(),
+            digest_size=32,
         ).hexdigest()
         step_label: str = identifier.name or identifier.operation_id
         reason: str = f'Step "{step_label}" failed attempt {attempt}'
