@@ -257,50 +257,18 @@ class _AgentcoreScope:
 
     def run_job(self, child: DurableContext, job_input: Any) -> Any:
         """Run the operation's durable operations in its child context."""
-        name = self.name
-        session_id = _create_session_id(child, name)
-        callback = child.create_callback(
-            name=f"{name}.callback",
-            config=CallbackConfig(
-                timeout=Duration.from_seconds(self.timeout_seconds),
-                heartbeat_timeout=Duration.from_seconds(
-                    self.heartbeat_timeout_seconds or 0
-                ),
-                # The worker sends the result as a JSON string. The default
-                # callback serdes would return that string unparsed.
-                serdes=JsonSerDes(),
-                sub_type=AgentcoreOperationSubType.CALLBACK,
-            ),
+        session_id = _create_session_id(child, self.name)
+        result = _run_job(
+            child,
+            self,
+            session_id,
+            job_input,
+            lambda: self._stop(child, session_id),
         )
-        try:
-            self._deliver(child, session_id, callback.callback_id, job_input)
-        except AgentcoreDeliveryError:
-            self._stop(child, session_id)
-            raise
-
-        try:
-            result = callback.result()
-        except ExecutionError:
-            # The execution fails without a retry, and the core SDK records
-            # no outcome for the child context. A stop step recorded now
-            # would change that history. So the error passes through.
-            raise
-        except InvocationError as error:
-            # An SDK invocation error is not a job outcome. A retryable one
-            # makes Lambda run the invocation again, and the replay waits for
-            # the same session. So the session stays up for it.
-            if not error.is_retryable():
-                self._stop(child, session_id)
-            raise
-        except Exception as error:
-            # SuspendExecution is a BaseException, so a wait for the callback
-            # passes through here without stopping the session.
-            self._stop(child, session_id)
-            raise _job_error(name, callback, error) from error
         self._stop(child, session_id)
         return result
 
-    def _deliver(
+    def deliver(
         self,
         child: DurableContext,
         session_id: str,
@@ -384,6 +352,65 @@ def _create_session_id(child: DurableContext, name: str) -> str:
         ),
     )
     return session_id
+
+
+def _run_job(
+    child: DurableContext,
+    scope: _AgentcoreScope,
+    session_id: str,
+    job_input: Any,
+    stop: Callable[[], None],
+) -> Any:
+    """Run one job in the session: the callback, the request and the wait.
+
+    ``stop`` stops the session. The helper calls it when the job fails in a
+    way that ends the session. On success, the caller stops the session.
+
+    Raises:
+        AgentcoreDeliveryError: When the job could not be delivered.
+        AgentcoreJobFailedError: When the agent reports a failure, or sends
+            a result that is not valid JSON.
+        AgentcoreTimeoutError: When no result or heartbeat arrives in time.
+    """
+    name = scope.name
+    callback = child.create_callback(
+        name=f"{name}.callback",
+        config=CallbackConfig(
+            timeout=Duration.from_seconds(scope.timeout_seconds),
+            heartbeat_timeout=Duration.from_seconds(
+                scope.heartbeat_timeout_seconds or 0
+            ),
+            # The worker sends the result as a JSON string. The default
+            # callback serdes would return that string unparsed.
+            serdes=JsonSerDes(),
+            sub_type=AgentcoreOperationSubType.CALLBACK,
+        ),
+    )
+    try:
+        scope.deliver(child, session_id, callback.callback_id, job_input)
+    except AgentcoreDeliveryError:
+        stop()
+        raise
+
+    try:
+        return callback.result()
+    except ExecutionError:
+        # The execution fails without a retry, and the core SDK records
+        # no outcome for the child context. A stop step recorded now
+        # would change that history. So the error passes through.
+        raise
+    except InvocationError as error:
+        # An SDK invocation error is not a job outcome. A retryable one
+        # makes Lambda run the invocation again, and the replay waits for
+        # the same session. So the session stays up for it.
+        if not error.is_retryable():
+            stop()
+        raise
+    except Exception as error:
+        # SuspendExecution is a BaseException, so a wait for the callback
+        # passes through here without stopping the session.
+        stop()
+        raise _job_error(name, callback, error) from error
 
 
 def _stop_session(
