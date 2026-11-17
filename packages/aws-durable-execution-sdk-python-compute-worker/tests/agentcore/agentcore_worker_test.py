@@ -189,7 +189,8 @@ def test_logs_the_session_id_and_the_job_count_when_a_job_starts(
     start: Any, logger: Any
 ) -> None:
     worker, _, _ = start(lambda job_input, context: None)
-    for callback_id, session_id in (("cb-1", "s" * 36), ("cb-2", "t" * 36)):
+    deliveries = (("cb-1", "s" * 36), ("cb-1", "s" * 36), ("cb-2", "t" * 36))
+    for callback_id, session_id in deliveries:
         request(
             worker,
             "POST",
@@ -204,6 +205,12 @@ def test_logs_the_session_id_and_the_job_count_when_a_job_starts(
         {"callbackId": "cb-1", "runtimeSessionId": "s" * 36, "jobCount": 1},
         {"callbackId": "cb-2", "runtimeSessionId": "t" * 36, "jobCount": 2},
     ]
+    # The repeated delivery of cb-1 does not count, and its line has no
+    # jobCount.
+    repeated = [
+        data for _, message, data in logger.lines if message == "ignored a repeated job"
+    ]
+    assert repeated == [{"callbackId": "cb-1"}]
 
 
 def test_reports_the_error_of_a_failed_job(start: Any) -> None:
