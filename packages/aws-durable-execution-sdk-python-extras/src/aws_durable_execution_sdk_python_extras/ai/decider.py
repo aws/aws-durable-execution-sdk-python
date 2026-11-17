@@ -18,18 +18,12 @@ from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.retries import RetryDecision
 
 from aws_durable_execution_sdk_python_extras.ai._shared import (
-    MAX_CLASSIFY_OPTIONS,
-    call_before_deadline,
     invalid,
     match_option,
     run_step,
     serialize_input,
     to_unit_score,
-    validate_options,
-    validate_question,
-    validate_scale,
 )
-from aws_durable_execution_sdk_python_extras.ai.retry import default_ai_retry_strategy
 from aws_durable_execution_sdk_python_extras.ai.subtypes import AiOperationSubType
 from aws_durable_execution_sdk_python_extras.ai.transports import (
     DeciderRequest,
@@ -83,38 +77,25 @@ def _probability(answer: Any) -> float:
     return min(1.0, max(0.0, p))
 
 
-def _threshold(value: float | None) -> float:
-    if value is None:
-        return 0.5
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        msg = "threshold must be a number from 0 to 1."
-        raise TypeError(msg)
-    if not 0 <= value <= 1:
-        msg = "threshold must be a number from 0 to 1."
-        raise ValueError(msg)
-    return float(value)
-
-
 class Decider:
     """The four operations that :func:`decider` returns.
 
     Experimental. It can change or be removed in any release.
 
     Each operation is one durable step, and each one takes the context first.
-    Every operation has these limits:
+    Every operation behaves this way:
 
-    - ``question`` must be a non-empty string.
-    - ``input`` must be a string, ``None``, or a value that ``json.dumps`` can
-      encode.
-    - The decision model reads the input and each question, with its choices,
-      in one context window: 4,096 tokens for Strands Decider 2B. A request
-      that does not fit fails with :class:`DeciderError` and status 422, which
-      is not retried. Shorten the input before the call.
-    - An invalid argument creates no durable operation. The call raises
-      ``TypeError`` or ``ValueError``.
-    - A request still running 10 seconds before the invocation runs out of
-      time stops with :class:`AiTimeoutError`, and the step retries in a new
-      invocation.
+    - ``input`` is a string, ``None``, or a value that ``json.dumps`` can
+      encode. The step serializes it, so an input that cannot be encoded
+      fails the step.
+    - The operations do not check their arguments. The decision model
+      rejects a request that it cannot answer, and the step returns that
+      error. For example, the model reads the input and each question, with
+      its choices, in one context window: 4,096 tokens for Strands Decider
+      2B. A request that does not fit fails with :class:`DeciderError` and
+      status 422.
+    - The step sends the request directly, with no deadline of its own. A
+      transport that can hang needs its own timeout.
     - The answer is the step result. So a replay returns it without calling
       the model.
     - When the step fails, the call raises the :class:`AiError` subclass that
@@ -130,24 +111,20 @@ class Decider:
         transport: DeciderTransport,
         model: str,
         threshold: float,
-        retry_strategy: Callable[[Exception, int], RetryDecision],
+        retry_strategy: Callable[[Exception, int], RetryDecision] | None,
     ) -> None:
         self._transport = transport
         self._model = model
         self._threshold = threshold
         self._retry_strategy = retry_strategy
 
-    def _ask(
-        self, value: Any, questions: dict[str, Any], remaining: float | None
-    ) -> _Answers:
+    def _ask(self, value: Any, questions: dict[str, Any]) -> _Answers:
         request: DeciderRequest = {
             "model": self._model,
             "state": serialize_input(value),
             "questions": questions,
         }
-        return _answers_of(
-            call_before_deadline(lambda: self._transport(request), remaining)
-        )
+        return _answers_of(self._transport(request))
 
     def _run(
         self,
@@ -155,7 +132,7 @@ class Decider:
         operation: str,
         sub_type: AiOperationSubType,
         name: str | None,
-        body: Callable[[float | None], Any],
+        body: Callable[[], Any],
     ) -> Any:
         return run_step(
             context,
@@ -185,14 +162,10 @@ class Decider:
             input: The text or data that the question is about.
             name: The step name. The default is ``decider.check``.
         """
-        validate_question(question)
-        serialize_input(input)
 
-        def body(remaining: float | None) -> bool:
+        def body() -> bool:
             answers = self._ask(
-                input,
-                {_ANSWER: {"type": "noul", "instructions": question}},
-                remaining,
+                input, {_ANSWER: {"type": "noul", "instructions": question}}
             )
             return _probability(answers.get(_ANSWER)) >= self._threshold
 
@@ -211,11 +184,11 @@ class Decider:
     ) -> str:
         """Return exactly one of the choices, in the caller's spelling.
 
-        Limits:
+        Notes:
 
-        - 2 to :data:`MAX_CLASSIFY_OPTIONS` choices.
-        - Every choice is a non-empty string.
-        - The choices must differ after trimming whitespace and ignoring case.
+        - Strands Decider accepts 2 to 255 choices.
+        - The reply matches a choice after trimming whitespace and ignoring
+          case. So give choices that differ that way.
         - The model always picks a choice. Add a choice such as ``"other"``
           when none may fit.
         - Every choice counts toward the model's context window.
@@ -227,22 +200,18 @@ class Decider:
             input: The text or data that the question is about.
             name: The step name. The default is ``decider.classify``.
         """
-        validate_question(question)
-        options = validate_options(choices, MAX_CLASSIFY_OPTIONS)
-        serialize_input(input)
 
-        def body(remaining: float | None) -> str:
-            criteria = dict.fromkeys(options)
+        def body() -> str:
+            options = list(choices)
             answers = self._ask(
                 input,
                 {
                     _ANSWER: {
                         "type": "choice",
                         "instructions": question,
-                        "criteria": criteria,
+                        "criteria": dict.fromkeys(options),
                     }
                 },
-                remaining,
             )
             answer = answers.get(_ANSWER)
             if not isinstance(answer, dict) or answer.get("type") != "choice":
@@ -271,11 +240,8 @@ class Decider:
 
         The result can be empty.
 
-        Limits:
+        Notes:
 
-        - At least 2 choices.
-        - Every choice is a non-empty string.
-        - The choices must differ after trimming whitespace and ignoring case.
         - Each choice is one yes-or-no question to the decision model. The
           model reads the input once, but each choice adds time. So keep the
           list short.
@@ -289,11 +255,9 @@ class Decider:
             input: The text or data that the question is about.
             name: The step name. The default is ``decider.label``.
         """
-        validate_question(question)
-        options = validate_options(choices)
-        serialize_input(input)
 
-        def body(remaining: float | None) -> list[str]:
+        def body() -> list[str]:
+            options = list(choices)
             # One yes-or-no question per option. The model reads the input once.
             questions = {
                 f"o{i}": {
@@ -302,7 +266,7 @@ class Decider:
                 }
                 for i, option in enumerate(options)
             }
-            answers = self._ask(input, questions, remaining)
+            answers = self._ask(input, questions)
             return [
                 option
                 for i, option in enumerate(options)
@@ -328,10 +292,9 @@ class Decider:
         between them are evenly spaced. The number can fall between two
         entries.
 
-        Limits:
+        Notes:
 
-        - 2 to :data:`MAX_SCORE_LEVELS` entries.
-        - Every entry is a non-empty string.
+        - Strands Decider accepts 2 to 10 entries.
         - Order the entries from lowest to highest.
 
         Args:
@@ -341,11 +304,9 @@ class Decider:
             input: The text or data that the question is about.
             name: The step name. The default is ``decider.score``.
         """
-        validate_question(question)
-        levels = validate_scale(scale)
-        serialize_input(input)
 
-        def body(remaining: float | None) -> float:
+        def body() -> float:
+            levels = list(scale)
             answers = self._ask(
                 input,
                 {
@@ -355,7 +316,6 @@ class Decider:
                         "criteria": levels,
                     }
                 },
-                remaining,
             )
             # The model's score is the expected level index, from 0 to levels - 1.
             position = _number_field(answers.get(_ANSWER), "score", "score")
@@ -377,7 +337,7 @@ def decider(
     headers: Mapping[str, str] | None = None,
     transport: DeciderTransport | None = None,
     model: str = DEFAULT_DECIDER_MODEL,
-    threshold: float | None = None,
+    threshold: float = 0.5,
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None,
 ) -> Decider:
     """Create the four decision operations: ``check``, ``classify``,
@@ -395,13 +355,14 @@ def decider(
     The model is a Strands Decider that you deployed. Every host takes the
     same request. Name the model one of two ways:
 
-    1. ``endpoint``: the URL of its ``POST /v1/systemone`` route. The default
-       is the ``STRANDS_DECIDER_ENDPOINT`` environment variable.
-    2. ``transport``: the callable that sends the request. Use
+    1. ``transport``: the callable that sends the request. When it is set,
+       ``endpoint`` and ``headers`` are not used. Use
        :func:`agentcore_transport`, :func:`sagemaker_transport`, or
        :func:`lambda_transport` for a model on AWS. They sign the call with
        the function's credentials. Write your own transport for any other
        host.
+    2. ``endpoint``: the URL of its ``POST /v1/systemone`` route. The default
+       is the ``STRANDS_DECIDER_ENDPOINT`` environment variable.
 
     This package does not host or check the model. It assumes that the model
     is deployed and ready.
@@ -426,34 +387,27 @@ def decider(
             are not followed.
         headers: Extra HTTP headers for ``endpoint``, such as an
             authorization header.
-        transport: The callable that sends the request. Do not combine it with
-            ``endpoint``.
+        transport: The callable that sends the request. It takes precedence
+            over ``endpoint``.
         model: The value of the request's ``model`` field.
         threshold: The probability at or above which ``check`` and ``label``
-            answer yes. From 0 to 1. The default is 0.5.
-        retry_strategy: The step retry strategy. The default is
-            :func:`default_ai_retry_strategy`.
+            answer yes. The default is 0.5.
+        retry_strategy: The step retry strategy. The default is the SDK's
+            default step retry strategy.
 
     Raises:
-        TypeError: When both ``endpoint`` and ``transport`` are set, when
-            ``headers`` is set with ``transport``, or when neither
-            is set and ``STRANDS_DECIDER_ENDPOINT`` is not set, or when the
-            endpoint is not an absolute ``http:`` or ``https:`` URL or contains
-            a user name or password.
-        ValueError: When ``threshold`` is not between 0 and 1.
+        TypeError: When neither ``transport`` nor ``endpoint`` is set and
+            ``STRANDS_DECIDER_ENDPOINT`` is not set, or when the endpoint is
+            not an absolute ``http:`` or ``https:`` URL or contains a user
+            name or password.
     """
-    if transport is not None and endpoint is not None:
-        msg = "decider() takes only one of transport and endpoint."
-        raise TypeError(msg)
-    if transport is not None and headers is not None:
-        # The headers are sent only on the HTTP path. Dropping them silently
-        # could send a request without its authorization header.
-        msg = "decider() takes headers only with endpoint, not with transport."
-        raise TypeError(msg)
-    url = (
-        endpoint if endpoint is not None else os.environ.get("STRANDS_DECIDER_ENDPOINT")
-    )
     if transport is None:
+        url = (
+            endpoint
+            if endpoint is not None
+            else os.environ.get("STRANDS_DECIDER_ENDPOINT")
+        )
+        # Without a transport or a URL, there is nothing to send the request to.
         if not url:
             msg = (
                 "decider() needs a transport, an endpoint, or the "
@@ -464,6 +418,6 @@ def decider(
     return Decider(
         transport=transport,
         model=model,
-        threshold=_threshold(threshold),
-        retry_strategy=retry_strategy or default_ai_retry_strategy,
+        threshold=threshold,
+        retry_strategy=retry_strategy,
     )
