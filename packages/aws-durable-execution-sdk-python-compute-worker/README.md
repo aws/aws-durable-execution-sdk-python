@@ -203,16 +203,26 @@ The worker remembers the callback IDs of accepted jobs only in its process memor
 
 While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
-### Several jobs in one session
+### State in a session
 
-A durable function can send several jobs to one AgentCore session. The worker runs every job of the session in the same process. So the jobs share state:
+AgentCore runs every request with the same runtime session ID in the same microVM and the same worker process. So the jobs of one session share state:
 
 - Files that a job writes to disk stay there for the next job.
 - Values that a handler keeps in module-level variables stay in memory for the next job.
 
 The worker clears no state between jobs. A handler that needs a clean start must clean up itself.
 
-The state lasts until the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) ends the session. The idle timeout counts only time with no running job. So a wait between two jobs that is longer than the idle timeout ends the session. The next job then gets a new microVM and a new process, and the files and memory of the old session are lost. The job still runs, without an error. So set the idle timeout longer than any wait between the jobs of one session.
+The worker starts each job when its request arrives, also while another job of the session runs. The server is a `ThreadingHTTPServer`, and each job runs in its own thread. So jobs that run at the same time share the process state. Keep shared state safe for parallel jobs, or send the jobs one at a time.
+
+The state lasts until one of these ends the session:
+
+- The idle timeout (`idleRuntimeSessionTimeout`). It counts only time with no running job.
+- The agent runtime's `maxLifetime`.
+- The durable function, when it stops the session.
+
+The files and memory of the session are then lost. So set the idle timeout longer than any wait between the jobs of one session.
+
+The handler reads the runtime session ID from `context.session_id` (`AgentcoreJobContext.session_id`).
 
 The [extras README](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras#run-a-job-in-agentcore-runtime) describes how a durable function sends jobs to AgentCore.
 
