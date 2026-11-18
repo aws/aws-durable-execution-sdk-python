@@ -34,6 +34,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
     OperationType,
     OperationUpdate,
+    PausableDurableServiceClient,
+    PauseExecutionRequest,
     StateOutput,
 )
 from aws_durable_execution_sdk_python.plugin import (
@@ -743,6 +745,24 @@ class ExecutionState:
     def is_checkpoint_token_revoked(self) -> bool:
         """Return whether the service has withdrawn this invocation's checkpoint token."""
         return self._checkpoint_token_revoked.is_set()
+
+    def pause_execution(self, request: PauseExecutionRequest) -> bool:
+        """Ask the service to pause this durable execution.
+
+        Experimental; may change or be removed in a future release.
+
+        Returns:
+            True if the service client sent the request. False if the client
+            does not support pausing.
+
+        Raises:
+            Exception: Any error from the service client, unchanged.
+        """
+        client = self._service_client
+        if not isinstance(client, PausableDurableServiceClient):
+            return False
+        client.pause_durable_execution(self.durable_execution_arn, request)
+        return True
 
     def _reject_if_checkpoint_token_revoked(self) -> None:
         """Raise SuspendExecution if the checkpoint token is gone."""
