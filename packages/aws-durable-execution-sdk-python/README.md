@@ -172,7 +172,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 ### Pause after repeated failures (experimental)
 
-A retry decision can pause the durable execution. When the retry strategy returns `RetryDecision(pause=True)` for a failed attempt, the step saves its normal retry, then the SDK asks Lambda to pause, and the invocation ends. An operator resumes the execution with the Lambda `ResumeDurableExecution` API, and the next attempt runs.
+A retry decision can pause the durable execution. When the retry strategy returns `RetryDecision.retry(delay, pause=True)` for a failed attempt, the step saves its normal retry, then the SDK asks Lambda to pause, and the invocation ends. An operator resumes the execution with the Lambda `ResumeDurableExecution` API, and the next attempt runs.
 
 The built-in strategy pauses after every Nth failed attempt with `pause_every`. For example, `pause_every=5` pauses after attempts 5, 10, 15, and so on:
 
@@ -204,11 +204,10 @@ RETRY_AND_PAUSE = StepConfig(retry_strategy=retry_and_pause)
 ```
 
 - `pause` does not change how many attempts run. When the decision has `should_retry=False`, the step fails as usual and does not pause.
-- Use a long delay on the pausing attempt, for example 30 seconds or more. Lambda saves the retry first, and then the SDK asks to pause. The pause takes effect a short time later. If the delay ends first, Lambda can run one more attempt before the execution pauses.
-- `pause_every` uses the delay without jitter on the pausing attempt. So jitter never makes that delay near zero. In a custom strategy, do not apply jitter that can reach zero to the pausing attempt.
+- `context.step` uses `pause`, including the `wait_for_callback` submitter. `with_retry` ignores `pause`.
 - Only an attempt that raised in the current invocation can pause. An `AT_MOST_ONCE_PER_RETRY` attempt that was interrupted retries without a pause.
 - The pause applies to the whole execution. A step in a `map` or `parallel` branch can still pause the execution after the map or parallel operation has finished. No checkpointed data is lost. Resume the execution to continue.
-- Give the function's execution role `lambda:PauseDurableExecution` on its own durable executions. If the pause call fails, the SDK logs a warning with the error and the step retries as usual. A missing permission is one possible cause.
+- Give the function's execution role `lambda:PauseDurableExecution` on its own durable executions. If the function uses a customer managed AWS KMS key, the role also needs `kms:Decrypt` on that key, as the [Lambda pause and resume prerequisites](https://docs.aws.amazon.com/lambda/latest/dg/durable-pause-resume.html#durable-pause-resume-prerequisites) require. If the pause call fails, the SDK logs a warning with the error and the step retries as usual. A missing permission is one possible cause.
 - This feature is experimental. It may change or be removed in a future release.
 
 ### Replay rules

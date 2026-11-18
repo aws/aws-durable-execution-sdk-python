@@ -590,9 +590,3 @@ def test_lambda_client_pause_durable_execution():
     boto_client.pause_durable_execution.assert_called_once_with(
         DurableExecutionArn="arn", ClientToken="token", Reason="why"
     )
-
-
-def test_step_config_has_no_pause_every():
-    """Pausing comes from the retry decision, not from StepConfig."""
-    with pytest.raises(TypeError):
-        StepConfig(pause_every=3)  # type: ignore[call-arg]

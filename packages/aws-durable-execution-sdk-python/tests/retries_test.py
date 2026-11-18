@@ -785,12 +785,18 @@ def test_pause_every_does_not_pause_non_retryable_errors():
     assert decision.pause is False
 
 
+@pytest.mark.parametrize(
+    ("jitter", "delay"),
+    [(JitterStrategy.FULL, 1), (JitterStrategy.HALF, 30), (JitterStrategy.NONE, 60)],
+)
 @patch("random.random", return_value=0.0)
-def test_pause_every_skips_full_jitter_on_the_pausing_attempt(_mock_random):
-    """FULL jitter with random 0 gives 1 s, but the pausing attempt keeps 60 s."""
-    strategy = _pausing_strategy(JitterStrategy.FULL)
-    assert strategy(Exception("e"), 5).delay_seconds == 60
-    assert strategy(Exception("e"), 10).delay_seconds == 60
+def test_pause_every_keeps_configured_jitter_on_the_pausing_attempt(
+    _mock_random, jitter, delay
+):
+    """The pausing attempt uses jitter_strategy like every other attempt."""
+    decision = _pausing_strategy(jitter)(Exception("e"), 5)
+    assert decision.pause is True
+    assert decision.delay_seconds == delay
 
 
 @patch("random.random", return_value=0.0)
@@ -800,21 +806,15 @@ def test_pause_every_keeps_jitter_on_other_attempts(_mock_random):
     assert strategy(Exception("e"), 6).delay_seconds == 1
 
 
-@patch("random.random", return_value=0.0)
-def test_pause_every_skips_half_jitter_on_the_pausing_attempt(_mock_random):
-    strategy = _pausing_strategy(JitterStrategy.HALF)
-    assert strategy(Exception("e"), 5).delay_seconds == 60
-    assert strategy(Exception("e"), 6).delay_seconds == 30
-
-
 def test_pause_every_uses_backoff_delay_on_the_pausing_attempt():
-    """The pausing attempt uses the backoff and max_delay cap, without jitter."""
+    """The pausing attempt uses the backoff and the max_delay cap."""
     strategy = create_retry_strategy(
         RetryStrategyConfig(
             max_attempts=10,
             initial_delay=Duration.from_seconds(10),
             max_delay=Duration.from_seconds(100),
             backoff_rate=2,
+            jitter_strategy=JitterStrategy.NONE,
             pause_every=2,
         )
     )
