@@ -457,7 +457,7 @@ class StepOperationExecutor(OperationExecutor[T]):
         except Exception as e:  # noqa: BLE001 - a failed pause falls back to a normal retry
             error_name: str = _pause_error_name(e)
             hint: str = (
-                "The execution is already pausing or paused."
+                "The execution has closed (for example, stopped) or is already paused."
                 if error_name == "ResourceConflictException"
                 else "A missing lambda:PauseDurableExecution permission on the "
                 "execution role is one possible cause."

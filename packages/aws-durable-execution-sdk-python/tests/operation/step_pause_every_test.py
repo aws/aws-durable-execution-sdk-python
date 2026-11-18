@@ -227,7 +227,7 @@ def test_pause_client_error_warning_names_the_service_error_code():
 
 
 def test_pause_conflict_warning_does_not_blame_permissions():
-    """A ResourceConflictException says the execution is already pausing."""
+    """A ResourceConflictException says the execution is closed or paused."""
     state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
     state.pause_execution.side_effect = ClientError(
         {"Error": {"Code": "ResourceConflictException", "Message": "paused"}},
@@ -241,7 +241,7 @@ def test_pause_conflict_warning_does_not_blame_permissions():
     warning_args = logger.warning.call_args.args
     message = warning_args[0] % warning_args[1:]
     assert "Error: ResourceConflictException: " in message
-    assert "already pausing or paused" in message
+    assert "has closed (for example, stopped) or is already paused" in message
     assert "permission" not in message
 
 
