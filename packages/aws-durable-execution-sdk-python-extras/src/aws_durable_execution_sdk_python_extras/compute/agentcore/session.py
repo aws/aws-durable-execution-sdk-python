@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from aws_durable_execution_sdk_python_extras.compute.agentcore.operation import (
-    _validate_timeout,
+    _validate_base,
 )
 
 
@@ -77,6 +77,7 @@ def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> int:
         The session timeout in seconds.
 
     Raises:
-        ValidationError: When ``timeout`` is less than 1 second.
+        ValidationError: When ``name`` is empty, or ``timeout`` is less
+            than 1 second.
     """
-    return _validate_timeout(name, config.timeout)
+    return _validate_base(name, config.timeout)

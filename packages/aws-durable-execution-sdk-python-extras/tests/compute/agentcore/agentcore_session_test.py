@@ -30,11 +30,22 @@ def test_accepts_a_valid_config() -> None:
     assert _validate_session_config("review", config) == 1800
 
 
-def test_requires_a_runtime_arn() -> None:
+def test_config_has_no_default_runtime_arn() -> None:
     fields: dict[str, Any] = {"timeout": Duration.from_minutes(30)}
 
     with pytest.raises(TypeError, match="agent_runtime_arn"):
         AgentcoreSessionConfig(**fields)
+
+
+def test_rejects_an_empty_name() -> None:
+    config = AgentcoreSessionConfig(
+        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
+    )
+
+    with pytest.raises(
+        ValidationError, match="an AgentCore operation requires a non-empty name"
+    ):
+        _validate_session_config("", config)
 
 
 def test_rejects_a_timeout_under_1_second() -> None:

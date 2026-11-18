@@ -221,10 +221,7 @@ class _AgentcoreScope:
             TypeError: When ``job_input`` is not JSON-serializable.
             ValueError: When the JSON of ``job_input`` is too large.
         """
-        if not isinstance(name, str) or not name:
-            msg = "an AgentCore operation requires a non-empty name"
-            raise ValidationError(msg)
-        timeout_seconds = _validate_timeout(name, config.timeout)
+        timeout_seconds = _validate_base(name, config.timeout)
         heartbeat_timeout_seconds = (
             None
             if config.heartbeat_timeout is None
@@ -540,12 +537,16 @@ def _reported_error_type(callback: Callback) -> str | None:
     return reported
 
 
-def _validate_timeout(name: str, timeout: Duration) -> int:
-    """Return the timeout in seconds.
+def _validate_base(name: str, timeout: Duration) -> int:
+    """Validate the name and the timeout, and return the timeout in seconds.
 
     Raises:
-        ValidationError: When it is less than 1 second.
+        ValidationError: When ``name`` is empty, or the timeout is less
+            than 1 second.
     """
+    if not isinstance(name, str) or not name:
+        msg = "an AgentCore operation requires a non-empty name"
+        raise ValidationError(msg)
     timeout_seconds = timeout.to_seconds()
     if timeout_seconds < 1:
         msg = f'AgentCore "{name}": timeout must be at least 1 second'
