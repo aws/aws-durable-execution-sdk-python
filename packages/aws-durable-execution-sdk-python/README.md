@@ -191,7 +191,7 @@ RETRY_AND_PAUSE = StepConfig(
 - Use a retry strategy whose delay is much longer than the pause call, for example 30 seconds or more. Do not use `pause_every` with short delays of a few seconds.
 - The reason: Lambda saves the retry first, and then the SDK asks to pause. The pause takes effect a short time later. If the retry delay ends first, Lambda can run one more attempt before the execution pauses.
 - The default `JitterStrategy.FULL` can pick any delay from zero up. So use `JitterStrategy.HALF` or `JitterStrategy.NONE`.
-- For short waits between attempts, retry without `pause_every`. The SDK then waits inside the invocation.
+- For short waits between attempts, retry without `pause_every`.
 - The pause applies to the whole execution. A step in a `map` or `parallel` branch can still pause the execution after the map or parallel operation has finished. No checkpointed data is lost. Resume the execution to continue.
 - Give the function's execution role `lambda:PauseDurableExecution` on its own durable executions. If the pause call fails, the SDK logs a warning with the error and the step retries as usual. A missing permission is one possible cause.
 - This option is experimental. It may change or be removed in a future release.

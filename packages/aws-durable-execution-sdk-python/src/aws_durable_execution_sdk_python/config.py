@@ -554,12 +554,11 @@ class StepConfig:
             than the pause call, for example 30 seconds or more. Do not use
             it with short delays of a few seconds. The default FULL jitter
             can pick any delay from zero up, so use HALF or NONE jitter.
-            Lambda saves the retry
-            first, and then the SDK asks to pause. The pause takes effect a
-            short time later. If the retry delay ends first, Lambda can run
-            one more attempt before the execution pauses. For short waits
-            between attempts, retry without pause_every. The SDK then waits
-            inside the invocation.
+            Lambda saves the retry first, and then the SDK asks to pause.
+            The pause takes effect a short time later. If the retry delay
+            ends first, Lambda can run one more attempt before the execution
+            pauses. For short waits between attempts, retry without
+            pause_every.
             The pause applies to the whole durable execution. A step in a map
             or parallel branch can still pause the execution after the map or
             parallel operation has finished, for example when its completion
