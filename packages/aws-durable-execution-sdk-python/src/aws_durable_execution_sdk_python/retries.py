@@ -26,10 +26,46 @@ _DEFAULT_RETRYABLE_ERROR_PATTERN = re.compile(r".*")
 
 @dataclass
 class RetryDecision:
-    """Decision about whether to retry a step and with what delay."""
+    """Decision about whether to retry a step and with what delay.
+
+    Attributes:
+        should_retry: True to run another attempt.
+        delay: The time to wait before the next attempt.
+        pause: Experimental; may change or be removed in a future release.
+            True pauses the durable execution after this failed attempt.
+            The default False never pauses. Only context.step uses this
+            field, and only when should_retry is True. The field does not
+            change how many attempts run.
+            On a pause, the SDK records the normal retry checkpoint, then
+            calls the Lambda PauseDurableExecution API, and ends the
+            invocation with PENDING. The step resumes with its next attempt
+            after an operator calls ResumeDurableExecution.
+            Only an attempt that raised in the current invocation can pause.
+            An AT_MOST_ONCE_PER_RETRY attempt that was interrupted does not
+            pause.
+            Use a long delay on the pausing attempt, for example 30 seconds
+            or more. Lambda saves the retry first, and then the SDK asks to
+            pause. The pause takes effect a short time later. If the delay
+            ends first, Lambda can run one more attempt before the execution
+            pauses. In a custom strategy, do not apply jitter that can reach
+            zero to the pausing attempt. The pause_every option of
+            create_retry_strategy already skips jitter on that attempt.
+            The pause applies to the whole durable execution. A step in a map
+            or parallel branch can still pause the execution after the map or
+            parallel operation has finished, for example when its completion
+            config needs only some branches. No checkpointed data is lost.
+            Resume the execution to continue.
+            You must give the function's execution role permission for
+            lambda:PauseDurableExecution on its own durable executions. If
+            the pause call fails, the SDK logs a warning with the error and
+            the step retries as usual. A missing permission is one possible
+            cause. A service client without pause support also retries as
+            usual.
+    """
 
     should_retry: bool
     delay: Duration
+    pause: bool = False
 
     @property
     def delay_seconds(self) -> int:
@@ -37,9 +73,15 @@ class RetryDecision:
         return self.delay.to_seconds()
 
     @classmethod
-    def retry(cls, delay: Duration) -> RetryDecision:
-        """Create a retry decision."""
-        return cls(should_retry=True, delay=delay)
+    def retry(cls, delay: Duration, *, pause: bool = False) -> RetryDecision:
+        """Create a retry decision.
+
+        Args:
+            delay: The time to wait before the next attempt.
+            pause: Experimental. True pauses the durable execution after
+                this attempt. See the pause attribute.
+        """
+        return cls(should_retry=True, delay=delay, pause=pause)
 
     @classmethod
     def no_retry(cls) -> RetryDecision:
@@ -49,6 +91,31 @@ class RetryDecision:
 
 @dataclass
 class RetryStrategyConfig:
+    """Configuration for create_retry_strategy.
+
+    Attributes:
+        pause_every: Experimental; may change or be removed in a future
+            release. Pause the durable execution after every Nth failed
+            attempt that the strategy retries. For example, 5 pauses after
+            attempts 5, 10, 15, and so on. None (the default) never pauses.
+            Use a positive integer. The SDK does not validate the value.
+            The strategy returns RetryDecision(pause=True) on these attempts.
+            So the step behaves as the RetryDecision.pause attribute
+            describes. The option does not change how many attempts run.
+            When the strategy stops, the step fails as usual and does not
+            pause.
+            The pausing attempt uses the delay without jitter, so jitter
+            never makes that delay near zero. The other attempts use
+            jitter_strategy as usual. Use a long delay, for example 30
+            seconds or more. If the delay ends before the pause takes effect,
+            Lambda can run one more attempt before the execution pauses.
+            The pause applies to the whole durable execution. A step in a map
+            or parallel branch can still pause the execution after the map or
+            parallel operation has finished. You must give the function's
+            execution role permission for lambda:PauseDurableExecution on its
+            own durable executions.
+    """
+
     max_attempts: int = 3
     initial_delay: Duration = field(default_factory=lambda: Duration.from_seconds(5))
     max_delay: Duration = field(
@@ -58,6 +125,7 @@ class RetryStrategyConfig:
     jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
     retryable_errors: list[str | re.Pattern] | None = None
     retryable_error_types: list[type[Exception]] | None = None
+    pause_every: int | None = field(default=None, kw_only=True)
 
     @property
     def initial_delay_seconds(self) -> int:
@@ -154,9 +222,16 @@ def create_retry_strategy(
             config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
             config.max_delay_seconds,
         )
-        final_delay: int = config.jitter_strategy.finalize_delay(base_delay)
+        pause: bool = (
+            config.pause_every is not None and attempts_made % config.pause_every == 0
+        )
+        # The pausing attempt skips jitter, so its delay is never near zero.
+        jitter_strategy: JitterStrategy = (
+            JitterStrategy.NONE if pause else config.jitter_strategy
+        )
+        final_delay: int = jitter_strategy.finalize_delay(base_delay)
 
-        return RetryDecision.retry(Duration(seconds=final_delay))
+        return RetryDecision.retry(Duration(seconds=final_delay), pause=pause)
 
     return retry_strategy
 

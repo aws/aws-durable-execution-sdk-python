@@ -1,4 +1,4 @@
-"""End-to-end tests for StepConfig.pause_every with the local runner.
+"""End-to-end tests for pausing a step from the retry decision with the local runner.
 
 The in-memory service client pauses the execution when the SDK asks it to.
 The execution then stays paused until the test calls resume_execution().
@@ -21,6 +21,7 @@ from aws_durable_execution_sdk_python.execution import (
     durable_execution,
 )
 from aws_durable_execution_sdk_python.retries import (
+    RetryDecision,
     RetryStrategyConfig,
     create_retry_strategy,
 )
@@ -47,16 +48,21 @@ def _has_succeeded(runner: DurableFunctionTestRunner, arn: str) -> bool:
     )
 
 
-def _handler(attempts: list[int], succeed_on: int) -> Callable[..., Any]:
+def _handler(
+    attempts: list[int],
+    succeed_on: int,
+    retry_strategy: Callable[[Exception, int], RetryDecision] | None = None,
+) -> Callable[..., Any]:
     config = StepConfig(
-        retry_strategy=create_retry_strategy(
+        retry_strategy=retry_strategy
+        or create_retry_strategy(
             RetryStrategyConfig(
                 max_attempts=10,
                 initial_delay=Duration.from_seconds(1),
                 retryable_error_types=[RuntimeError],
+                pause_every=2,
             )
         ),
-        pause_every=2,
     )
 
     def flaky(step_context: StepContext) -> str:
@@ -112,3 +118,28 @@ def test_step_does_not_pause_when_it_succeeds_before_a_multiple() -> None:
 
     assert result.status is InvocationStatus.SUCCEEDED
     assert attempts == [1, 2]
+
+
+def test_custom_strategy_pauses_when_its_decision_says_so() -> None:
+    """A custom strategy that returns pause=True on attempt 3 pauses there only."""
+    attempts: list[int] = []
+
+    def pause_on_third(_error: Exception, attempt: int) -> RetryDecision:
+        return RetryDecision.retry(Duration.from_seconds(1), pause=attempt == 3)
+
+    with DurableFunctionTestRunner(
+        handler=_handler(attempts, succeed_on=5, retry_strategy=pause_on_third),
+        execution_timeout=15,
+    ) as runner:
+        arn = runner.run_async(input="{}")
+
+        _wait_until(lambda: attempts == [1, 2, 3])
+        threading.Event().wait(0.3)
+        assert attempts == [1, 2, 3]
+        assert not _has_succeeded(runner, arn)
+
+        runner.resume_execution(arn)
+        result: DurableFunctionTestResult = runner.wait_for_result(arn)
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert attempts == [1, 2, 3, 4, 5]

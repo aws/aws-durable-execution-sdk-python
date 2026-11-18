@@ -1,8 +1,9 @@
-"""Unit tests for the StepConfig.pause_every option."""
+"""Unit tests for pausing a step from the retry decision."""
 
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from unittest.mock import Mock
 
 import pytest
@@ -36,7 +37,12 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.logger import Logger
 from aws_durable_execution_sdk_python.operation.step import StepOperationExecutor
 from aws_durable_execution_sdk_python.plugin import PluginExecutor
-from aws_durable_execution_sdk_python.retries import RetryDecision
+from aws_durable_execution_sdk_python.retries import (
+    JitterStrategy,
+    RetryDecision,
+    RetryStrategyConfig,
+    create_retry_strategy,
+)
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 
 
@@ -101,6 +107,32 @@ def _retry(_error: Exception, _attempt: int) -> RetryDecision:
     return RetryDecision.retry(Duration.from_seconds(5))
 
 
+def _pause(_error: Exception, _attempt: int) -> RetryDecision:
+    return RetryDecision.retry(Duration.from_seconds(5), pause=True)
+
+
+def _pause_on(*attempts: int) -> Callable[[Exception, int], RetryDecision]:
+    """A custom strategy that pauses only on the given attempts."""
+
+    def strategy(_error: Exception, attempt: int) -> RetryDecision:
+        return RetryDecision.retry(Duration.from_seconds(5), pause=attempt in attempts)
+
+    return strategy
+
+
+def _pause_every(n: int) -> Callable[[Exception, int], RetryDecision]:
+    """The built-in strategy with pause_every and no jitter."""
+    return create_retry_strategy(
+        RetryStrategyConfig(
+            max_attempts=10,
+            initial_delay=Duration.from_seconds(5),
+            backoff_rate=1,
+            jitter_strategy=JitterStrategy.NONE,
+            pause_every=n,
+        )
+    )
+
+
 def _request(
     identifier: OperationIdentifier, attempt: int, arn: str = "test_arn"
 ) -> PauseExecutionRequest:
@@ -120,15 +152,15 @@ def _actions(state: Mock) -> list[OperationAction]:
     ]
 
 
-def test_checkpoints_retry_then_pauses_on_attempt_multiple_and_suspends():
-    """Attempt 2 with pause_every=2 sends RETRY, pauses, and suspends untimed."""
+def test_checkpoints_retry_then_pauses_when_decision_pauses():
+    """A strategy that pauses on attempt 2 sends RETRY, pauses, and suspends untimed."""
     state = _state(_checkpoint(OperationStatus.READY, previous_attempts=1))
     order = Mock()
     order.attach_mock(state.pause_execution, "pause")
     order.attach_mock(state.create_checkpoint, "checkpoint")
 
     with pytest.raises(SuspendExecution) as exc_info:
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=2))
+        _run(state, StepConfig(retry_strategy=_pause_on(2)))
 
     assert not isinstance(exc_info.value, TimedSuspendExecution)
     state.pause_execution.assert_called_once_with(_request(_IDENTIFIER, 2))
@@ -142,12 +174,12 @@ def test_checkpoints_retry_then_pauses_on_attempt_multiple_and_suspends():
 
 
 @pytest.mark.parametrize("previous_attempts", [3, 5])
-def test_pauses_on_later_multiples(previous_attempts: int):
-    """Attempts 4 and 6 are multiples of 2, so they pause too."""
+def test_helper_pause_every_pauses_on_later_multiples(previous_attempts: int):
+    """With the helper's pause_every=2, attempts 4 and 6 pause too."""
     state = _state(_checkpoint(OperationStatus.READY, previous_attempts))
 
     with pytest.raises(SuspendExecution) as exc_info:
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=2))
+        _run(state, StepConfig(retry_strategy=_pause_every(2)))
 
     assert not isinstance(exc_info.value, TimedSuspendExecution)
     state.pause_execution.assert_called_once_with(
@@ -156,25 +188,53 @@ def test_pauses_on_later_multiples(previous_attempts: int):
 
 
 @pytest.mark.parametrize("previous_attempts", [0, 2, 4])
-def test_no_pause_on_other_attempts(previous_attempts: int):
-    """Attempts 1, 3 and 5 are not multiples of 2, so they retry as usual."""
+def test_helper_pause_every_does_not_pause_other_attempts(previous_attempts: int):
+    """With the helper's pause_every=2, attempts 1, 3 and 5 retry as usual."""
     state = _state(_checkpoint(OperationStatus.READY, previous_attempts))
 
     with pytest.raises(TimedSuspendExecution):
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=2))
+        _run(state, StepConfig(retry_strategy=_pause_every(2)))
 
     state.pause_execution.assert_not_called()
     assert _actions(state)[-1] is OperationAction.RETRY
 
 
-def test_no_pause_by_default():
-    """pause_every defaults to None and never pauses."""
+def test_no_pause_when_decision_has_no_pause():
+    """A decision without pause (the default) retries as usual."""
     state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
 
     with pytest.raises(TimedSuspendExecution):
         _run(state, StepConfig(retry_strategy=_retry))
 
     state.pause_execution.assert_not_called()
+    assert _actions(state) == [OperationAction.START, OperationAction.RETRY]
+
+
+def test_no_pause_when_decision_pause_is_false():
+    """A strategy that returns pause=False on this attempt retries as usual."""
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+
+    with pytest.raises(TimedSuspendExecution):
+        _run(state, StepConfig(retry_strategy=_pause_on(2)))
+
+    state.pause_execution.assert_not_called()
+    assert _actions(state) == [OperationAction.START, OperationAction.RETRY]
+
+
+def test_strategy_without_pause_still_retries():
+    """An existing strategy that builds RetryDecision(should_retry, delay) works unchanged."""
+
+    def existing(_error: Exception, _attempt: int) -> RetryDecision:
+        return RetryDecision(True, Duration.from_seconds(7))  # noqa: FBT003
+
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+
+    with pytest.raises(TimedSuspendExecution):
+        _run(state, StepConfig(retry_strategy=existing))
+
+    state.pause_execution.assert_not_called()
+    retry_update = state.create_checkpoint.call_args_list[1].kwargs["operation_update"]
+    assert retry_update.step_options.next_attempt_delay_seconds == 7
 
 
 def test_no_pause_when_retry_strategy_stops():
@@ -182,7 +242,22 @@ def test_no_pause_when_retry_strategy_stops():
     state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
 
     with pytest.raises(StepError):
-        _run(state, StepConfig(retry_strategy=_stop, pause_every=1))
+        _run(state, StepConfig(retry_strategy=_stop))
+
+    state.pause_execution.assert_not_called()
+    assert _actions(state) == [OperationAction.START, OperationAction.FAIL]
+
+
+def test_pause_is_ignored_when_should_retry_is_false():
+    """pause=True with should_retry=False fails the step and does not pause."""
+
+    def stop_and_pause(_error: Exception, _attempt: int) -> RetryDecision:
+        return RetryDecision(should_retry=False, delay=Duration(), pause=True)
+
+    state = _state(_checkpoint(OperationStatus.READY, previous_attempts=0))
+
+    with pytest.raises(StepError):
+        _run(state, StepConfig(retry_strategy=stop_and_pause))
 
     state.pause_execution.assert_not_called()
     assert _actions(state) == [OperationAction.START, OperationAction.FAIL]
@@ -195,7 +270,7 @@ def test_pause_failure_logs_warning_and_retries_as_usual():
     logger = _logger()
 
     with pytest.raises(TimedSuspendExecution):
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1), logger)
+        _run(state, StepConfig(retry_strategy=_pause), logger)
 
     logger.warning.assert_called_once()
     warning_args = logger.warning.call_args.args
@@ -217,7 +292,7 @@ def test_pause_client_error_warning_names_the_service_error_code():
     logger = _logger()
 
     with pytest.raises(TimedSuspendExecution):
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1), logger)
+        _run(state, StepConfig(retry_strategy=_pause), logger)
 
     warning_args = logger.warning.call_args.args
     message = warning_args[0] % warning_args[1:]
@@ -236,7 +311,7 @@ def test_pause_conflict_warning_does_not_blame_permissions():
     logger = _logger()
 
     with pytest.raises(TimedSuspendExecution):
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1), logger)
+        _run(state, StepConfig(retry_strategy=_pause), logger)
 
     warning_args = logger.warning.call_args.args
     message = warning_args[0] % warning_args[1:]
@@ -252,7 +327,7 @@ def test_pause_client_error_without_code_uses_type_name():
     logger = _logger()
 
     with pytest.raises(TimedSuspendExecution):
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1), logger)
+        _run(state, StepConfig(retry_strategy=_pause), logger)
 
     warning_args = logger.warning.call_args.args
     assert "Error: ClientError: " in warning_args[0] % warning_args[1:]
@@ -265,26 +340,28 @@ def test_client_without_pause_support_retries_as_usual():
     state.pause_execution.return_value = False
 
     with pytest.raises(TimedSuspendExecution):
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1))
+        _run(state, StepConfig(retry_strategy=_pause))
 
     state.pause_execution.assert_called_once()
     assert _actions(state) == [OperationAction.START, OperationAction.RETRY]
 
 
 def test_no_pause_on_interrupted_at_most_once_replay():
-    """An interrupted AT_MOST_ONCE attempt goes to retry without pausing."""
+    """An interrupted AT_MOST_ONCE attempt ignores pause=True and retries."""
     state = _state(_checkpoint(OperationStatus.STARTED, previous_attempts=0))
+    strategy = Mock(side_effect=_pause)
 
     with pytest.raises(TimedSuspendExecution):
         _run(
             state,
             StepConfig(
-                retry_strategy=_retry,
+                retry_strategy=strategy,
                 step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY,
-                pause_every=1,
             ),
         )
 
+    # The replay path asks the strategy, and the strategy returns pause=True.
+    strategy.assert_called_once()
     state.pause_execution.assert_not_called()
     assert _actions(state) == [OperationAction.RETRY]
 
@@ -296,7 +373,7 @@ def test_revoked_token_on_retry_checkpoint_suspends():
     state.create_checkpoint.side_effect = [None, revoked]
 
     with pytest.raises(SuspendExecution) as exc_info:
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1))
+        _run(state, StepConfig(retry_strategy=_pause))
 
     assert exc_info.value is revoked
     # The execution is already pausing, so the step does not pause it again.
@@ -319,7 +396,7 @@ def test_pause_waits_until_retry_checkpoint_is_accepted():
     state.pause_execution.side_effect = pause
 
     with pytest.raises(SuspendExecution) as exc_info:
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1))
+        _run(state, StepConfig(retry_strategy=_pause))
 
     assert not isinstance(exc_info.value, TimedSuspendExecution)
     state.pause_execution.assert_called_once()
@@ -371,7 +448,7 @@ def test_real_state_sends_start_and_retry_before_pause():
         with pytest.raises(SuspendExecution) as exc_info:
             StepOperationExecutor(
                 func=failing_step,
-                config=StepConfig(retry_strategy=_retry, pause_every=1),
+                config=StepConfig(retry_strategy=_pause),
                 state=state,
                 operation_identifier=_IDENTIFIER,
                 context_logger=_logger(),
@@ -429,7 +506,7 @@ def test_step_pause_request_uses_the_execution_arn():
     state.durable_execution_arn = "other_arn"
 
     with pytest.raises(SuspendExecution):
-        _run(state, StepConfig(retry_strategy=_retry, pause_every=1))
+        _run(state, StepConfig(retry_strategy=_pause))
 
     state.pause_execution.assert_called_once_with(
         _request(_IDENTIFIER, 1, arn="other_arn")
@@ -515,6 +592,7 @@ def test_lambda_client_pause_durable_execution():
     )
 
 
-def test_step_config_pause_every_is_keyword_only_and_defaults_to_none():
-    assert StepConfig().pause_every is None
-    assert StepConfig(pause_every=3).pause_every == 3
+def test_step_config_has_no_pause_every():
+    """Pausing comes from the retry decision, not from StepConfig."""
+    with pytest.raises(TypeError):
+        StepConfig(pause_every=3)  # type: ignore[call-arg]

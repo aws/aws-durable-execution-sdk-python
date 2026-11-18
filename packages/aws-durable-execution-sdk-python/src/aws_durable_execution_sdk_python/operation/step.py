@@ -326,7 +326,7 @@ class StepOperationExecutor(OperationExecutor[T]):
             error: The exception that occurred during step execution
             checkpointed_result: The checkpoint data containing operation state
             may_pause: True when the step function raised in this invocation.
-                Only then does StepConfig.pause_every apply.
+                Only then does RetryDecision.pause apply.
 
         Raises:
             SuspendExecution: If retry is scheduled
@@ -396,7 +396,11 @@ class StepOperationExecutor(OperationExecutor[T]):
             # Request the pause only after Lambda accepted the RETRY. So no
             # checkpoint of this invocation can be saved without a token
             # before this step's RETRY is saved.
-            paused: bool = may_pause and self._pause_if_due(retry_attempt + 1)
+            paused: bool = (
+                may_pause
+                and retry_decision.pause
+                and self._request_pause(retry_attempt + 1)
+            )
 
             if paused:
                 # Suspend without a resume time. The next attempt runs after
@@ -433,20 +437,16 @@ class StepOperationExecutor(OperationExecutor[T]):
         # step failure.)
         error_object.raise_as_operation_error(StepError)
 
-    def _pause_if_due(self, attempt: int) -> bool:
-        """Request a pause when attempt is a multiple of pause_every.
+    def _request_pause(self, attempt: int) -> bool:
+        """Request a pause of the durable execution after a failed attempt.
 
         Args:
             attempt: The 1-based attempt that just failed.
 
         Returns:
-            True if the pause request was sent. False if no pause is due, the
-            service client cannot pause, or the request failed.
+            True if the pause request was sent. False if the service client
+            cannot pause or the request failed.
         """
-        pause_every: int | None = self.config.pause_every
-        if pause_every is None or attempt % pause_every != 0:
-            return False
-
         request: PauseExecutionRequest = PauseExecutionRequest.create_for_step_attempt(
             self.operation_identifier,
             attempt,

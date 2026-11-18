@@ -172,7 +172,9 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 ### Pause after repeated failures (experimental)
 
-`StepConfig(pause_every=N)` pauses the durable execution after every Nth failed attempt that the retry strategy retries. For example, `pause_every=5` pauses after attempts 5, 10, 15, and so on. The step saves its normal retry, then the SDK asks Lambda to pause, and the invocation ends. An operator resumes the execution with the Lambda `ResumeDurableExecution` API, and the next attempt runs.
+A retry decision can pause the durable execution. When the retry strategy returns `RetryDecision(pause=True)` for a failed attempt, the step saves its normal retry, then the SDK asks Lambda to pause, and the invocation ends. An operator resumes the execution with the Lambda `ResumeDurableExecution` API, and the next attempt runs.
+
+The built-in strategy pauses after every Nth failed attempt with `pause_every`. For example, `pause_every=5` pauses after attempts 5, 10, 15, and so on:
 
 ```python
 RETRY_AND_PAUSE = StepConfig(
@@ -180,21 +182,34 @@ RETRY_AND_PAUSE = StepConfig(
         RetryStrategyConfig(
             max_attempts=20,
             initial_delay=Duration.from_seconds(60),
-            jitter_strategy=JitterStrategy.NONE,
+            pause_every=5,
         )
-    ),
-    pause_every=5,
+    )
 )
 ```
 
-- The option does not change how many attempts run. When the retry strategy stops, the step fails as usual.
-- Use a retry strategy whose delay is much longer than the pause call, for example 30 seconds or more. Do not use `pause_every` with short delays of a few seconds.
-- The reason: Lambda saves the retry first, and then the SDK asks to pause. The pause takes effect a short time later. If the retry delay ends first, Lambda can run one more attempt before the execution pauses.
-- The default `JitterStrategy.FULL` can pick any delay from zero up. So use `JitterStrategy.HALF` or `JitterStrategy.NONE`.
-- For short waits between attempts, retry without `pause_every`.
+A custom strategy sets `pause` itself. This one pauses on attempt 5 only when the error is a `PartnerUnavailableError`:
+
+```python
+def retry_and_pause(error: Exception, attempt: int) -> RetryDecision:
+    if attempt >= 20:
+        return RetryDecision.no_retry()
+    return RetryDecision.retry(
+        Duration.from_seconds(60),
+        pause=attempt == 5 and isinstance(error, PartnerUnavailableError),
+    )
+
+
+RETRY_AND_PAUSE = StepConfig(retry_strategy=retry_and_pause)
+```
+
+- `pause` does not change how many attempts run. When the decision has `should_retry=False`, the step fails as usual and does not pause.
+- Use a long delay on the pausing attempt, for example 30 seconds or more. Lambda saves the retry first, and then the SDK asks to pause. The pause takes effect a short time later. If the delay ends first, Lambda can run one more attempt before the execution pauses.
+- `pause_every` uses the delay without jitter on the pausing attempt. So jitter never makes that delay near zero. In a custom strategy, do not apply jitter that can reach zero to the pausing attempt.
+- Only an attempt that raised in the current invocation can pause. An `AT_MOST_ONCE_PER_RETRY` attempt that was interrupted retries without a pause.
 - The pause applies to the whole execution. A step in a `map` or `parallel` branch can still pause the execution after the map or parallel operation has finished. No checkpointed data is lost. Resume the execution to continue.
 - Give the function's execution role `lambda:PauseDurableExecution` on its own durable executions. If the pause call fails, the SDK logs a warning with the error and the step retries as usual. A missing permission is one possible cause.
-- This option is experimental. It may change or be removed in a future release.
+- This feature is experimental. It may change or be removed in a future release.
 
 ### Replay rules
 

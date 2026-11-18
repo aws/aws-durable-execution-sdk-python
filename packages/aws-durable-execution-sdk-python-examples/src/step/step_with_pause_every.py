@@ -1,7 +1,7 @@
 """Pause the execution after every third failed attempt of a step.
 
-Experimental: StepConfig.pause_every may change or be removed in a future
-release.
+Experimental: RetryStrategyConfig.pause_every may change or be removed in a
+future release.
 
 The function's execution role needs lambda:PauseDurableExecution on its own
 durable executions. Without it, the step logs a warning and retries as usual.
@@ -44,18 +44,19 @@ def handler(_event: Any, context: DurableContext) -> str:
                 max_attempts=10,
                 # pause_every needs a long retry delay. Lambda saves the retry
                 # first, and the pause takes effect a short time later. A short
-                # delay can let one more attempt run before the pause. No
-                # jitter and no backoff keep every delay at 60 seconds. The
-                # local test runner skips the delays, so tests stay fast.
+                # delay can let one more attempt run before the pause. The
+                # pausing attempt never uses jitter. No jitter and no backoff
+                # keep every delay at 60 seconds. The local test runner skips
+                # the delays, so tests stay fast.
                 initial_delay=Duration.from_seconds(60),
                 backoff_rate=1,
                 jitter_strategy=JitterStrategy.NONE,
                 retryable_error_types=[RuntimeError],
+                # Pause after attempts 3, 6, 9. An operator can inspect the
+                # error and resume the execution when the partner API is back.
+                pause_every=3,
             )
         ),
-        # Pause after attempts 3, 6, 9. An operator can inspect the error
-        # and resume the execution when the partner API is back.
-        pause_every=3,
     )
 
     result: str = context.step(call_partner_api(), config=config)

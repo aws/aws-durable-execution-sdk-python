@@ -1248,7 +1248,7 @@ class PausableDurableServiceClient(Protocol):
     Experimental; may change or be removed in a future release.
 
     This method is optional. The SDK pauses an execution for
-    ``StepConfig.pause_every`` only when the client implements it.
+    ``RetryDecision.pause`` only when the client implements it.
     Otherwise the step retries as usual.
     """
 
