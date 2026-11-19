@@ -158,6 +158,24 @@ def test_retries_a_throttled_stop_with_the_default_strategy(
     assert len(client.requests("stop_runtime_session")) == 2
 
 
+def test_does_not_retry_a_denied_stop_with_the_default_strategy(
+    fake_agentcore_client: Any,
+) -> None:
+    denied: Any = {"Error": {"Code": "AccessDeniedException", "Message": "denied"}}
+    client = fake_agentcore_client(
+        stops=[ClientError(denied, "StopRuntimeSession")] * 5
+    )
+
+    result = run(
+        session_handler(
+            session_config(client, retry_strategy=None), lambda session, ctx: 7
+        )
+    )
+
+    assert outcome(result) == {"result": 7}
+    assert len(client.requests("stop_runtime_session")) == 1
+
+
 def test_stops_the_session_only_after_a_wait_in_the_handler_ends(
     fake_agentcore_client: Any,
 ) -> None:
