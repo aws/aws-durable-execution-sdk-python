@@ -6,10 +6,22 @@ Runtime session."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+
+from aws_durable_execution_sdk_python.exceptions import (
+    ExecutionError,
+    InvocationError,
+)
 
 from aws_durable_execution_sdk_python_extras.compute.agentcore.operation import (
+    _create_session_id,
+    _stop_session,
     _validate_base,
+)
+from aws_durable_execution_sdk_python_extras.compute.agentcore.retry import (
+    default_agentcore_retry_strategy,
 )
 
 
@@ -20,6 +32,9 @@ if TYPE_CHECKING:
         AgentcoreInvokeOptions,
         AgentcoreSessionConfig,
     )
+
+
+_T = TypeVar("_T")
 
 
 class AgentcoreSession(Protocol):
@@ -81,3 +96,95 @@ def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> int:
             than 1 second.
     """
     return _validate_base(name, config.timeout)
+
+
+@dataclass(frozen=True)
+class _SessionHandle:
+    """The handle that an :func:`agentcore_session` handler receives, until
+    the session can send jobs.
+
+    It has the ``runtime_session_id`` of :class:`AgentcoreSession`, and no
+    ``invoke`` yet.
+    """
+
+    runtime_session_id: str
+
+
+def agentcore_session(
+    context: DurableContext,
+    name: str,
+    *,
+    config: AgentcoreSessionConfig,
+    handler: Callable[[_SessionHandle, DurableContext], _T],
+) -> _T:
+    """Run a handler in one AgentCore Runtime session, and return the
+    handler's value.
+
+    The operation runs its durable operations in one child context named
+    ``name``:
+
+    1. ``<name>.session`` generates the runtime session ID, and checkpoints
+       it. So every retry and replay uses the same session.
+    2. The handler runs with the session handle and the child context.
+    3. ``<name>.stop`` calls ``StopRuntimeSession`` after the handler
+       returns or raises an error that ends the session.
+
+    A stop failure does not fail the operation. AgentCore ends an idle
+    session at the agent runtime's idle timeout. So the operation logs an
+    error and returns the handler's outcome.
+
+    Some errors do not end the session, and the session is not stopped for
+    them:
+
+    1. ``SuspendExecution``: the handler waits, and a later invocation
+       replays it.
+    2. ``ExecutionError``: the execution fails without a retry, and the
+       core SDK records no outcome for the child context.
+    3. A retryable ``InvocationError``: Lambda runs the invocation again,
+       and the handler replays in the same session.
+
+    A stop for one of them would end a session that the replay still uses,
+    or add an operation that the replay does not expect.
+
+    Args:
+        context: The context to create the durable operations in.
+        name: The child context name. It also prefixes the session's own
+            operation names.
+        config: The agent runtime.
+        handler: Runs in the session. It receives the session handle and the
+            session's child context.
+
+    Returns:
+        The handler's return value.
+
+    Raises:
+        ValidationError: When ``name`` or ``config`` is not valid. No durable
+            operation starts.
+        ChildContextError: Any error that the handler raised.
+    """
+    _validate_session_config(name, config)
+    retry_strategy = config.retry_strategy or default_agentcore_retry_strategy
+
+    def run(child: DurableContext) -> _T:
+        session_id = _create_session_id(child, name)
+
+        def stop() -> None:
+            _stop_session(child, name, config, retry_strategy, session_id)
+
+        try:
+            result = handler(_SessionHandle(session_id), child)
+        except ExecutionError:
+            raise
+        except InvocationError as error:
+            if not error.is_retryable():
+                stop()
+            raise
+        except Exception:
+            # SuspendExecution is a BaseException, so a wait in the handler
+            # passes through here without stopping the session.
+            stop()
+            raise
+        stop()
+        return result
+
+    return context.run_in_child_context(run, name=name)
