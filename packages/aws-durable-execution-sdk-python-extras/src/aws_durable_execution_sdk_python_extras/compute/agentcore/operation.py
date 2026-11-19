@@ -38,6 +38,7 @@ from botocore.exceptions import ClientError
 
 from aws_durable_execution_sdk_python_extras.compute.agentcore.config import (
     AgentcoreConfig,
+    AgentcoreSessionConfig,
     BedrockAgentcoreClient,
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore.errors import (
@@ -410,7 +411,7 @@ def _run_job(
 def _stop_session(
     child: DurableContext,
     name: str,
-    config: AgentcoreConfig,
+    config: AgentcoreConfig | AgentcoreSessionConfig,
     retry_strategy: Callable[[Exception, int], RetryDecision],
     session_id: str,
 ) -> None:
@@ -466,7 +467,9 @@ def _stop_session(
         )
 
 
-def _stop_call(config: AgentcoreConfig, session_id: str) -> None:
+def _stop_call(
+    config: AgentcoreConfig | AgentcoreSessionConfig, session_id: str
+) -> None:
     request: dict[str, Any] = {
         "agentRuntimeArn": config.agent_runtime_arn,
         "runtimeSessionId": session_id,
@@ -484,7 +487,9 @@ def _stop_call(config: AgentcoreConfig, session_id: str) -> None:
             raise
 
 
-def _client(config: AgentcoreConfig) -> BedrockAgentcoreClient:
+def _client(
+    config: AgentcoreConfig | AgentcoreSessionConfig,
+) -> BedrockAgentcoreClient:
     if config.client is not None:
         return config.client
     return _DEFAULT_CLIENTS.get(_arn_region(config.agent_runtime_arn))
