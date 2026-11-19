@@ -14,6 +14,7 @@ on:
       - '.github/workflows/closed-issue-comment.yml'
       - '.github/workflows/issue-triage.yml'
       - '.github/workflows/notify.yml'
+      - '.github/workflows/pr-status-labels.yml'
       - '.github/workflows/stale-issue-closer.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
       - '.github/workflows/test-parser.yml'
@@ -34,6 +35,7 @@ on:
       - '.github/workflows/closed-issue-comment.yml'
       - '.github/workflows/issue-triage.yml'
       - '.github/workflows/notify.yml'
+      - '.github/workflows/pr-status-labels.yml'
       - '.github/workflows/stale-issue-closer.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
       - '.github/workflows/test-parser.yml'
@@ -80,6 +82,7 @@ jobs:
           .github/scripts/tests/test_opentelemetry_conformance_workflow.py \
           .github/scripts/tests/test_parse_sdk_branch.py \
           .github/scripts/tests/test_parse_testing_version.py \
+          .github/scripts/tests/test_pr_status_labels_workflow.py \
           .github/scripts/tests/test_release_workflow_dependencies.py \
           .github/scripts/tests/e2e/test_ecr_release_workflow.py \
           .github/scripts/tests/test_shared_workflow_runners.py
