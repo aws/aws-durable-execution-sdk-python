@@ -48,6 +48,17 @@ def test_rejects_an_empty_name() -> None:
         _validate_session_config("", config)
 
 
+def test_rejects_a_non_string_name() -> None:
+    config = AgentcoreSessionConfig(
+        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
+    )
+
+    with pytest.raises(
+        ValidationError, match="an AgentCore operation requires a non-empty name"
+    ):
+        _validate_session_config(1, config)  # type: ignore[arg-type]
+
+
 def test_rejects_a_timeout_under_1_second() -> None:
     config = AgentcoreSessionConfig(
         agent_runtime_arn=ARN, timeout=Duration.from_seconds(0)
