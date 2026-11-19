@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = ["boto3>=1.43.114"]
+dependencies = ["boto3>=1.44.5"]
 
 [project.urls]
 Documentation = "https://github.com/aws/aws-durable-execution-sdk-python#readme"
