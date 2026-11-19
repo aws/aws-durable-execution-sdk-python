@@ -52,7 +52,7 @@ from botocore.exceptions import ClientError
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent
 IMAGE_DIR = EXAMPLES_DIR / "microvm-image"
 OUT_DIR = EXAMPLES_DIR / ".microvm-image-build"
-WORKER_DIR = EXAMPLES_DIR.parent / "aws-durable-execution-sdk-python-microvm-worker"
+WORKER_DIR = EXAMPLES_DIR.parent / "aws-durable-execution-sdk-python-compute-worker"
 IMAGE_FILES = ("Dockerfile", "app.py", "constraints.txt")
 IMAGE_NAME_PREFIX = "sdk-python-examples"
 HASH_LENGTH = 12

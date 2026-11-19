@@ -46,6 +46,17 @@
       "path": "./src/step/step_with_retry.py"
     },
     {
+      "name": "Step with Pause Every",
+      "description": "Experimental: pause the execution after every third failed attempt of a step, until an operator resumes it",
+      "handler": "step_with_pause_every.handler",
+      "integration": false,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/step/step_with_pause_every.py"
+    },
+    {
       "name": "Custom SerDes Round-Trip",
       "description": "One function proving the first-run/replay result-equality guarantee with a non-identity SerDes across step, wait_for_condition, and run_in_child_context (normal, virtual, large-payload)",
       "handler": "serdes_roundtrip.handler",
@@ -837,7 +848,7 @@
     },
     {
       "name": "MicroVM Session Suspend After",
-      "description": "Runs two jobs in one Lambda MicroVM that its worker suspends after the first job",
+      "description": "Runs two jobs in one Lambda MicroVM that the function suspends after the first job",
       "handler": "microvm_session_suspend_after.handler",
       "integration": true,
       "usesMicrovm": true,
@@ -847,6 +858,18 @@
         "ExecutionTimeout": 900
       },
       "path": "./src/microvm/microvm_session_suspend_after.py"
+    },
+    {
+      "name": "AgentCore Run Job",
+      "description": "Runs one job in an AgentCore Runtime session and returns the result that the agent reports",
+      "handler": "agentcore_run_job.handler",
+      "integration": true,
+      "usesAgentcore": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 900
+      },
+      "path": "./src/agentcore/agentcore_run_job.py"
     }
   ]
 }

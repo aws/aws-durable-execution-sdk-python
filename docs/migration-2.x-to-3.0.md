@@ -194,7 +194,7 @@ Provider names must be unique across installed distributions. Explicit factories
 run before environment-selected factories, and selecting the same factory object
 through both paths deduplicates it by identity. Separate factory instances are
 separate registrations, even if they construct the same plugin class. See
-[dynamic instrumentation plugins](../packages/aws-durable-execution-sdk-python/README.md#dynamic-instrumentation-plugins).
+[dynamic instrumentation plugins](../packages/aws-durable-execution-sdk-python/docs/plugins.md).
 
 ### Migrate OpenTelemetry registrations
 
@@ -345,7 +345,7 @@ operation's end hook returns before the next operation's start hook is called.
 Threads are not ordered with each other, so guard state shared between hooks
 with a lock. The `DurableInstrumentationPlugin` docstring states where each
 hook runs and the exceptions to this order. See the
-[invocation worker lifecycle](../packages/aws-durable-execution-sdk-python/README.md#invocation-worker-lifecycle)
+[invocation worker lifecycle](../packages/aws-durable-execution-sdk-python/docs/plugins.md#invocation-worker-lifecycle)
 for context-variable handling.
 
 ## Recommended validation after upgrading

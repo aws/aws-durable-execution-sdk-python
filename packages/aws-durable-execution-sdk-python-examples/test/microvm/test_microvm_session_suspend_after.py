@@ -81,8 +81,10 @@ def test_suspends_the_microvm_after_the_first_job_and_resumes_it_for_the_next(
 
             # 1. The gate starts after the first job ends.
             # 2. The second job starts only after the test completes the gate.
-            # 3. The session does not suspend when idle. So only the first
-            #    job's suspend_after can suspend the MicroVM.
+            # 3. The session does not suspend when idle, and the idle
+            #    policy's maxIdleDurationSeconds is longer than the session.
+            #    So only the first job's suspend_after can suspend the
+            #    MicroVM.
             # 4. So a SUSPENDED state read now lies between the two jobs, and
             #    comes from suspend_after.
             # The poll lasts at most 150 seconds. The gate times out after 5
@@ -120,9 +122,9 @@ def test_suspends_the_microvm_after_the_first_job_and_resumes_it_for_the_next(
 
     expect_microvm_terminated(microvm_id)
 
-    # The tree is the tree of the suspend example. The state check and the
-    # resume run inside the second request step. So the tree shows them only
-    # as a request step that succeeded after the suspend.
+    # The tree is the tree of the suspend example. The service resumes the
+    # MicroVM during the second request step. So the tree shows the resume
+    # only as a request step that succeeded after the suspend.
     assert tree(result.operations) == [
         (
             "suspend-after-session",
@@ -160,13 +162,15 @@ def test_suspends_the_microvm_after_the_first_job_and_resumes_it_for_the_next(
         )
     ]
 
-    # The session sets neither auto_suspend_on_idle nor an idle policy. So the
-    # launch records no resume mode. suspend_after is an option of one job,
-    # and the launch checkpoint does not record it.
+    # The SDK does not resume a MicroVM, so the launch records no resume
+    # mode. suspend_after is an option of one job, and the launch checkpoint
+    # does not record it.
     session = result.get_context("suspend-after-session")
     launch = deserialize_operation_payload(
         session.get_step("suspend-after-session.launch").result
     )
-    assert launch["delivery"] == "http"
-    assert launch["microvmId"] == microvm_id
-    assert launch["resumeBeforeDelivery"] is False
+    assert launch == {
+        "microvmId": microvm_id,
+        "endpoint": launch["endpoint"],
+        "delivery": "http",
+    }

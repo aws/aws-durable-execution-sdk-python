@@ -30,6 +30,10 @@ jobs:
             path: packages/aws-durable-execution-sdk-python-testing
           - name: aws-durable-execution-sdk-python-telemetry-exporter
             path: packages/aws-durable-execution-sdk-python-telemetry-exporter
+          - name: aws-durable-execution-sdk-python-extras
+            path: packages/aws-durable-execution-sdk-python-extras
+          - name: aws-durable-execution-sdk-python-compute-worker
+            path: packages/aws-durable-execution-sdk-python-compute-worker
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -67,6 +71,8 @@ jobs:
           - name: aws-durable-execution-sdk-python-otel
           - name: aws-durable-execution-sdk-python-testing
           - name: aws-durable-execution-sdk-python-telemetry-exporter
+          - name: aws-durable-execution-sdk-python-extras
+          - name: aws-durable-execution-sdk-python-compute-worker
     permissions:
       id-token: write
 

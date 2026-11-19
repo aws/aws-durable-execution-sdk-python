@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from aws_durable_execution_sdk_python_microvm_worker import (
+from aws_durable_execution_sdk_python_compute_worker.microvm import (
     MicrovmJobContext,
     start_microvm_worker,
 )

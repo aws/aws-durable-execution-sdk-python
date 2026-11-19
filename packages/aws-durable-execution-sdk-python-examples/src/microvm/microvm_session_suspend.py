@@ -5,8 +5,10 @@ microvm-image/. The image's routes /write and /read write and read a file in
 the MicroVM. The image enables the resume hook. So the worker accepts the
 next job as soon as the MicroVM resumes.
 
-A callback named gate holds the second job. The caller completes the callback
-with SendDurableExecutionCallbackSuccess to start the second job.
+The idle policy sets autoResumeEnabled, so the service resumes the MicroVM
+on the next request. A callback named gate holds the second job. The caller
+completes the callback with SendDurableExecutionCallbackSuccess to start the
+second job.
 """
 
 import os
@@ -15,7 +17,7 @@ from typing import Any
 from aws_durable_execution_sdk_python.config import CallbackConfig, Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmInvokeOptions,
     MicrovmSession,
     MicrovmSessionConfig,
@@ -31,6 +33,17 @@ IDLE_TIME = Duration.from_seconds(10)
 # So a failed caller leaves the MicroVM running for 5 minutes, not for the
 # whole execution timeout.
 GATE = CallbackConfig(timeout=Duration.from_minutes(5))
+# The SDK does not resume a MicroVM. The service resumes a suspended MicroVM on
+# the next request, because the idle policy sets autoResumeEnabled.
+# maxIdleDurationSeconds is above maximumDurationInSeconds, the 10-minute
+# session timeout plus 5 minutes. The service's idle timer counts only inbound
+# requests, so a shorter value could suspend a running job.
+# suspendedDurationSeconds is the same 15 minutes, longer than the session.
+IDLE_POLICY = {
+    "autoResumeEnabled": True,
+    "maxIdleDurationSeconds": 3600,
+    "suspendedDurationSeconds": 900,
+}
 
 
 def _require_microvm_env() -> tuple[str, str]:
@@ -85,10 +98,9 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
         # The callback result carries no data. So the handler ignores it.
         session_context.create_callback(name="gate", config=GATE).result()
 
-        # The request step calls GetMicrovm, finds the MicroVM SUSPENDED, and
-        # calls ResumeMicrovm before it sends the job. A suspended MicroVM
-        # keeps its files. So this job reads the file that the first job
-        # wrote.
+        # This job's first request finds the MicroVM SUSPENDED, and the
+        # service resumes it on a request. A suspended MicroVM keeps its
+        # files. So this job reads the file that the first job wrote.
         read = vm.invoke(
             session_context,
             "read",
@@ -112,6 +124,7 @@ def handler(event: dict[str, Any], context: DurableContext) -> Any:
             image_identifier=image_arn,
             execution_role_arn=execution_role_arn,
             timeout=Duration.from_minutes(10),
+            idle_policy=IDLE_POLICY,
             auto_suspend_on_idle=True,
             auto_suspend_idle_time=IDLE_TIME,
         ),

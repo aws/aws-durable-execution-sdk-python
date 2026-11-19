@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Test doubles for the Lambda MicroVMs client."""
+"""Test doubles for the Lambda MicroVMs and the bedrock-agentcore clients."""
 
 from __future__ import annotations
 
@@ -10,9 +10,15 @@ import socket
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_testing.runner import (
+    DurableFunctionTestResult,
+    DurableFunctionTestRunner,
+)
 from botocore.exceptions import ClientError
 
 
@@ -31,21 +37,26 @@ Answer = BaseException | Callable[[dict[str, Any]], Any] | None
 class FakeMicrovmsClient:
     """Records Lambda MicroVMs API calls, and answers from scripted lists.
 
-    ``launches``, ``tokens``, ``terminates``, and ``resumes`` hold the
+    ``launches``, ``tokens``, ``terminates``, and ``suspends`` hold the
     answers of ``run_microvm``, ``create_microvm_auth_token``,
-    ``terminate_microvm``, and ``resume_microvm``, in order. Each answer is an
-    exception to raise, a function that receives the request, or ``None`` for
-    success. After a list ends, every call succeeds.
+    ``terminate_microvm``, and ``suspend_microvm``, in order. Each answer is
+    an exception to raise, a function that receives the request, or ``None``
+    for success. After a list ends, every call succeeds.
 
     ``states`` holds the answers of ``get_microvm``: a state such as
     ``"SUSPENDED"``, or an exception to raise. After the list ends, the state
-    is ``RUNNING``. With ``suspended_until_resumed``, the state after the
-    list ends is ``SUSPENDED`` until a ``resume_microvm`` call succeeds, and
-    ``RUNNING`` after it.
+    is ``RUNNING``.
+
+    The SDK never calls ``ResumeMicrovm``. So ``resume_microvm`` records the
+    call and raises ``AssertionError``, and the autouse fixture
+    ``no_resume_microvm`` fails any test whose client recorded such a call.
 
     ``run_microvm`` and ``get_microvm`` return ``endpoint``. The Nth auth
     token is ``{"x-test-token": "token-N"}``.
     """
+
+    instances: ClassVar[list[FakeMicrovmsClient]] = []
+    """Every client that a test created, for :func:`no_resume_microvm`."""
 
     def __init__(
         self,
@@ -53,19 +64,18 @@ class FakeMicrovmsClient:
         launches: list[Answer] | None = None,
         tokens: list[Answer] | None = None,
         terminates: list[Answer] | None = None,
-        resumes: list[Answer] | None = None,
+        suspends: list[Answer] | None = None,
         states: list[str | BaseException] | None = None,
         endpoint: str | None = "mvm-1.microvm.example",
-        suspended_until_resumed: bool = False,
     ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.endpoint = endpoint
-        self._suspended = suspended_until_resumed
+        FakeMicrovmsClient.instances.append(self)
         self._answers: dict[str, list[Answer]] = {
             "run_microvm": list(launches or []),
             "create_microvm_auth_token": list(tokens or []),
             "terminate_microvm": list(terminates or []),
-            "resume_microvm": list(resumes or []),
+            "suspend_microvm": list(suspends or []),
         }
         self._states = list(states or [])
         self._lock = threading.Lock()
@@ -101,11 +111,15 @@ class FakeMicrovmsClient:
         self._answer("terminate_microvm", request)
         return {}
 
-    def resume_microvm(self, **request: Any) -> dict[str, Any]:
-        self._answer("resume_microvm", request)
-        with self._lock:
-            self._suspended = False
+    def suspend_microvm(self, **request: Any) -> dict[str, Any]:
+        self._answer("suspend_microvm", request)
         return {}
+
+    def resume_microvm(self, **request: Any) -> dict[str, Any]:
+        with self._lock:
+            self.calls.append(("resume_microvm", request))
+        msg = "the SDK must never call ResumeMicrovm"
+        raise AssertionError(msg)
 
     def get_microvm(self, **request: Any) -> dict[str, Any]:
         with self._lock:
@@ -113,13 +127,86 @@ class FakeMicrovmsClient:
             if self._states:
                 state = self._states.pop(0)
             else:
-                state = "SUSPENDED" if self._suspended else "RUNNING"
+                state = "RUNNING"
         if isinstance(state, BaseException):
             raise state
         response: dict[str, Any] = {"microvmId": "mvm-1", "state": state}
         if self.endpoint is not None:
             response["endpoint"] = self.endpoint
         return response
+
+
+class FakeStream:
+    """The streaming body of an ``InvokeAgentRuntime`` answer."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.closed = False
+
+    def read(self, amt: int | None = None) -> bytes:
+        data, self._data = (
+            (self._data, b"") if amt is None else (self._data[:amt], self._data[amt:])
+        )
+        return data
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeAgentcoreClient:
+    """Records ``bedrock-agentcore`` API calls, and answers from scripted lists.
+
+    ``invokes`` and ``stops`` hold the answers of ``invoke_agent_runtime``
+    and ``stop_runtime_session``, in order. Each answer is an exception to
+    raise, a function that receives the request and returns the answer body,
+    bytes for the answer body, or ``None`` for ``{"accepted":true}``. After a
+    list ends, every call succeeds.
+    """
+
+    def __init__(
+        self,
+        *,
+        invokes: list[Any] | None = None,
+        stops: list[Any] | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.streams: list[FakeStream] = []
+        self._answers: dict[str, list[Any]] = {
+            "invoke_agent_runtime": list(invokes or []),
+            "stop_runtime_session": list(stops or []),
+        }
+        self._lock = threading.Lock()
+
+    def requests(self, name: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [request for call, request in self.calls if call == name]
+
+    def _answer(self, name: str, request: dict[str, Any]) -> Any:
+        with self._lock:
+            self.calls.append((name, request))
+            answers = self._answers[name]
+            answer = answers.pop(0) if answers else None
+        if isinstance(answer, BaseException):
+            raise answer
+        if callable(answer):
+            return answer(request)
+        return answer
+
+    def invoke_agent_runtime(self, **request: Any) -> dict[str, Any]:
+        body = self._answer("invoke_agent_runtime", request)
+        stream = FakeStream(b'{"accepted":true}' if body is None else body)
+        with self._lock:
+            self.streams.append(stream)
+        return {"response": stream, "statusCode": 200}
+
+    def stop_runtime_session(self, **request: Any) -> dict[str, Any]:
+        self._answer("stop_runtime_session", request)
+        return {"statusCode": 200}
+
+
+@pytest.fixture
+def fake_agentcore_client() -> type[FakeAgentcoreClient]:
+    return FakeAgentcoreClient
 
 
 # The fakes are fixtures, not imports. Several packages in this repository
@@ -132,6 +219,25 @@ def aws_region(monkeypatch: pytest.MonkeyPatch) -> None:
     # The local runner's execution ARN is not an ARN. So the operation takes
     # the Region from AWS_REGION, as it does outside Lambda.
     monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+
+@pytest.fixture(autouse=True)
+def no_resume_microvm() -> Iterator[None]:
+    """Fail a test whose fake client received a ``resume_microvm`` call.
+
+    A call raises ``AssertionError`` in the fake. Code that catches every
+    error, such as a worker thread, could hide that error. So the fixture
+    also checks the recorded calls after the test.
+    """
+    FakeMicrovmsClient.instances.clear()
+    yield
+    resumed = [
+        client
+        for client in FakeMicrovmsClient.instances
+        if client.requests("resume_microvm")
+    ]
+    FakeMicrovmsClient.instances.clear()
+    assert not resumed, "the SDK called ResumeMicrovm"
 
 
 @pytest.fixture
@@ -150,19 +256,10 @@ def connect_failed() -> Status:
     return CONNECT_FAILED
 
 
-@pytest.fixture
-def suspend_after_ack() -> dict[str, str]:
-    """The header of a worker that supports ``suspendAfter``."""
-    return dict(SUSPEND_AFTER_ACK)
-
-
 Status = int | tuple[int, dict[str, str]] | None
 
 CONNECT_FAILED: Status = (502, {"x-aws-proxy-error": "MICROVM_CONNECT_FAILED"})
 """The answer of the endpoint of a suspending or suspended MicroVM."""
-
-SUSPEND_AFTER_ACK = {"X-Microvm-Suspend-After": "accepted"}
-"""The header with which a worker acknowledges ``suspendAfter``."""
 
 
 class FakeEndpoint:
@@ -264,3 +361,55 @@ def fake_endpoint() -> Iterator[Callable[..., FakeEndpoint]]:
     yield _create
     for endpoint in endpoints:
         endpoint.close()
+
+
+# ---------------------------------------------------------------- ai
+
+
+AI_WAIT = 30
+
+
+def _catching_ai(body: Callable[[DurableContext], Any]) -> Callable[..., Any]:
+    """A handler that returns the body's result, or the class, message, and
+    status of the error that it raised."""
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            return {"result": body(context)}
+        except Exception as error:  # noqa: BLE001 - the test inspects it
+            return {
+                "error": type(error).__name__,
+                "message": str(error),
+                "status": getattr(error, "status", None),
+                "stop_reason": getattr(error, "stop_reason", None),
+            }
+
+    return handler
+
+
+def _ai_outcome(result: DurableFunctionTestResult) -> Any:
+    assert result.status.value == "SUCCEEDED", result.error
+    return json.loads(result.result) if result.result is not None else None
+
+
+@pytest.fixture
+def run_ai() -> Iterator[Callable[[Callable[[DurableContext], Any]], Any]]:
+    """Run an ``ai`` test body on the local test runner. Return the outcome and the test
+    result."""
+    runners: list[DurableFunctionTestRunner] = []
+
+    def _run(
+        body: Callable[[DurableContext], Any],
+    ) -> tuple[Any, DurableFunctionTestResult]:
+        runner = DurableFunctionTestRunner(
+            handler=_catching_ai(body), poll_interval=0.05
+        )
+        runners.append(runner)
+        arn = runner.run_async(input=json.dumps({}), execution_timeout=AI_WAIT)
+        result = runner.wait_for_result(arn, timeout=AI_WAIT)
+        return _ai_outcome(result), result
+
+    yield _run
+    for runner in runners:
+        runner.close()

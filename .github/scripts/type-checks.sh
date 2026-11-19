@@ -18,8 +18,8 @@ mypy --install-types --non-interactive \
   packages/aws-durable-execution-sdk-python-telemetry-exporter/tests
 
 mypy --install-types --non-interactive \
-  packages/aws-durable-execution-sdk-python-microvm-worker/src/aws_durable_execution_sdk_python_microvm_worker \
-  packages/aws-durable-execution-sdk-python-microvm-worker/tests
+  packages/aws-durable-execution-sdk-python-compute-worker/src/aws_durable_execution_sdk_python_compute_worker \
+  packages/aws-durable-execution-sdk-python-compute-worker/tests
 
 mypy --install-types --non-interactive \
   packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras \

@@ -66,7 +66,7 @@ Each command below follows `hatch run dev-testing:js-examples`.
 | Skip the JS build for that checkout | `--js-dir ~/github/aws-durable-execution-sdk-js --no-build` |
 | Force a JS rebuild | `--rebuild` |
 | See runner debug logs | `--log-level DEBUG hello-world` |
-| Pass options to jest | `invoke --jest-args='--verbose'` |
+| Pass options to vitest | `invoke --jest-args='--reporter=verbose'` |
 | All options | `--help` |
 
 `--js-ref` works only with the cloned JS SDK, so it cannot be combined with
@@ -92,13 +92,13 @@ an earlier run. It also refuses a directory that another run is still using.
 | `report.json` | Passed, failed, flaky and skipped test files |
 | `runner.log` | The Python local runner, which is the code under test |
 | `shim.log` | One line per handler invocation: request ID, function, duration, outcome |
-| `jest.json`, `retry1.json` | Raw jest results, for the first run and the retry |
+| `vitest.json`, `retry1.json` | Raw test results, for the first run and the retry. A run on an older JS ref writes `jest.json` instead. |
 | `maps/` | The function maps generated from the examples' `template.yml` |
 
 To investigate one example, run it alone with debug logs:
 
 ```sh
-hatch run dev-testing:js-examples --log-level DEBUG --retries 0 --jest-args='--verbose' step/interrupted-no-retry
+hatch run dev-testing:js-examples --log-level DEBUG --retries 0 --jest-args='--reporter=verbose' step/interrupted-no-retry
 ```
 
 Add `--dump-dir /tmp/dump` to also save every history, state and checkpoint
@@ -116,15 +116,15 @@ The Python local runner is the backend, in place of the Lambda service. Three
 helpers run around it, on the loopback, on free ports chosen for each run:
 
 ```text
-jest ----> invoke_proxy.py ----> local runner ----> lambda-shim.cjs
+vitest --> invoke_proxy.py ----> local runner ----> lambda-shim.cjs
 (test      (starts executions)   (the code under   (runs the JS handlers,
  driver)                          test)              like the Lambda runtime)
 ```
 
-1. **jest** runs the JS example tests unchanged, in the mode the JS repository
-   uses against real Lambda (`NODE_ENV=integration`). Each test is a client:
-   it starts an execution, then reads history and state, and some tests send
-   callbacks. `LAMBDA_ENDPOINT` points the tests' Lambda client at the proxy.
+1. **vitest** runs the JS example tests unchanged, in the mode the JS
+   repository uses against real Lambda (`NODE_ENV=integration`). Each test is
+   a client: it starts an execution, then reads history and state, and some
+   tests send callbacks. `LAMBDA_ENDPOINT` points the tests' Lambda client at the proxy.
 2. **invoke_proxy.py** exists because the tests start an execution with Lambda
    `Invoke`, and the local runner has no `Invoke` route. The proxy turns that
    call into the runner's `POST /start-durable-execution`, and returns the
@@ -145,9 +145,9 @@ jest ----> invoke_proxy.py ----> local runner ----> lambda-shim.cjs
 `run.py` starts the runner with `WebRunner` from the testing package, in a
 child process, so each server session gets a runner with no state left from
 an earlier one. A run has one session, plus one per retry. The proxy runs on a
-thread in `run.py`, and the shim and jest run as separate Node processes.
+thread in `run.py`, and the shim and vitest run as separate Node processes.
 Before the run, `run.py` reads the examples' `template.yml` and writes three maps: test file to
-function name (for jest), function name to bundle, timeout and environment
+function name (for the tests), function name to bundle, timeout and environment
 (for the shim), and function name to `DurableConfig` (for the runner).
 
 The runner emulates region `us-west-2` and account `123456789012`. The proxy
@@ -164,7 +164,7 @@ three groups:
 - Examples marked `localOnly` in the JS catalog. `template.yml` omits them,
   and the JS repository's integration run skips them too. The output reports
   how many were skipped.
-- Tests without "cloud" in their name. The integration jest config runs only
+- Tests without "cloud" in their name. The integration test config runs only
   those. A file with no such test is reported as "no cloud tests".
 
 ## Known failures
@@ -186,6 +186,12 @@ hatch run dev-testing:js-examples --js-ref <older JS commit> <failing test>
 
 If it passes there, the new JS commit exposed something the runner does not
 handle yet.
+
+The JS SDK replaced jest with vitest in aws/aws-durable-execution-sdk-js#1167.
+So the harness picks the test runner from the JS checkout. When the examples
+package has `jest.config.integration.js`, the harness runs jest. Otherwise it
+runs vitest. So `--js-ref` works with a commit from before and after that
+change. `--jest-args` go to the runner that the harness picks.
 
 ## Harness tests
 

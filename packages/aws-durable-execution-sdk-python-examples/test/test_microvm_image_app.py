@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 
-pytest.importorskip("aws_durable_execution_sdk_python_microvm_worker")
+pytest.importorskip("aws_durable_execution_sdk_python_compute_worker.microvm")
 
 APP_PATH = Path(__file__).resolve().parents[1] / "microvm-image" / "app.py"
 SPEC = importlib.util.spec_from_file_location("microvm_image_app", APP_PATH)
@@ -58,7 +58,7 @@ def test_rejects_a_key_that_is_not_a_plain_file_name(monkeypatch, tmp_path, key)
 def test_the_worker_accepts_the_handlers():
     # The worker rejects an async handler when it starts. This builds the
     # listener with the app's handlers, without a server.
-    from aws_durable_execution_sdk_python_microvm_worker import (
+    from aws_durable_execution_sdk_python_compute_worker.microvm import (
         MicrovmWorkerListener,
     )
 

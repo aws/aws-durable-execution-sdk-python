@@ -352,6 +352,138 @@ def test_jest_args_are_split(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.jest_args == ["--verbose", "--testTimeout=5000"]
 
 
+@pytest.mark.parametrize(("runner", "has_flag"), [("jest", True), ("vitest", False)])
+def test_only_jest_gets_the_vm_modules_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str, has_flag: bool
+) -> None:
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096")
+    (tmp_path / "function-name-map.json").write_text("{}")
+    results_file = tmp_path / "results.json"
+    seen: dict[str, Any] = {}
+
+    class FakeProc:
+        pid = 0
+
+        def wait(self) -> int:
+            return 0
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> FakeProc:
+        seen["env"] = kwargs["env"]
+        results_file.write_text("{}")
+        return FakeProc()
+
+    monkeypatch.setattr(run.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(run, "stop_group", lambda proc: None)
+    servers = type("FakeServers", (), {"proxy_url": "http://127.0.0.1:1"})()
+
+    run.run_test_runner(runner, tmp_path, [], servers, tmp_path, results_file, 1, [])
+
+    node_options = seen["env"]["NODE_OPTIONS"]
+    assert node_options.startswith("--max-old-space-size=4096")
+    assert ("--experimental-vm-modules" in node_options) is has_flag
+
+
+def test_runner_is_jest_only_with_the_jest_config(examples: Path) -> None:
+    assert run.detect_test_runner(examples) == "vitest"
+    (examples / "jest.config.integration.js").write_text("")
+    assert run.detect_test_runner(examples) == "jest"
+
+
+def test_vitest_command(tmp_path: Path) -> None:
+    results = tmp_path / "vitest.json"
+
+    cmd = run.runner_command("vitest", [A, B], results, 6, ["--reporter=verbose"])
+
+    assert cmd == [
+        "npx",
+        "--no-install",
+        "vitest",
+        "run",
+        # The integration config stops at the first failure.
+        "--bail=0",
+        "--maxWorkers=6",
+        "--reporter=default",
+        "--reporter=json",
+        f"--outputFile.json={results}",
+        "--reporter=verbose",
+        A,
+        B,
+    ]
+
+
+def test_jest_command(tmp_path: Path) -> None:
+    results = tmp_path / "jest.json"
+
+    cmd = run.runner_command("jest", [A], results, 4, ["--verbose"])
+
+    assert cmd == [
+        "npx",
+        "--no-install",
+        "jest",
+        "--config",
+        "jest.config.integration.js",
+        "--bail=0",
+        "--maxWorkers=4",
+        "--json",
+        f"--outputFile={results}",
+        "--verbose",
+        "--runTestsByPath",
+        A,
+    ]
+
+
+def vitest_result(examples: Path) -> dict[str, object]:
+    """A vitest json reporter result, with the fields vitest 5 writes."""
+    return {
+        "numTotalTestSuites": 4,
+        "success": False,
+        "testResults": [
+            {
+                "assertionResults": [
+                    {"fullName": "a cloud", "status": "passed", "title": "cloud"},
+                    {"fullName": "a local", "status": "skipped", "title": "local"},
+                ],
+                "status": "passed",
+                "message": "",
+                "name": str(examples / A),
+            },
+            {
+                "assertionResults": [
+                    {"fullName": "b cloud", "status": "failed", "title": "cloud"}
+                ],
+                "status": "failed",
+                "message": "",
+                "name": str(examples / B),
+            },
+            {
+                # A file with no cloud test: testNamePattern skips every test.
+                "assertionResults": [
+                    {"fullName": "c local", "status": "skipped", "title": "local"}
+                ],
+                "status": "passed",
+                "message": "",
+                "name": str(examples / C),
+            },
+            {
+                # A file that fails to load reports no tests.
+                "assertionResults": [],
+                "status": "failed",
+                "message": "Cannot find module",
+                "name": str(examples / "src/examples/d.test.ts"),
+            },
+        ],
+    }
+
+
+def test_outcomes_read_vitest_results(examples: Path) -> None:
+    assert run.outcomes([vitest_result(examples)], examples) == {
+        A: "passed",
+        B: "failed",
+        C: "skipped",
+        "src/examples/d.test.ts": "failed",
+    }
+
+
 class FakeRunner(BaseHTTPRequestHandler):
     """Answers like the local runner: 201 on start, 200 elsewhere."""
 
@@ -633,7 +765,7 @@ def test_build_produces_example_workspace_dependencies(
     testing = "packages/aws-durable-execution-sdk-js-testing"
     otel = "packages/aws-durable-execution-sdk-js-otel"
     extras = "packages/aws-durable-execution-sdk-js-extras"
-    worker = "packages/aws-durable-execution-sdk-js-microvm-worker"
+    worker = "packages/aws-durable-execution-sdk-js-compute-worker"
     examples_package = "packages/aws-durable-execution-sdk-js-examples"
     packages = [core, testing, otel, examples_package]
     if has_microvm_packages:

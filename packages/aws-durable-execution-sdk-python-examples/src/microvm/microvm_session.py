@@ -11,7 +11,7 @@ from typing import Any
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_extras.microvm import (
+from aws_durable_execution_sdk_python_extras.compute.microvm import (
     MicrovmInvokeOptions,
     MicrovmSession,
     MicrovmSessionConfig,
