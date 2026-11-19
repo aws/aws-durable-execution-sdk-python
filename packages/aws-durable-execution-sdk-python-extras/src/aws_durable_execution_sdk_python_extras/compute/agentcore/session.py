@@ -1,22 +1,30 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""The types of ``agentcore_session``: run several jobs in one AgentCore
+"""The ``agentcore_session`` operation: run several jobs in one AgentCore
 Runtime session."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
     ExecutionError,
     InvocationError,
 )
 
+from aws_durable_execution_sdk_python_extras.compute.agentcore.config import (
+    AgentcoreConfig,
+)
+from aws_durable_execution_sdk_python_extras.compute.agentcore.errors import (
+    AgentcoreError,
+)
 from aws_durable_execution_sdk_python_extras.compute.agentcore.operation import (
+    _AgentcoreScope,
     _create_session_id,
+    _run_job,
     _stop_session,
     _validate_base,
 )
@@ -37,18 +45,23 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
-class AgentcoreSession(Protocol):
+class AgentcoreSession:
     """The handle that an :func:`agentcore_session` handler receives.
 
-    Each :meth:`invoke` creates its durable operations in the context that
-    the caller passes. Parallel :meth:`invoke` calls on one session run in
-    the same microVM, so the job handlers must allow it.
+    The handle holds no context of its own. Each :meth:`invoke` creates its
+    durable operations in the context that the caller passes. Parallel
+    :meth:`invoke` calls on one session run in the same microVM, so the job
+    handlers must allow it.
     """
+
+    def __init__(self, config: AgentcoreSessionConfig, runtime_session_id: str) -> None:
+        self._config = config
+        self._runtime_session_id = runtime_session_id
 
     @property
     def runtime_session_id(self) -> str:
         """The ``runtimeSessionId`` that every job of the session uses."""
-        ...
+        return self._runtime_session_id
 
     def invoke(
         self,
@@ -59,6 +72,11 @@ class AgentcoreSession(Protocol):
         options: AgentcoreInvokeOptions,
     ) -> Any:
         """Send one job to the session, and return the job's result.
+
+        Each call creates a child context named ``name`` in ``context``, with
+        a callback ``<name>.callback`` and a request step ``<name>.request``.
+        A failed job does not stop the session. The session stops when its
+        handler returns or raises.
 
         Args:
             context: The context to create the job's durable operations in:
@@ -73,12 +91,44 @@ class AgentcoreSession(Protocol):
             ``SendDurableExecutionCallbackSuccess``, parsed as JSON.
 
         Raises:
+            ValidationError: When ``name`` or ``options`` is not valid, or the
+                Region of the durable function cannot be determined. No
+                durable operation starts.
+            TypeError: When ``job_input`` is not JSON-serializable. No
+                durable operation starts.
+            ValueError: When the JSON of ``job_input`` is over
+                ``MAX_JOB_INPUT_BYTES`` UTF-8 bytes. No durable operation
+                starts.
             AgentcoreJobFailedError: When the agent reports a failure.
             AgentcoreTimeoutError: When the job or its heartbeat times out.
             AgentcoreDeliveryError: When the request fails after all
                 retries, or the agent does not accept the job.
         """
-        ...
+        config = self._config
+        scope = _AgentcoreScope.create(
+            context,
+            name,
+            job_input,
+            AgentcoreConfig(
+                agent_runtime_arn=config.agent_runtime_arn,
+                timeout=options.timeout,
+                qualifier=config.qualifier,
+                heartbeat_timeout=options.heartbeat_timeout,
+                retry_strategy=config.retry_strategy,
+                client=config.client,
+            ),
+        )
+        session_id = self._runtime_session_id
+
+        def run(job_context: DurableContext) -> Any:
+            # The session stops itself after its handler. So a failed job
+            # leaves the session running for the next job.
+            return _run_job(job_context, scope, session_id, job_input, lambda: None)
+
+        try:
+            return context.run_in_child_context(run, name=name)
+        except ChildContextError as error:
+            raise AgentcoreError.from_child_context_error(name, error) from error
 
 
 def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> int:
@@ -98,24 +148,12 @@ def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> int:
     return _validate_base(name, config.timeout)
 
 
-@dataclass(frozen=True)
-class _SessionHandle:
-    """The handle that an :func:`agentcore_session` handler receives, until
-    the session can send jobs.
-
-    It has the ``runtime_session_id`` of :class:`AgentcoreSession`, and no
-    ``invoke`` yet.
-    """
-
-    runtime_session_id: str
-
-
 def agentcore_session(
     context: DurableContext,
     name: str,
     *,
     config: AgentcoreSessionConfig,
-    handler: Callable[[_SessionHandle, DurableContext], _T],
+    handler: Callable[[AgentcoreSession, DurableContext], _T],
 ) -> _T:
     """Run a handler in one AgentCore Runtime session, and return the
     handler's value.
@@ -125,7 +163,9 @@ def agentcore_session(
 
     1. ``<name>.session`` generates the runtime session ID, and checkpoints
        it. So every retry and replay uses the same session.
-    2. The handler runs with the session handle and the child context.
+    2. The handler runs with an :class:`AgentcoreSession` and the child
+       context. Each :meth:`AgentcoreSession.invoke` sends one job to the
+       session and waits for its result.
     3. ``<name>.stop`` calls ``StopRuntimeSession`` after the handler
        returns or raises an error that ends the session.
 
@@ -146,6 +186,11 @@ def agentcore_session(
     A stop for one of them would end a session that the replay still uses,
     or add an operation that the replay does not expect.
 
+    A failed :meth:`AgentcoreSession.invoke` raises inside the handler. The
+    handler can catch the error and send the next job to the same session.
+    An AgentCore error that leaves the handler reaches the caller with its
+    own class, as from :func:`agentcore`.
+
     Args:
         context: The context to create the durable operations in.
         name: The child context name. It also prefixes the session's own
@@ -160,7 +205,9 @@ def agentcore_session(
     Raises:
         ValidationError: When ``name`` or ``config`` is not valid. No durable
             operation starts.
-        ChildContextError: Any error that the handler raised.
+        AgentcoreError: An AgentCore error that the handler did not catch,
+            such as :class:`AgentcoreJobFailedError`, with its own class.
+        ChildContextError: Any other error that the handler raised.
     """
     _validate_session_config(name, config)
     retry_strategy = config.retry_strategy or default_agentcore_retry_strategy
@@ -172,7 +219,7 @@ def agentcore_session(
             _stop_session(child, name, config, retry_strategy, session_id)
 
         try:
-            result = handler(_SessionHandle(session_id), child)
+            result = handler(AgentcoreSession(config, session_id), child)
         except ExecutionError:
             raise
         except InvocationError as error:
@@ -187,4 +234,11 @@ def agentcore_session(
         stop()
         return result
 
-    return context.run_in_child_context(run, name=name)
+    try:
+        return context.run_in_child_context(run, name=name)
+    except ChildContextError as error:
+        # The handler is caller code. So only an AgentCore error is restored
+        # to its class. Every other error keeps the SDK's ChildContextError.
+        if isinstance(error.__cause__, AgentcoreError):
+            raise AgentcoreError.from_child_context_error(name, error) from error
+        raise

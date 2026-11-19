@@ -23,6 +23,7 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
 )
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import SerDes
 from aws_durable_execution_sdk_python_testing.runner import (
@@ -32,19 +33,22 @@ from aws_durable_execution_sdk_python_testing.runner import (
 from botocore.exceptions import ClientError
 
 from aws_durable_execution_sdk_python_extras.compute.agentcore import (
+    MAX_JOB_INPUT_BYTES,
+    AgentcoreError,
+    AgentcoreInvokeOptions,
+    AgentcoreSession,
     AgentcoreSessionConfig,
+    agentcore_session,
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore.session import (
-    _SessionHandle,
     _validate_session_config,
-    agentcore_session,
 )
 
 
 WAIT = 30
 ARN = "arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/reviewer-abc123"
 
-Body = Callable[[_SessionHandle, DurableContext], Any]
+Body = Callable[[AgentcoreSession, DurableContext], Any]
 
 
 def session_config(client: Any, **fields: Any) -> AgentcoreSessionConfig:
@@ -120,7 +124,7 @@ def test_returns_the_handlers_value_and_stops_the_session(
 def test_stops_the_session_after_a_handler_error(fake_agentcore_client: Any) -> None:
     client = fake_agentcore_client()
 
-    def body(session: _SessionHandle, ctx: DurableContext) -> Any:
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
         msg = "no diff"
         raise LookupError(msg)
 
@@ -183,7 +187,7 @@ def test_stops_the_session_only_after_a_wait_in_the_handler_ends(
     # would end the session that the replay still uses.
     client = fake_agentcore_client()
 
-    def body(session: _SessionHandle, ctx: DurableContext) -> Any:
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
         return ctx.create_callback(name="approval").result()
 
     runner = DurableFunctionTestRunner(
@@ -210,7 +214,7 @@ def test_does_not_stop_the_session_for_an_execution_error(
     # recorded for it would change that history.
     client = fake_agentcore_client()
 
-    def body(session: _SessionHandle, ctx: DurableContext) -> Any:
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
         msg = "history does not match"
         raise NonDeterministicExecutionError(msg)
 
@@ -253,7 +257,7 @@ def test_keeps_the_session_for_a_retryable_invocation_error(
         order.append("fetch")
         return 1
 
-    def body(session: _SessionHandle, ctx: DurableContext) -> Any:
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
         return ctx.step(fetch, name="fetch", config=StepConfig(serdes=serdes))
 
     result = run(session_handler(session_config(client), body))
@@ -274,7 +278,7 @@ def test_stops_the_session_for_an_invocation_error_that_is_not_retryable(
         def is_retryable(self) -> bool:
             return False
 
-    def body(session: _SessionHandle, ctx: DurableContext) -> Any:
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
         msg = "checkpoint rejected"
         raise Fatal(msg)
 
@@ -360,3 +364,166 @@ def test_rejects_a_timeout_under_1_second() -> None:
         ValidationError, match='AgentCore "review": timeout must be at least 1 second'
     ):
         _validate_session_config("review", config)
+
+
+OPTIONS = AgentcoreInvokeOptions(timeout=Duration.from_minutes(5))
+DENIED: Any = {"Error": {"Code": "AccessDeniedException", "Message": "denied"}}
+
+
+def run_jobs(
+    handler: Callable[..., Any], complete: dict[str, bytes | ErrorObject]
+) -> DurableFunctionTestResult:
+    """Run ``handler``, and complete each named callback in order."""
+    runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        for name, answer in complete.items():
+            callback_id = runner.wait_for_callback(arn, name=name, timeout=WAIT)
+            if isinstance(answer, ErrorObject):
+                runner.send_callback_failure(callback_id, answer)
+            else:
+                runner.send_callback_success(callback_id, answer)
+        return runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+
+
+def payload(request: dict[str, Any]) -> Any:
+    return json.loads(request["payload"])
+
+
+FAILED = ErrorObject(
+    message="3 tests failed", type="RuntimeError", data=None, stack_trace=None
+)
+
+
+def test_two_jobs_use_the_same_session_and_their_own_callbacks(
+    fake_agentcore_client: Any,
+) -> None:
+    client = fake_agentcore_client()
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        build = session.invoke(ctx, "build", job_input={"step": 1}, options=OPTIONS)
+        return session.invoke(ctx, "test", job_input=build, options=OPTIONS)
+
+    result = run_jobs(
+        session_handler(session_config(client), body),
+        {"build.callback": b'{"built": true}', "test.callback": b'"passed"'},
+    )
+
+    assert outcome(result) == {"result": "passed"}
+    build, test = client.requests("invoke_agent_runtime")
+    [stop] = client.requests("stop_runtime_session")
+    assert build["runtimeSessionId"] == stop["runtimeSessionId"]
+    assert test["runtimeSessionId"] == stop["runtimeSessionId"]
+    assert payload(build)["input"] == {"step": 1}
+    assert payload(test)["input"] == {"built": True}
+    assert payload(build)["callbackId"] != payload(test)["callbackId"]
+    assert operation_names(result) == ["review.session", "build", "test", "review.stop"]
+    job = result.get_context("review").get_context("build")
+    assert [child.name for child in job.child_operations] == [
+        "build.callback",
+        "build.request",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fields", "invokes", "complete", "expected"),
+    [
+        ({}, [], {"build.callback": FAILED}, "AgentcoreJobFailedError"),
+        (
+            {"timeout": Duration.from_seconds(2)},
+            [],
+            {},
+            "AgentcoreTimeoutError",
+        ),
+        ({}, [ClientError(DENIED, "InvokeAgentRuntime")], {}, "AgentcoreDeliveryError"),
+    ],
+)
+def test_a_job_error_reaches_the_handler_with_its_agentcore_class(
+    fake_agentcore_client: Any,
+    fields: dict[str, Any],
+    invokes: list[Any],
+    complete: dict[str, Any],
+    expected: str,
+) -> None:
+    client = fake_agentcore_client(invokes=invokes)
+    options = AgentcoreInvokeOptions(**{"timeout": OPTIONS.timeout, **fields})
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        try:
+            return session.invoke(ctx, "build", job_input={}, options=options)
+        except AgentcoreError as error:
+            return type(error).__name__
+
+    result = run_jobs(session_handler(session_config(client), body), complete)
+
+    assert outcome(result) == {"result": expected}
+
+
+def test_a_job_error_that_leaves_the_handler_keeps_its_class(
+    fake_agentcore_client: Any,
+) -> None:
+    client = fake_agentcore_client()
+    config = session_config(client)
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        return session.invoke(ctx, "build", job_input={}, options=OPTIONS)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            agentcore_session(context, "review", config=config, handler=body)
+        except AgentcoreError as error:
+            return {"error": type(error).__name__, "message": error.message}
+        return None
+
+    result = run_jobs(handler, {"build.callback": FAILED})
+
+    assert outcome(result) == {
+        "error": "AgentcoreJobFailedError",
+        "message": 'AgentCore "build": the job failed (RuntimeError): 3 tests failed',
+    }
+    assert len(client.requests("stop_runtime_session")) == 1
+
+
+def test_a_failed_job_does_not_stop_the_session(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client(invokes=[ClientError(DENIED, "InvokeAgentRuntime")])
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        try:
+            session.invoke(ctx, "build", job_input={}, options=OPTIONS)
+        except AgentcoreError:
+            pass
+        return session.invoke(ctx, "retry", job_input={}, options=OPTIONS)
+
+    result = run_jobs(
+        session_handler(session_config(client), body), {"retry.callback": b"1"}
+    )
+
+    assert outcome(result) == {"result": 1}
+    assert [call for call, _ in client.calls] == [
+        "invoke_agent_runtime",
+        "invoke_agent_runtime",
+        "stop_runtime_session",
+    ]
+
+
+def test_checks_the_job_input_size_before_any_job_operation(
+    fake_agentcore_client: Any,
+) -> None:
+    client = fake_agentcore_client()
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        job_input = "x" * MAX_JOB_INPUT_BYTES
+        try:
+            session.invoke(ctx, "build", job_input=job_input, options=OPTIONS)
+        except ValueError as error:
+            return str(error)
+        return None
+
+    result = run_jobs(session_handler(session_config(client), body), {})
+
+    assert "the job input is" in outcome(result)["result"]
+    assert operation_names(result) == ["review.session", "review.stop"]
+    assert client.requests("invoke_agent_runtime") == []
