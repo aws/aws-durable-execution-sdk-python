@@ -142,6 +142,22 @@ def test_returns_the_handlers_value_when_the_stop_fails(
     assert len(client.requests("stop_runtime_session")) == 1
 
 
+def test_retries_a_throttled_stop_with_the_default_strategy(
+    fake_agentcore_client: Any,
+) -> None:
+    throttled: Any = {"Error": {"Code": "ThrottlingException", "Message": "slow"}}
+    client = fake_agentcore_client(stops=[ClientError(throttled, "StopRuntimeSession")])
+
+    result = run(
+        session_handler(
+            session_config(client, retry_strategy=None), lambda session, ctx: 7
+        )
+    )
+
+    assert outcome(result) == {"result": 7}
+    assert len(client.requests("stop_runtime_session")) == 2
+
+
 def test_stops_the_session_only_after_a_wait_in_the_handler_ends(
     fake_agentcore_client: Any,
 ) -> None:
