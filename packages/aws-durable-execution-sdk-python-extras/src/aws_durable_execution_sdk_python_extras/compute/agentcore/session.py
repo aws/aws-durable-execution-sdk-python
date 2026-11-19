@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+from aws_durable_execution_sdk_python_extras.compute.agentcore.operation import (
+    _validate_base,
+)
+
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.context import DurableContext
 
     from aws_durable_execution_sdk_python_extras.compute.agentcore.config import (
         AgentcoreInvokeOptions,
+        AgentcoreSessionConfig,
     )
 
 
@@ -59,3 +64,20 @@ class AgentcoreSession(Protocol):
                 retries, or the agent does not accept the job.
         """
         ...
+
+
+def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> int:
+    """Validate the session config, before any durable operation starts.
+
+    It uses the rules of :func:`agentcore`. ``agent_runtime_arn`` is a
+    required field, and its value is not checked here. The boto3 client and
+    the service reject a value that is not valid.
+
+    Returns:
+        The session timeout in seconds.
+
+    Raises:
+        ValidationError: When ``name`` is empty, or ``timeout`` is less
+            than 1 second.
+    """
+    return _validate_base(name, config.timeout)
