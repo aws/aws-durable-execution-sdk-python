@@ -329,6 +329,16 @@ def test_config_has_no_default_runtime_arn() -> None:
         AgentcoreSessionConfig(**fields)
 
 
+def test_config_has_no_timeout() -> None:
+    fields: dict[str, Any] = {
+        "agent_runtime_arn": ARN,
+        "timeout": Duration.from_minutes(30),
+    }
+
+    with pytest.raises(TypeError, match="timeout"):
+        AgentcoreSessionConfig(**fields)
+
+
 def test_rejects_an_empty_name() -> None:
     config = AgentcoreSessionConfig(
         agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
