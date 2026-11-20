@@ -20,10 +20,10 @@ def build_examples() -> None:
 
     runtime_packages = [
         packages_dir / "aws-durable-execution-sdk-python",
-        # The MicroVM and AgentCore examples import the extras. The examples
-        # package does not depend on the extras, so pip installs the extras
+        # The MicroVM and AgentCore examples import the extensions. The examples
+        # package does not depend on the extensions, so pip installs the extensions
         # only from here.
-        packages_dir / "aws-durable-execution-sdk-python-extras",
+        packages_dir / "aws-durable-execution-sdk-python-extensions",
         packages_dir / "aws-durable-execution-sdk-python-otel",
         packages_dir / "aws-durable-execution-sdk-python-testing",
     ]
