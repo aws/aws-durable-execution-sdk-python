@@ -527,3 +527,34 @@ def test_checks_the_job_input_size_before_any_job_operation(
     assert "the job input is" in outcome(result)["result"]
     assert operation_names(result) == ["review.session", "review.stop"]
     assert client.requests("invoke_agent_runtime") == []
+
+
+def test_a_job_uses_the_session_config_and_the_job_options(
+    fake_agentcore_client: Any,
+) -> None:
+    client = fake_agentcore_client(invokes=[ClientError(DENIED, "InvokeAgentRuntime")])
+    config = session_config(
+        client,
+        qualifier="DEFAULT",
+        # The default strategy does not retry a denied request. So a retry
+        # shows that the job uses the session's strategy.
+        retry_strategy=lambda error, attempt: (
+            RetryDecision.retry(Duration.from_seconds(1))
+            if attempt < 2
+            else RetryDecision.no_retry()
+        ),
+    )
+    options = AgentcoreInvokeOptions(
+        timeout=OPTIONS.timeout, heartbeat_timeout=Duration.from_minutes(1)
+    )
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        return session.invoke(ctx, "build", job_input={}, options=options)
+
+    result = run_jobs(session_handler(config, body), {"build.callback": b"1"})
+
+    assert outcome(result) == {"result": 1}
+    denied, accepted = client.requests("invoke_agent_runtime")
+    assert denied["qualifier"] == "DEFAULT"
+    assert accepted["qualifier"] == "DEFAULT"
+    assert payload(accepted)["heartbeatTimeoutSeconds"] == 60

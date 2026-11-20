@@ -191,7 +191,8 @@ def agentcore(
 
 @dataclass(frozen=True, kw_only=True)
 class _AgentcoreScope:
-    """The validated values of one :func:`agentcore` call."""
+    """The validated values of one :func:`agentcore` call, or of one
+    :meth:`AgentcoreSession.invoke` call."""
 
     name: str
     config: AgentcoreConfig

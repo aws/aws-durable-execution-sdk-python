@@ -96,10 +96,14 @@ class AgentcoreSession:
                 durable operation starts.
             TypeError: When ``job_input`` is not JSON-serializable. No
                 durable operation starts.
+            AttributeError: When ``context`` is not a durable context, for
+                example a job name passed as the first argument. Python
+                raises it at ``context.run_in_child_context``.
             ValueError: When the JSON of ``job_input`` is over
                 ``MAX_JOB_INPUT_BYTES`` UTF-8 bytes. No durable operation
                 starts.
-            AgentcoreJobFailedError: When the agent reports a failure.
+            AgentcoreJobFailedError: When the agent reports a failure, or
+                sends a result that is not valid JSON.
             AgentcoreTimeoutError: When the job or its heartbeat times out.
             AgentcoreDeliveryError: When the request fails after all
                 retries, or the agent does not accept the job.
@@ -188,8 +192,16 @@ def agentcore_session(
 
     A failed :meth:`AgentcoreSession.invoke` raises inside the handler. The
     handler can catch the error and send the next job to the same session.
-    An AgentCore error that leaves the handler reaches the caller with its
-    own class, as from :func:`agentcore`.
+    An error that leaves the handler reaches the caller as follows:
+
+    1. An AgentCore error, such as :class:`AgentcoreJobFailedError`, that
+       the handler raises itself reaches the caller with its own class, as
+       from :func:`agentcore`.
+    2. Any other error reaches the caller as ``ChildContextError``, as from
+       ``run_in_child_context``. This includes an AgentCore error that
+       leaves a child context that the handler created: that child context
+       records ``ChildContextError`` as its error type. The caller then gets
+       the AgentCore error's message, but not its class.
 
     Args:
         context: The context to create the durable operations in.
