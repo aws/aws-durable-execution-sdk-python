@@ -529,6 +529,37 @@ def test_checks_the_job_input_size_before_any_job_operation(
     assert client.requests("invoke_agent_runtime") == []
 
 
+def test_rejects_the_outer_context_before_the_job_starts(
+    fake_agentcore_client: Any,
+) -> None:
+    # A job created in the outer context lands outside the session's child
+    # context. The core SDK does not refuse it, and the next replay fails
+    # with NonDeterministicExecutionError after the job has run.
+    client = fake_agentcore_client()
+    config = session_config(client)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+            try:
+                session.invoke(context, "build", job_input={}, options=OPTIONS)
+            except TypeError as error:
+                return str(error)
+            return None
+
+        return agentcore_session(context, "review", config=config, handler=body)
+
+    result = run_jobs(handler, {})
+
+    assert outcome(result) == (
+        'AgentCore session "review": invoke received the context that '
+        "agentcore_session was called with. Pass the context that the handler "
+        "receives, or a context nested in it."
+    )
+    assert client.requests("invoke_agent_runtime") == []
+    assert operation_names(result) == ["review.session", "review.stop"]
+
+
 def test_a_job_uses_the_session_config_and_the_job_options(
     fake_agentcore_client: Any,
 ) -> None:

@@ -54,9 +54,20 @@ class AgentcoreSession:
     handlers must allow it.
     """
 
-    def __init__(self, config: AgentcoreSessionConfig, runtime_session_id: str) -> None:
+    def __init__(
+        self,
+        config: AgentcoreSessionConfig,
+        runtime_session_id: str,
+        *,
+        name: str,
+        outer_context: DurableContext,
+    ) -> None:
         self._config = config
         self._runtime_session_id = runtime_session_id
+        self._name = name
+        # The context that agentcore_session was called with. A job created
+        # in it would be outside the session's child context.
+        self._outer_context = outer_context
 
     @property
     def runtime_session_id(self) -> str:
@@ -75,12 +86,13 @@ class AgentcoreSession:
 
         Each call creates a child context named ``name`` in ``context``, with
         a callback ``<name>.callback`` and a request step ``<name>.request``.
-        A failed job does not stop the session. The session stops when its
-        handler returns or raises.
+        Pass the context that the call runs in: the session's child context,
+        or a nested one, such as a ``map`` item's context. A failed job does
+        not stop the session. The session stops when its handler returns or
+        raises.
 
         Args:
-            context: The context to create the job's durable operations in:
-                the session's child context, or a context nested in it.
+            context: The context to create the job's durable operations in.
             name: The job's child context name.
             job_input: The job's input. It must be JSON-serializable, and the
                 same on every replay.
@@ -91,10 +103,11 @@ class AgentcoreSession:
             ``SendDurableExecutionCallbackSuccess``, parsed as JSON.
 
         Raises:
+            TypeError: When ``context`` is the context that
+                ``agentcore_session`` was called with, or ``job_input`` is not
+                JSON-serializable. No durable operation starts.
             ValidationError: When ``name`` or ``options`` is not valid, or the
                 Region of the durable function cannot be determined. No
-                durable operation starts.
-            TypeError: When ``job_input`` is not JSON-serializable. No
                 durable operation starts.
             AttributeError: When ``context`` is not a durable context, for
                 example a job name passed as the first argument. Python
@@ -108,6 +121,19 @@ class AgentcoreSession:
             AgentcoreDeliveryError: When the request fails after all
                 retries, or the agent does not accept the job.
         """
+        # The caller's own context is often in scope in the handler's
+        # closure. A job created in it lands outside the session's child
+        # context. The core SDK does not refuse that, and the next replay
+        # fails with NonDeterministicExecutionError after the job has run.
+        # So the most likely wrong context is refused here. A full ancestry
+        # check would need support in the core SDK.
+        if context is self._outer_context:
+            msg = (
+                f'AgentCore session "{self._name}": invoke received the context '
+                "that agentcore_session was called with. Pass the context that "
+                "the handler receives, or a context nested in it."
+            )
+            raise TypeError(msg)
         config = self._config
         scope = _AgentcoreScope.create(
             context,
@@ -231,7 +257,10 @@ def agentcore_session(
             _stop_session(child, name, config, retry_strategy, session_id)
 
         try:
-            result = handler(AgentcoreSession(config, session_id), child)
+            session = AgentcoreSession(
+                config, session_id, name=name, outer_context=context
+            )
+            result = handler(session, child)
         except ExecutionError:
             raise
         except InvocationError as error:
