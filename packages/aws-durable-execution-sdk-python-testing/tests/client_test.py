@@ -8,6 +8,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationAction,
     OperationType,
     OperationUpdate,
+    PausableDurableServiceClient,
+    PauseExecutionRequest,
     StateOutput,
 )
 
@@ -107,3 +109,19 @@ def test_stop_with_none_payload():
     result = client.stop("arn:aws:states:us-east-1:123456789012:execution:test", None)
 
     assert isinstance(result, datetime.datetime)
+
+
+def test_pause_durable_execution_delegates_to_processor():
+    """pause_durable_execution pauses through the processor on the lane."""
+    processor = Mock()
+    client = _client(processor)
+    request = PauseExecutionRequest(client_token="token", reason="why")  # noqa: S106
+
+    client.pause_durable_execution("arn", request)
+
+    processor.pause_execution.assert_called_once_with("arn")
+
+
+def test_in_memory_client_supports_pause():
+    """The SDK finds the pause method on the in-memory client."""
+    assert isinstance(_client(Mock()), PausableDurableServiceClient)

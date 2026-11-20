@@ -536,3 +536,33 @@ def test_paused_checkpoint_retry_is_rejected_even_after_resume(
     ):
         processor.process_checkpoint(token, [], retry_client_token)
     assert store.load(arn).to_json_dict() == before_retry
+
+
+def test_pause_execution_answers_next_checkpoint_without_token() -> None:
+    processor, store, execution, token = _make_processor_with_started_execution()
+
+    processor.pause_execution(execution.durable_execution_arn)
+
+    assert store.load(execution.durable_execution_arn).is_paused
+    assert processor.process_checkpoint(token, [], "c1").checkpoint_token is None
+
+
+def test_pause_execution_leaves_existing_pause_unchanged() -> None:
+    processor, store, execution, _token = _make_processor_with_started_execution()
+    execution.pause()
+    execution.defer_invocation()
+    store.save(execution)
+
+    processor.pause_execution(execution.durable_execution_arn)
+
+    assert store.load(execution.durable_execution_arn).has_deferred_invocation
+
+
+def test_pause_execution_leaves_completed_execution_unchanged() -> None:
+    processor, store, execution, _token = _make_processor_with_started_execution()
+    execution.complete_success(result=None)
+    store.save(execution)
+
+    processor.pause_execution(execution.durable_execution_arn)
+
+    assert not store.load(execution.durable_execution_arn).is_paused

@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, TypeVar
 
+from botocore.exceptions import ClientError
+
 from aws_durable_execution_sdk_python.config import (
     StepConfig,
     StepSemantics,
@@ -20,6 +22,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationUpdate,
+    PauseExecutionRequest,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.base import (
@@ -304,7 +307,7 @@ class StepOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier.name,
             )
 
-            self.retry_handler(e, checkpointed_result)
+            self.retry_handler(e, checkpointed_result, may_pause=True)
             # If we've failed to raise an exception from the retry_handler, then we are in a
             # weird state, and should crash terminate the execution
             msg = "retry handler should have raised an exception, but did not."
@@ -314,12 +317,16 @@ class StepOperationExecutor(OperationExecutor[T]):
         self,
         error: Exception,
         checkpointed_result: CheckpointedResult,
+        *,
+        may_pause: bool = False,
     ):
         """Checkpoint and suspend for replay if retry required, otherwise raise error.
 
         Args:
             error: The exception that occurred during step execution
             checkpointed_result: The checkpoint data containing operation state
+            may_pause: True when the step function raised in this invocation.
+                Only then does RetryDecision.pause apply.
 
         Raises:
             SuspendExecution: If retry is scheduled
@@ -380,7 +387,31 @@ class StepOperationExecutor(OperationExecutor[T]):
             # Checkpoint RETRY operation with blocking (is_sync=True, default).
             # Must ensure retry state is persisted before suspending execution.
             # This guarantees the retry attempt count and next attempt timestamp are durable.
+            # The batcher sends updates in queue order, so this also sends
+            # this step's earlier asynchronous START. If the response has no
+            # checkpoint token (the execution is already pausing), this call
+            # raises SuspendExecution and no pause is requested.
             self.state.create_checkpoint(operation_update=retry_operation)
+
+            # Request the pause only after Lambda accepted the RETRY. So no
+            # checkpoint of this invocation can be saved without a token
+            # before this step's RETRY is saved.
+            paused: bool = (
+                may_pause
+                and retry_decision.pause
+                and self._request_pause(retry_attempt + 1)
+            )
+
+            if paused:
+                # Suspend without a resume time. The next attempt runs after
+                # the execution is resumed, in a new invocation.
+                suspend_with_optional_resume_delay(
+                    msg=(
+                        f"Paused execution after attempt {retry_attempt + 1} of "
+                        f"step {self.operation_identifier.operation_id}"
+                    ),
+                    delay_seconds=None,
+                )
 
             suspend_with_optional_resume_delay(
                 msg=(
@@ -405,3 +436,49 @@ class StepOperationExecutor(OperationExecutor[T]):
         # exhausted StepInterruptedError surfaces the same way as any other
         # step failure.)
         error_object.raise_as_operation_error(StepError)
+
+    def _request_pause(self, attempt: int) -> bool:
+        """Request a pause of the durable execution after a failed attempt.
+
+        Args:
+            attempt: The 1-based attempt that just failed.
+
+        Returns:
+            True if the pause request was sent. False if the service client
+            cannot pause or the request failed.
+        """
+        request: PauseExecutionRequest = PauseExecutionRequest.create_for_step_attempt(
+            self.operation_identifier,
+            attempt,
+            durable_execution_arn=self.state.durable_execution_arn,
+        )
+        try:
+            return self.state.pause_execution(request)
+        except Exception as e:  # noqa: BLE001 - a failed pause falls back to a normal retry
+            error_name: str = _pause_error_name(e)
+            hint: str = (
+                "The execution has closed (for example, stopped) or is already paused."
+                if error_name == "ResourceConflictException"
+                else "A missing lambda:PauseDurableExecution permission on the "
+                "execution role is one possible cause."
+            )
+            self.context_logger.warning(
+                "Could not pause the execution after attempt %s of step %s. "
+                "Retrying as usual. Error: %s: %s. %s",
+                attempt,
+                self.operation_identifier.name
+                or self.operation_identifier.operation_id,
+                error_name,
+                e,
+                hint,
+            )
+            return False
+
+
+def _pause_error_name(error: Exception) -> str:
+    """Return the service error code of a botocore ClientError, else the type name."""
+    if isinstance(error, ClientError):
+        code: str | None = error.response.get("Error", {}).get("Code")
+        if code:
+            return code
+    return type(error).__name__
