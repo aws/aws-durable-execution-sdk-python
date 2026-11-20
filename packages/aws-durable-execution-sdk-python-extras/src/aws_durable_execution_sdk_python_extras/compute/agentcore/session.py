@@ -18,7 +18,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python_extras.compute.agentcore.operation import (
     _create_session_id,
     _stop_session,
-    _validate_base,
+    _validate_name,
 )
 from aws_durable_execution_sdk_python_extras.compute.agentcore.retry import (
     default_agentcore_retry_strategy,
@@ -81,21 +81,17 @@ class AgentcoreSession(Protocol):
         ...
 
 
-def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> int:
+def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> None:
     """Validate the session config, before any durable operation starts.
 
     It uses the rules of :func:`agentcore`. ``agent_runtime_arn`` is a
     required field, and its value is not checked here. The boto3 client and
     the service reject a value that is not valid.
 
-    Returns:
-        The session timeout in seconds.
-
     Raises:
-        ValidationError: When ``name`` is empty, or ``timeout`` is less
-            than 1 second.
+        ValidationError: When ``name`` is empty.
     """
-    return _validate_base(name, config.timeout)
+    _validate_name(name)
 
 
 @dataclass(frozen=True)

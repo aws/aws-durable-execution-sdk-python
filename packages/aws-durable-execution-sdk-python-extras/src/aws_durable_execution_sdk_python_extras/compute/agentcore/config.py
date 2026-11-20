@@ -138,16 +138,8 @@ class AgentcoreSessionConfig:
     no running job ends. A later job with the same session ID then gets a
     new microVM without an error, and the memory and files of the old one
     are lost. So set the idle timeout longer than any wait between two jobs
-    of the session.
-    """
-
-    timeout: Duration
-    """The lifetime of the session, including durable waits between jobs.
-
-    It must be at least 1 second. AgentCore ends a session at the agent
-    runtime's ``maxLifetime``: at most 8 hours for a microVM session, and at
-    most 14 days on Instances. So keep the timeout within the runtime's
-    ``maxLifetime``.
+    of the session. The agent runtime's ``maxLifetime`` ends the session,
+    and a job that still runs then ends with it.
     """
 
     qualifier: str | None = None
@@ -179,9 +171,8 @@ class AgentcoreInvokeOptions:
     timeout: Duration
     """The longest time to wait for this job's result.
 
-    It must be at least 1 second. The session's ``timeout`` does not shorten
-    it. A job that runs after the session ends can never report. So keep the
-    job within the session's ``timeout``.
+    It must be at least 1 second. The agent runtime's ``maxLifetime`` ends
+    the session, and a job that still runs then ends with it.
     """
 
     heartbeat_timeout: Duration | None = None
