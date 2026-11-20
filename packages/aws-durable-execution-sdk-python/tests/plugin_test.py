@@ -19,6 +19,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     ChainedInvokeDetails,
     ContextDetails,
+    DistributedMapDetails,
     DurableExecutionInvocationOutput,
     ErrorObject,
     InvocationStatus as ServiceInvocationStatus,
@@ -2669,12 +2670,25 @@ class TestPluginExecutorExtractError(unittest.TestCase):
         result = PluginExecutor._extract_error(op)
         self.assertEqual(result.message, "boom")
 
+    def test_extract_error_from_distributed_map_details(self):
+        op = MagicMock()
+        op.step_details = None
+        op.callback_details = None
+        op.chained_invoke_details = None
+        op.context_details = None
+        op.distributed_map_details = MagicMock()
+        op.distributed_map_details.error = ERROR
+
+        result = PluginExecutor._extract_error(op)
+        self.assertEqual(result.message, "boom")
+
     def test_extract_error_returns_none_when_no_error(self):
         op = MagicMock()
         op.step_details = None
         op.callback_details = None
         op.chained_invoke_details = None
         op.context_details = None
+        op.distributed_map_details = None
 
         result = PluginExecutor._extract_error(op)
         self.assertIsNone(result)
@@ -2700,6 +2714,7 @@ class TestPluginExecutorExtractError(unittest.TestCase):
         ServiceOperationType.CALLBACK,
         ServiceOperationType.CHAINED_INVOKE,
         ServiceOperationType.CONTEXT,
+        ServiceOperationType.DISTRIBUTED_MAP,
     ],
 )
 @pytest.mark.parametrize(
@@ -2745,6 +2760,11 @@ def test_plugin_error_projection_preserves_checkpoint_state(
         context_details=(
             ContextDetails(error=error)
             if operation_type is ServiceOperationType.CONTEXT
+            else None
+        ),
+        distributed_map_details=(
+            DistributedMapDetails(error=error)
+            if operation_type is ServiceOperationType.DISTRIBUTED_MAP
             else None
         ),
     )

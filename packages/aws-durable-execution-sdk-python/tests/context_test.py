@@ -4,8 +4,10 @@ import hashlib
 import json
 import random
 import threading
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
+from typing import Any
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
@@ -17,6 +19,8 @@ from aws_durable_execution_sdk_python.config import (
     Duration,
     InvokeConfig,
     MapConfig,
+    DistributedMapConfig,
+    DistributedMapProcessor,
     ParallelBranch,
     ParallelConfig,
     StepConfig,
@@ -1189,6 +1193,273 @@ def test_wait_with_time_less_than_one(mock_executor_class):
 
 
 # endregion wait
+
+
+# region distributed_map
+@pytest.mark.parametrize("max_concurrency", [0, -1])
+def test_map_run_rejects_max_concurrency_below_one(max_concurrency: int):
+    """The SDK validates only that max_concurrency is greater than zero."""
+    context = create_test_context()
+
+    with pytest.raises(
+        ValidationError, match="max_concurrency must be greater than zero"
+    ):
+        context.distributed_map(
+            ["a"],
+            DistributedMapProcessor.report_batch_outcome("test_processor"),
+            max_concurrency=max_concurrency,
+        )
+
+
+@pytest.mark.parametrize("max_concurrency", [True, False])
+def test_map_run_rejects_bool_max_concurrency(max_concurrency: bool):
+    context = create_test_context()
+
+    with pytest.raises(
+        ValidationError, match="max_concurrency must be a number, not a bool"
+    ):
+        context.distributed_map(
+            ["a"],
+            DistributedMapProcessor.report_batch_outcome("test_processor"),
+            max_concurrency=max_concurrency,
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [{"a": 1}, {"a", "b"}, (c for c in "ab")],
+    ids=["dict", "set", "generator"],
+)
+def test_distributed_map_rejects_non_sequence_source(source):
+    """A source with no reliable order is rejected."""
+    context = create_test_context()
+
+    with pytest.raises(ValidationError, match="sequence of items"):
+        context.distributed_map(
+            source,
+            DistributedMapProcessor.report_batch_outcome("test_processor"),
+            max_concurrency=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["abc", b"ab", bytearray(b"ab"), range(3), ("a",), ["abc"]],
+    ids=["str", "bytes", "bytearray", "range", "tuple", "list"],
+)
+@patch("aws_durable_execution_sdk_python.context.DistributedMapOperationExecutor")
+def test_distributed_map_accepts_any_sequence_source(
+    mock_executor_class: MagicMock, source: Sequence[Any]
+) -> None:
+    context = create_test_context()
+
+    context.distributed_map(
+        source,
+        DistributedMapProcessor.report_batch_outcome("test_processor"),
+        max_concurrency=1,
+    )
+
+    assert mock_executor_class.call_args[1]["source"] is source
+
+
+@patch("aws_durable_execution_sdk_python.context.DistributedMapOperationExecutor")
+def test_distributed_map_basic(mock_executor_class):
+    """distributed_map builds a DISTRIBUTED_MAP executor and returns its process() result."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = "map_summary"
+    mock_executor_class.return_value = mock_executor
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    processor = DistributedMapProcessor.report_batch_outcome("test_processor")
+
+    context = create_test_context(state=mock_state)
+    expected_operation_id = next(operation_id_sequence())
+
+    result = context.distributed_map(["a", "b"], processor, max_concurrency=4)
+
+    assert result == "map_summary"
+    mock_executor_class.assert_called_once_with(
+        state=mock_state,
+        operation_identifier=OperationIdentifier(
+            expected_operation_id,
+            OperationSubType.DISTRIBUTED_MAP,
+            None,
+            None,
+            operation_type=OperationType.DISTRIBUTED_MAP,
+        ),
+        source=["a", "b"],
+        processor=processor,
+        max_concurrency=4,
+        config=ANY,
+    )
+    mock_executor.process.assert_called_once()
+
+
+@patch("aws_durable_execution_sdk_python.context.DistributedMapOperationExecutor")
+def test_distributed_map_with_name_and_config(mock_executor_class):
+    """distributed_map forwards name into the identifier and passes the given config through."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = "configured_summary"
+    mock_executor_class.return_value = mock_executor
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    processor = DistributedMapProcessor.report_batch_outcome("test_processor")
+    config = DistributedMapConfig()
+
+    context = create_test_context(state=mock_state)
+    [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
+
+    result = context.distributed_map(
+        ["a"], processor, max_concurrency=2, name="named_map", config=config
+    )
+
+    seq = operation_id_sequence()
+    [next(seq) for _ in range(5)]
+    expected_id = next(seq)
+
+    assert result == "configured_summary"
+    mock_executor_class.assert_called_once_with(
+        state=mock_state,
+        operation_identifier=OperationIdentifier(
+            expected_id,
+            OperationSubType.DISTRIBUTED_MAP,
+            None,
+            "named_map",
+            operation_type=OperationType.DISTRIBUTED_MAP,
+        ),
+        source=["a"],
+        processor=processor,
+        max_concurrency=2,
+        config=config,
+    )
+    mock_executor.process.assert_called_once()
+
+
+@patch("aws_durable_execution_sdk_python.context.DistributedMapOperationExecutor")
+def test_distributed_map_with_parent_id(mock_executor_class):
+    """distributed_map propagates the parent_id into the operation identifier."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = "parent_summary"
+    mock_executor_class.return_value = mock_executor
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    processor = DistributedMapProcessor.report_batch_outcome("test_processor")
+
+    context = create_test_context(state=mock_state, parent_id="parent123")
+    [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
+
+    context.distributed_map(["a"], processor, max_concurrency=1)
+
+    seq = operation_id_sequence("parent123")
+    [next(seq) for _ in range(2)]
+    expected_id = next(seq)
+
+    mock_executor_class.assert_called_once_with(
+        state=mock_state,
+        operation_identifier=OperationIdentifier(
+            expected_id,
+            OperationSubType.DISTRIBUTED_MAP,
+            "parent123",
+            None,
+            operation_type=OperationType.DISTRIBUTED_MAP,
+        ),
+        source=["a"],
+        processor=processor,
+        max_concurrency=1,
+        config=ANY,
+    )
+    mock_executor.process.assert_called_once()
+
+
+@patch("aws_durable_execution_sdk_python.context.DistributedMapOperationExecutor")
+def test_distributed_map_increments_counter(mock_executor_class):
+    """distributed_map increments the step counter once per call."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = "result"
+    mock_executor_class.return_value = mock_executor
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    processor = DistributedMapProcessor.report_batch_outcome("test_processor")
+
+    context = create_test_context(state=mock_state)
+    [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
+
+    context.distributed_map(["a"], processor, max_concurrency=1)
+    context.distributed_map(["b"], processor, max_concurrency=1)
+
+    seq = operation_id_sequence()
+    [next(seq) for _ in range(10)]
+    expected_id1 = next(seq)
+    expected_id2 = next(seq)
+
+    assert context._step_counter.get_current() == 12  # noqa: SLF001
+    assert mock_executor_class.call_args_list[0][1][
+        "operation_identifier"
+    ] == OperationIdentifier(
+        expected_id1,
+        OperationSubType.DISTRIBUTED_MAP,
+        None,
+        None,
+        operation_type=OperationType.DISTRIBUTED_MAP,
+    )
+    assert mock_executor_class.call_args_list[1][1][
+        "operation_identifier"
+    ] == OperationIdentifier(
+        expected_id2,
+        OperationSubType.DISTRIBUTED_MAP,
+        None,
+        None,
+        operation_type=OperationType.DISTRIBUTED_MAP,
+    )
+
+
+@patch("aws_durable_execution_sdk_python.context.DistributedMapOperationExecutor")
+def test_distributed_map_defaults_config_when_none(mock_executor_class):
+    """distributed_map builds a default DistributedMapConfig when none is given."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = "summary"
+    mock_executor_class.return_value = mock_executor
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    processor = DistributedMapProcessor.report_batch_outcome("test_processor")
+
+    context = create_test_context(state=mock_state)
+    context.distributed_map(["a"], processor, max_concurrency=1)
+
+    passed_config = mock_executor_class.call_args[1]["config"]
+    assert isinstance(passed_config, DistributedMapConfig)
+
+
+@patch("aws_durable_execution_sdk_python.context.DistributedMapOperationExecutor")
+def test_distributed_map_returns_process_result(mock_executor_class):
+    """distributed_map returns whatever executor.process() returns (summary or result)."""
+    mock_executor = MagicMock()
+    sentinel = object()
+    mock_executor.process.return_value = sentinel
+    mock_executor_class.return_value = mock_executor
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    processor = DistributedMapProcessor.report_batch_outcome("test_processor")
+
+    context = create_test_context(state=mock_state)
+    result = context.distributed_map(["a"], processor, max_concurrency=1)
+
+    assert result is sentinel
+
+
+# endregion distributed_map
 
 
 # region run_in_child_context
