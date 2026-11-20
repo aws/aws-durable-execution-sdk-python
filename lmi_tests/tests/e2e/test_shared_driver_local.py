@@ -6,8 +6,10 @@ This checks public handler/callback/replay behavior, not real-LMI placement or
 cloud conformance acceptance.
 """
 
+from contextlib import nullcontext
 import json
 from threading import Lock
+from unittest.mock import Mock
 import time
 
 from aws_durable_execution_conformance_tests.lmi.coordinator import (
@@ -19,14 +21,23 @@ from aws_durable_execution_sdk_python import durable_execution
 from aws_durable_execution_sdk_python_testing import DurableFunctionTestRunner
 from lmi_tests.fixture import workflow
 from lmi_tests.shared_scenarios import ScenarioDriver
+from lmi_tests.tests.unit.test_shared_observations import (
+    install_distinct_local_request_ids,
+)
 
 
 class LocalTrace:
     def __init__(self):
         self.events = []
-        self.shared = False
+        self.observer = self
         self.payload = {}
         self.lock = Lock()
+
+    def root_scope(self):
+        return nullcontext()
+
+    def observe(self, kind, **fields):
+        pass
 
     def emit(self, phase, **fields):
         with self.lock:
@@ -48,7 +59,7 @@ class LocalService:
         self.manifest = {"driverTimeout": 15}
         self.trace = LocalTrace()
         self.invocations = []
-        self.callback_records = []
+        self.callback_records = []  # Older pinned driver also journals callbacks.
         self.result = None
         decorated = durable_execution(
             lambda event, context: workflow(event, context, self.trace)
@@ -64,7 +75,10 @@ class LocalService:
             )
             return result
 
-        self.runner = DurableFunctionTestRunner(handler, poll_interval=0.01)
+        # Keep service history timestamps comparable to the fixture's wall clock.
+        self.runner = DurableFunctionTestRunner(
+            handler, poll_interval=0.01, skip_time=False
+        )
 
     def start(self, fixture, **options):
         payload = {"marker": options["marker"], "scenario": fixture}
@@ -93,6 +107,11 @@ class LocalService:
     def for_item(self, item):
         return self.trace.snapshot()
 
+    def history(self, item):
+        return self.runner.get_execution_history(
+            item["arn"], include_execution_data=True
+        ).to_dict()["Events"]
+
     def check_active(self):
         pass
 
@@ -101,7 +120,8 @@ class LocalService:
         assert self.result.status.value == status
 
 
-def test_shared_callback_driver_resumes_the_original_public_sdk_execution():
+def test_shared_callback_driver_resumes_the_original_public_sdk_execution(monkeypatch):
+    install_distinct_local_request_ids(monkeypatch)
     service = LocalService()
     profile = Profile("native-1", "local-function", 1, 1, "local-sdk", "local-config")
     context = ScenarioContext(
@@ -115,24 +135,44 @@ def test_shared_callback_driver_resumes_the_original_public_sdk_execution():
         ),
         profile,
     )
-    driver = ScenarioDriver(context, service)
+    release_capacity = Mock()
+    reserve_capacity = Mock()
+    driver = ScenarioDriver(
+        context,
+        service,
+        release_capacity=release_capacity,
+        reserve_capacity=reserve_capacity,
+    )
     with service.runner:
         driver.start()
         driver.place()
         driver.execute()
-    assert len(service.invocations) == 1
-    assert len(service.callback_records) == 1
-    assert service.callback_records[0]["executionArn"] == service.invocations[0]["arn"]
+        assert len(service.invocations) == 1
+        history = service.history(service.invocations[0])
+    release_capacity.assert_not_called()
+    reserve_capacity.assert_not_called()
+    started = [event for event in history if event["EventType"] == "CallbackStarted"]
+    succeeded = [
+        event for event in history if event["EventType"] == "CallbackSucceeded"
+    ]
+    assert len(started) == len(succeeded) == 1
+    assert started[0]["Id"] == succeeded[0]["Id"]
     assert json.loads(service.result.result) == service.invocations[0]["marker"]
     events = service.trace.snapshot()
     assert any(
         event["phase"] == "WRAPPER_RETURN" and event["status"] == "PENDING"
         for event in events
     )
-    # The local runner deliberately reuses its fake AWS request ID. Actual
-    # wrapper calls, PENDING results and skipped bodies establish local replay;
-    # this is not a claim about native LMI request identity or placement.
-    assert sum(event["phase"] == "WRAPPER_ENTER" for event in events) > 1
+    entered = {
+        event["request"] for event in events if event["phase"] == "WRAPPER_ENTER"
+    }
+    completed = {
+        event["InvocationCompletedDetails"]["RequestId"]
+        for event in history
+        if event["EventType"] == "InvocationCompleted"
+    }
+    assert len(entered) > 1
+    assert entered == completed
     bodies = [event for event in events if event["phase"] == "BODY"]
     assert sum(event["operation"] == "success" for event in bodies) == 1
     assert sum(event["operation"] == "failure" for event in bodies) == 1

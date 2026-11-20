@@ -6,9 +6,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
+import stat
 import sys
 import zipfile
 
@@ -17,8 +19,13 @@ from aws_durable_execution_conformance_tests.lmi.artifacts import (
     save,
 )
 from aws_durable_execution_conformance_tests.lmi.deployment import DeploymentManager
-from aws_durable_execution_conformance_tests.lmi.errors import ProvisioningError
+from aws_durable_execution_conformance_tests.lmi.errors import (
+    CollectionError,
+    ProvisioningError,
+)
+from aws_durable_execution_conformance_tests.lmi.runtime import CONCURRENCIES
 from lmi_tests.runtime import RUNTIME
+from lmi_tests.shared import verify_install
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "lmi_tests/artifacts"
@@ -35,7 +42,15 @@ def manager():
     )
 
 
+def require_settled_deployment() -> None:
+    if (ARTIFACTS / "deployment-update.json").exists():
+        raise ProvisioningError(
+            "Clean up the interrupted deployment before rebuilding or deploying"
+        )
+
+
 def build():
+    require_settled_deployment()
     clear_run_artifacts(ARTIFACTS)
     directory = ROOT / "lmi_tests/build"
     if directory.exists():
@@ -94,6 +109,8 @@ def build():
             if path.is_file():
                 info = zipfile.ZipInfo(path.relative_to(target).as_posix())
                 info.compress_type = zipfile.ZIP_DEFLATED
+                mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
+                info.external_attr = (stat.S_IFREG | mode) << 16
                 archive.writestr(info, path.read_bytes())
     save(
         ARTIFACTS / "build.json",
@@ -123,8 +140,15 @@ def build():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["build", "deploy", "collect", "cleanup"])
+    parser.add_argument("command", choices=["build", "deploy", "collect"])
     parser.add_argument("--run-id")
+    parser.add_argument(
+        "--checkout",
+        type=Path,
+        default=Path(
+            os.environ.get("LMI_CONFORMANCE_CHECKOUT", str(ROOT / ".conformance"))
+        ),
+    )
     parser.add_argument("--stack-name", default=DEFAULT_STACK)
     parser.add_argument("--runtime", choices=["python3.14"], default="python3.14")
     args = parser.parse_args()
@@ -132,15 +156,39 @@ def main():
         if args.command == "build":
             build()
         elif args.command == "deploy":
+            require_settled_deployment()
+            if not args.run_id or not re.fullmatch(r"[a-z0-9-]{1,24}", args.run_id):
+                raise ProvisioningError(
+                    "run-id must be 1-24 lowercase letters, digits or hyphens"
+                )
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,49}", args.stack_name):
+                raise ProvisioningError(
+                    "stack-name must be 1-50 lowercase letters, digits or hyphens, starting with a letter"
+                )
+            verify_install(args.checkout)
             manager().deploy(args)
         else:
             manifest = json.loads((ARTIFACTS / "manifest.json").read_text())
-            if args.command == "cleanup":
-                manager().cleanup(manifest)
-            else:
-                from lmi_tests.cloud import Cloud
+            expected_run = args.run_id or os.environ.get("LMI_SHARED_RUN_ID")
+            if expected_run and manifest.get("run") != expected_run:
+                raise CollectionError(
+                    "Deployment manifest belongs to a different collection run"
+                )
+            functions = manifest["functions"]
+            name_map = ARTIFACTS / "function-name-map.json"
+            if (
+                (ARTIFACTS / "deployment-update.json").exists()
+                or set(functions) != set(CONCURRENCIES)
+                or not name_map.is_file()
+                or json.loads(name_map.read_text())
+                != {key: {RUNTIME.handler: arn} for key, arn in functions.items()}
+            ):
+                raise CollectionError(
+                    "Deployment manifest has no verified collection targets"
+                )
+            from lmi_tests.cloud import Cloud
 
-                Cloud(manifest).collect()
+            Cloud(manifest).collect()
     except Exception as error:
         save(
             ARTIFACTS / f"{args.command}-error.json",

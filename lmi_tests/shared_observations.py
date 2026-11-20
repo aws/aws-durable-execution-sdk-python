@@ -31,14 +31,6 @@ class ObservationSink(Protocol):
 
 
 @dataclass(frozen=True)
-class GateRelease:
-    gate_id: str
-    observed_at_ms: float
-    mode: str
-    held_at_ms: float | None = None
-
-
-@dataclass(frozen=True)
 class OperationObservation:
     operation_id: str
     parent_id: str | None
@@ -111,8 +103,6 @@ class LifecycleObservations(DurableInstrumentationPlugin):
         self._sink = sink
         self._lock = threading.Lock()
         self._operations: dict[str, OperationObservation] = {}
-        self._closed: set[str] = set()
-        self._configurations: dict[tuple[str, str | None], int] = {}
         self._threads = _ThreadTasks()
         self._task_sequence = 0
 
@@ -127,17 +117,6 @@ class LifecycleObservations(DurableInstrumentationPlugin):
 
     def current(self) -> OperationObservation | None:
         return self._threads.stack[-1].operation if self._threads.stack else None
-
-    def parent_id(self) -> str | None:
-        current = self.current()
-        if current is None:
-            self.error("Public user-function scope is unavailable")
-            return None
-        return (
-            None
-            if current.operation_type == OperationType.EXECUTION.value
-            else current.operation_id
-        )
 
     @contextmanager
     def root_scope(self) -> Iterator[None]:
@@ -192,66 +171,10 @@ class LifecycleObservations(DurableInstrumentationPlugin):
             value=value,
         )
 
-    def closed_ancestor(self) -> str | None:
-        current = self.current()
-        if current is None:
-            self.error("Late operation has no active public user-function scope")
-            return None
-        with self._lock:
-            operation: OperationObservation | None = current
-            while operation is not None:
-                if operation.operation_id in self._closed:
-                    return operation.operation_id
-                operation = self._operations.get(operation.parent_id or "")
-        self.error("Late operation has no observed completed ancestor")
-        return None
-
-    def completed_context(self, name: str) -> str | None:
-        parent_id = self.parent_id()
-        with self._lock:
-            matches = [
-                operation.operation_id
-                for operation in self._operations.values()
-                if operation.name == name
-                and operation.parent_id == parent_id
-                and operation.operation_type == OperationType.CONTEXT.value
-                and operation.operation_id in self._closed
-            ]
-        if len(matches) != 1:
-            self.error(
-                f"Returned context {name!r} has no unique public completion hook"
-            )
-            return None
-        return matches[0]
-
-    @contextmanager
-    def configuration(self, name: str, max_concurrency: int) -> Iterator[None]:
-        """Bind an actual public call's config to its operation-start hook."""
-        key = (name, self.parent_id())
-        with self._lock:
-            self._configurations[key] = max_concurrency
-        try:
-            yield
-        finally:
-            with self._lock:
-                missing = self._configurations.pop(key, None)
-            if missing is not None:
-                self.error(
-                    f"Configured call {name!r} had no matching public operation hook"
-                )
-
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         operations = [
             self._remember(operation) for operation in info.operations.values()
         ]
-        with self._lock:
-            self._closed.update(
-                operation.operation_id
-                for operation in operations
-                if operation.operation_type == OperationType.CONTEXT.value
-                and operation.status
-                in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "STOPPED"}
-            )
         self._sink.observe(
             "invocation_start",
             requestId=info.request_id,
@@ -277,29 +200,10 @@ class LifecycleObservations(DurableInstrumentationPlugin):
     def on_operation_start(self, info: OperationStartInfo) -> None:
         operation = self._remember(info)
         self._sink.observe("operation_start", **operation.to_record())
-        with self._lock:
-            configured = self._configurations.pop(
-                (operation.name or "", operation.parent_id), None
-            )
-        if configured is not None:
-            self._sink.observe(
-                "operation_config",
-                operationId=operation.operation_id,
-                maxConcurrency=configured,
-                source="public-fixture",
-            )
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         operation = self._remember(info)
         self._sink.observe("operation_end", **operation.to_record())
-        if info.operation_type is OperationType.CONTEXT:
-            with self._lock:
-                self._closed.add(operation.operation_id)
-            self._sink.observe(
-                "scope_closed",
-                scopeId=operation.operation_id,
-                parentId=operation.parent_id,
-            )
 
     def on_operation_change(self, info: OperationChangeInfo) -> None:
         changed = [
@@ -315,11 +219,7 @@ class LifecycleObservations(DurableInstrumentationPlugin):
         with self._lock:
             self._task_sequence += 1
             ordinal = self._task_sequence
-        task_id = (
-            "root"
-            if info.operation_type is OperationType.EXECUTION
-            else f"user-task-{ordinal}"
-        )
+        task_id = f"user-task-{ordinal}"
         self._threads.stack.append(UserTask(operation, task_id))
         self._sink.observe("task_start", taskId=task_id, **operation.to_record())
 
@@ -337,13 +237,3 @@ class LifecycleObservations(DurableInstrumentationPlugin):
             outcome=info.outcome.value,
             attempt=task.operation.attempt,
         )
-
-
-@dataclass(frozen=True)
-class LifecycleObservationFactory:
-    """One factory/observer is constructed for each native fixture invocation."""
-
-    observer: LifecycleObservations
-
-    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
-        return self.observer

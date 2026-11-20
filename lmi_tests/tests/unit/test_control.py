@@ -18,7 +18,13 @@ from lmi_tests import fixture
 @pytest.fixture
 def trace():
     value = Trace.__new__(Trace)
-    value.capture_lock, value.capture_sequence = threading.Lock(), 0
+    value.state_lock, value.capture_sequence = threading.Lock(), 0
+    value.source_failed = False
+    value.publication_seconds = 0.0
+    value.closed = False
+    value.call_sequence, value.sdk_request_count = 0, 0
+    value.lock = threading.Lock()
+    value.observe = Mock()
     value.s3 = boto3.client(
         "s3",
         region_name="us-west-2",
@@ -26,10 +32,9 @@ def trace():
         aws_secret_access_key="test",
     )
     value.bucket = "test-bucket"
-    value.identity = {"run": "unit"}
+    value.identity = {"run": "unit", "request": "unit-request"}
     value.payload = {"scenario": "control"}
-    value.shared = False
-    value.control_prefix = "runs/unit/control/"
+    value.control_prefix = "runs/unit/cases/owner/control/"
     value.emit = Mock()
     return value
 
@@ -41,7 +46,7 @@ def test_control_reads_explicit_state_and_closes_body(trace, state, released):
         stub.add_response(
             "get_object",
             {"Body": body},
-            {"Bucket": "test-bucket", "Key": "runs/unit/control/gate"},
+            {"Bucket": "test-bucket", "Key": "runs/unit/cases/owner/control/gate"},
         )
         assert trace.released("gate") is released
     assert body.closed
@@ -55,7 +60,7 @@ def test_missing_or_forbidden_control_is_not_a_hold_or_release(trace, code, stat
             "get_object", service_error_code=code, http_status_code=status
         )
         with pytest.raises(ClientError):
-            trace.gate("gate", effects=True, ready="ready")
+            trace.gate("gate", effects=True)
     phases = [call.args[0] for call in trace.emit.call_args_list]
     assert "CONTROL_ERROR" in phases
     assert not {"BLOCKED", "ALIVE", "EFFECT"} & set(phases)
@@ -155,35 +160,6 @@ def test_preparation_gate_is_not_cancelled_by_the_deadline(trace, monkeypatch):
     trace.gate("prepare", preparation=True)
     phases = [call.args[0] for call in trace.emit.call_args_list]
     assert "IO_INTERRUPTED" not in phases
-
-
-def test_winner_is_signalled_only_after_loser_actually_enters_held_io(trace):
-    controls = {
-        "runs/unit/control/loser": b"hold",
-        "runs/unit/control/ready": b"hold",
-        "runs/unit/control/release-all": b"hold",
-    }
-    trace.s3 = Mock()
-    trace.s3.get_object.side_effect = lambda **kw: {
-        "Body": io.BytesIO(controls[kw["Key"]])
-    }
-
-    def signal(**kwargs):
-        assert (
-            kwargs["Key"] == "runs/unit/control/ready" and kwargs["Body"] == b"release"
-        )
-        assert [c.args[0] for c in trace.emit.call_args_list] == ["BLOCKED", "EFFECT"]
-        controls[kwargs["Key"]] = kwargs["Body"]
-        controls["runs/unit/control/loser"] = b"release"
-
-    trace.s3.put_object.side_effect = signal
-    trace.gate("loser", effects=True, ready="ready")
-    assert [c.args[0] for c in trace.emit.call_args_list] == [
-        "BLOCKED",
-        "EFFECT",
-        "IO_EXIT",
-    ]
-    assert controls["runs/unit/control/release-all"] == b"hold"
 
 
 def test_emitted_records_are_partitioned_by_case_and_request(trace):

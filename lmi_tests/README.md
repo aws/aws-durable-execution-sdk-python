@@ -48,7 +48,12 @@ SDK, an OTel plugin, local catalogs, validators or the shared runner itself.
 Python unit tests cover pinned workflow delegation, the Python artifact/manifest
 binding, fixture observations and bootstrap. Shared driver regression tests now
 live in the conformance repository and cover case ownership, cancellation, source
-normalization, driver ordering and cleanup. Local e2e tests use the actual public
+normalization, driver ordering and cleanup.
+
+A local plan preview defaults to `lmi_tests/artifacts/preview` and requires a
+new output directory. Run and cleanup use `lmi_tests/artifacts/shared` by default.
+
+Local e2e tests use the actual public
 SDK and its in-process test service, replacing only AWS transport and evidence
 storage. They verify checkpoint/replay and preserve genuine admission failures.
 These controls do not establish real LMI placement or deployed acceptance.
@@ -123,6 +128,23 @@ Service payload wrappers are decoded consistently with checkpoint snapshots;
 truncated results are rejected. Replay compares a real resume's initial
 checkpoints to the final service history and counts actual user-function entries.
 Missing observations are never filled from expected answers.
+Each native request writes a final protocol 2 seal after its wrapper and
+registered work finish and all captured observations reach S3. A warm owner
+can seal after its wrapper returns, while its callback finishes in the reused
+process. Lost records, live probes, and a publisher killed at the native
+deadline leave the request unsealed. If work still publishes after a seal,
+its later sequence invalidates the seal when the driver reads it.
+
+The fixture stops pre-seal publication once retry and read-back work reaches
+five cumulative seconds, after the in-flight write and its read-back finish.
+Successful first-attempt uploads do not use that budget. Slow successful
+uploads can still consume the 60-second native invocation window. Exhausting
+the retry budget leaves collection incomplete without replacing the SDK result.
+Late writes after a seal still run so they can invalidate it. The published
+workflow pin does not enforce terminal seals. Seal enforcement is tested
+against the paired runner. The published pin also uses its original per-operation
+replay counts. Logical map inputs and late-only replay effects require the
+paired runner's policy support.
 
 The shared behavior schema asks for one scenario-owned `task_exit`. Other user
 and probe tasks remain in the same evidence as `observed_task_start/exit`, with
@@ -132,6 +154,13 @@ Coordination barriers retain their complete `controlRecords` journal separately
 from injected victim `faultsCreated`; releasing a healthy peer is not victim
 fault recovery.
 
+Run `hatch run lmi:shared-cleanup` for manual cleanup of the case manifests.
+With the published pin, pass the same `--output` to run and cleanup when
+using a custom case output directory.
+When recovering an interrupted deployment with a journal-aware conformance
+revision, set `LMI_SHARED_RUN_ID` to the run ID recorded in
+`lmi_tests/artifacts/deployment-update.json`. Keep the journal in its original
+artifact directory until reconciliation completes.
 Cleanup releases only the current run's controls and requests stops only for its
 identified executions. It validates run, case and function identity before those
 requests. It records `NO_CASES`, `CLEANUP_REQUESTED` or `FAILED` in `cleanup.json`;

@@ -1,6 +1,6 @@
 """History and SDK operation state preserve empty error payload presence."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -22,7 +22,9 @@ from aws_durable_execution_sdk_python_testing.model import (
     GetDurableExecutionHistoryResponse,
     GetDurableExecutionResponse,
     StartDurableExecutionInput,
+    RetryDetails,
     StepFailedDetails,
+    StepSucceededDetails,
     events_to_operations,
 )
 from aws_durable_execution_sdk_python_testing.runner import (
@@ -229,3 +231,52 @@ def test_missing_callback_details_do_not_invent_error_payload() -> None:
     event = Event.create_callback_event_failed(context)
     assert event.callback_failed_details is not None
     assert event.callback_failed_details.error is None
+
+
+@pytest.mark.parametrize("succeeded", [False, True])
+def test_terminal_step_history_clears_previous_retry_deadline(succeeded):
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    retry = Event(
+        event_type="StepFailed",
+        event_timestamp=timestamp,
+        operation_id="operation",
+        name="retries",
+        step_failed_details=StepFailedDetails(
+            retry_details=RetryDetails(current_attempt=1, next_attempt_delay_seconds=1)
+        ),
+    )
+    first = GetDurableExecutionHistoryResponse(events=[retry])
+    (pending,) = events_to_operations(first.events)
+    assert pending.step_details.next_attempt_timestamp == timestamp + timedelta(
+        seconds=1
+    )
+
+    terminal = Event(
+        event_type="StepSucceeded" if succeeded else "StepFailed",
+        event_timestamp=timestamp + timedelta(seconds=2),
+        operation_id="operation",
+        name="retries",
+        step_succeeded_details=StepSucceededDetails(
+            retry_details=RetryDetails(current_attempt=2)
+        )
+        if succeeded
+        else None,
+        step_failed_details=None
+        if succeeded
+        else StepFailedDetails(retry_details=RetryDetails(current_attempt=2)),
+    )
+    history = GetDurableExecutionHistoryResponse.from_dict(
+        GetDurableExecutionHistoryResponse(events=[retry, terminal]).to_dict()
+    )
+    execution = GetDurableExecutionResponse(
+        durable_execution_arn="arn:execution",
+        durable_execution_name="execution",
+        function_arn="arn:function",
+        status="SUCCEEDED" if succeeded else "FAILED",
+        start_timestamp=timestamp,
+    )
+    step = DurableFunctionTestResult.from_execution_history(
+        execution, history
+    ).get_step("retries")
+    assert step.attempt == 2
+    assert step.next_attempt_timestamp is None

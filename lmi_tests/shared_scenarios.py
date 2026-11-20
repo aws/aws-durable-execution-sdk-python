@@ -19,6 +19,10 @@ FIXTURES = {
 
 class ScenarioDriver(SharedScenarioDriver):
     def __init__(self, context, cloud, **options):
+        # The pinned driver releases its reservation on the first PENDING.
+        # This fixture can resume before reaching the callback.
+        options.pop("release_capacity", None)
+        options.pop("reserve_capacity", None)
         super().__init__(
             context,
             cloud,

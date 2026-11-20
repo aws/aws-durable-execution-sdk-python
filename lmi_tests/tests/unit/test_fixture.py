@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+from dataclasses import replace
 import json
 import subprocess
 import sys
@@ -5,15 +7,21 @@ from unittest.mock import Mock
 
 import pytest
 
-from aws_durable_execution_sdk_python import durable_execution
+from aws_durable_execution_sdk_python import StepError, durable_execution
+from aws_durable_execution_sdk_python.exceptions import GetExecutionStateError
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationAction,
     OperationType,
     OperationUpdate,
+    StateOutput,
 )
 from aws_durable_execution_sdk_python_testing import DurableFunctionTestRunner
 from lmi_tests.fixture import ObservedClient, workflow
 from lmi_tests import fixture
+from lmi_tests.tests.unit.test_shared_observations import (
+    install_ledger,
+    shared_payload,
+)
 from lmi_tests.tests.unit.support import (
     MemoryClient,
     invocation,
@@ -24,11 +32,24 @@ from lmi_tests.tests.unit.support import (
 class LocalTrace:
     def __init__(self):
         self.events = []
-        self.shared = False
+        self.observer = Mock()
+        self.observer.root_scope.side_effect = nullcontext
+        self.call_sequence = 0
+        self.closed = False
         self.payload = {"scenario": "checkpoint", "marker": "local"}
+
+    def publishing(self):
+        return nullcontext(self.closed)
 
     def emit(self, phase, **fields):
         self.events.append({"phase": phase, **fields})
+
+    def observe(self, kind, **fields):
+        pass
+
+    def next_call_id(self, kind):
+        self.call_sequence += 1
+        return f"{kind}:{self.call_sequence}"
 
     def body(self, name, value, step):
         self.emit("BODY", operation=name, value=value, attempt=step.attempt)
@@ -103,27 +124,23 @@ def test_checkpoint_proxy_preserves_real_result_and_errors():
     ]
 
 
-class FailingSinkTrace(LocalTrace):
-    """A shared trace whose evidence sink fails for the named records."""
+@pytest.fixture
+def producer(monkeypatch):
+    ledger = install_ledger(monkeypatch)
+    return fixture.Trace(shared_payload(), lambda_context(30_000), "execution"), ledger
 
-    def __init__(self, *failing):
-        super().__init__()
-        self.payload = {**self.payload, "coverageProfile": "standard"}
-        self.failing = set(failing)
-        self.observed = []
 
-    def emit(self, phase, **fields):
-        if phase in self.failing:
-            raise RuntimeError(f"evidence sink failed for {phase}")
-        super().emit(phase, **fields)
+def fail_transport_writes(ledger, monkeypatch, *failing):
+    put = ledger.put_object
 
-    def observe(self, kind, **fields):
-        if kind in self.failing:
-            raise RuntimeError(f"evidence sink failed for {kind}")
-        self.observed.append({"kind": kind, **fields})
+    def store(**kwargs):
+        record = json.loads(kwargs["Body"])
+        phase = record.get("observation", {}).get("kind", record["phase"])
+        if phase in failing:
+            raise OSError("evidence store unavailable")
+        return put(**kwargs)
 
-    def next_call_id(self, kind):
-        return f"call:{kind}"
+    monkeypatch.setattr(ledger, "put_object", store)
 
 
 def checkpoint_update():
@@ -140,28 +157,42 @@ def checkpoint_update():
         ("CHECKPOINT_EXIT", "checkpoint_exit"),
     ],
 )
-def test_checkpoint_evidence_failure_cannot_change_a_successful_checkpoint(failing):
+def test_checkpoint_evidence_failure_cannot_change_a_successful_checkpoint(
+    producer, monkeypatch, failing
+):
     # The SDK must consume the backend's checkpoint token. A failed publication
     # is a collection error, never an artificial checkpoint failure.
-    trace, backend = FailingSinkTrace(*failing), Mock()
+    trace, ledger = producer
+    backend = Mock()
+    fail_transport_writes(ledger, monkeypatch, *failing)
     result = ObservedClient(backend, trace).checkpoint(updates=[checkpoint_update()])
     assert result is backend.checkpoint.return_value
     backend.checkpoint.assert_called_once()
-    assert "CHECKPOINT_ERROR" not in [event["phase"] for event in trace.events]
-    errors = [item for item in trace.observed if item["kind"] == "observation_error"]
-    assert errors and "evidence sink failed" in errors[0]["message"]
+    trace.finish_wrapper()
+    assert trace.source_failed
+    assert not {"CHECKPOINT_ERROR", "SEALED"} & {
+        row["phase"] for row in ledger.records()
+    }
 
 
-def test_checkpoint_evidence_failure_cannot_replace_the_backend_error():
-    trace, backend = FailingSinkTrace("CHECKPOINT_ERROR", "CHECKPOINT_EXIT"), Mock()
+def test_checkpoint_evidence_failure_cannot_replace_the_backend_error(
+    producer, monkeypatch
+):
+    trace, ledger = producer
+    backend = Mock()
+    fail_transport_writes(ledger, monkeypatch, "CHECKPOINT_ERROR", "CHECKPOINT_EXIT")
     backend.checkpoint.side_effect = RuntimeError("network failure")
     with pytest.raises(RuntimeError, match="network failure"):
         ObservedClient(backend, trace).checkpoint(updates=[checkpoint_update()])
 
 
 @pytest.mark.parametrize("failing", ["POLL_CALL", "POLL_EXIT"])
-def test_state_poll_evidence_failure_cannot_change_the_backend_outcome(failing):
-    trace, backend = FailingSinkTrace(failing), Mock()
+def test_state_poll_evidence_failure_cannot_change_the_backend_outcome(
+    producer, monkeypatch, failing
+):
+    trace, ledger = producer
+    backend = Mock()
+    fail_transport_writes(ledger, monkeypatch, failing)
     observed = ObservedClient(backend, trace)
     assert (
         observed.get_execution_state(arn="arn")
@@ -192,21 +223,290 @@ def test_replay_fixture_uses_real_public_apis_and_preserves_outcomes():
 
 
 def test_cloud_entrypoint_unwraps_runtime_event_and_observes_real_wrapper(monkeypatch):
-    trace = LocalTrace()
-    trace.payload["scenario"] = "success"
-    monkeypatch.setenv("LMI_RUN_ID", "unit")
-    monkeypatch.setattr(fixture, "Trace", lambda *_: trace)
+    ledger = install_ledger(monkeypatch)
     monkeypatch.setattr(
         fixture.LambdaClient, "initialize_client", lambda: MemoryClient()
     )
     event = invocation().to_json_dict()
     event["InitialExecutionState"]["Operations"][0]["ExecutionDetails"][
         "InputPayload"
-    ] = json.dumps({"run": "unit", "marker": "local", "scenario": "success"})
-    result = fixture.handler(event, lambda_context(30000))
+    ] = json.dumps(shared_payload())
+    result = fixture.handler(event, lambda_context(30_000))
     assert result["Status"] == "SUCCEEDED"
-    assert json.loads(result["Result"]) == "local"
-    phases = [e["phase"] for e in trace.events]
-    assert phases[0] == "WRAPPER_ENTER" and phases[-1] == "WRAPPER_RETURN"
+    assert json.loads(result["Result"]) == "marker"
+    phases = [row["phase"] for row in ledger.records()]
+    assert phases[0] == "WRAPPER_ENTER" and phases[-1] == "SEALED"
     assert phases.index("USER_EXIT") < phases.index("WRAPPER_RETURN")
     assert "CHECKPOINT_ACK" in phases
+
+
+@pytest.mark.parametrize(
+    ("step_result", "diagnostic"),
+    [
+        ("unexpected value", "returned as a value"),
+        (StepError("wrong", "ValueError"), "unexpected details"),
+        (StepError("expected:marker", "TypeError"), "unexpected details"),
+    ],
+)
+def test_replay_rejects_wrong_delivery_of_stored_failure(step_result, diagnostic):
+    context = Mock()
+    context.step.side_effect = ["marker", step_result]
+    trace = LocalTrace()
+    with pytest.raises(AssertionError, match=diagnostic):
+        fixture.run_workflow({"marker": "marker", "scenario": "replay"}, context, trace)
+
+
+def test_fixture_preserves_sdk_pagination_and_early_poll_observations(monkeypatch):
+    ledger = install_ledger(monkeypatch)
+    event = invocation()
+    root = event.initial_execution_state.operations[0]
+    assert root.execution_details is not None
+    root = replace(
+        root,
+        execution_details=replace(
+            root.execution_details, input_payload=json.dumps(shared_payload())
+        ),
+    )
+    client = event.service_client
+    client.get_execution_state = Mock(return_value=StateOutput(operations=[root]))
+    event = replace(
+        event,
+        initial_execution_state=replace(
+            event.initial_execution_state, operations=[], next_marker="page-two"
+        ),
+    )
+    result = fixture.handler(event, lambda_context(30_000))
+    assert result["Status"] == "SUCCEEDED"
+    assert json.loads(result["Result"]) == "marker"
+    client.get_execution_state.assert_called_once_with(
+        durable_execution_arn=event.durable_execution_arn,
+        checkpoint_token=event.checkpoint_token,
+        next_marker="page-two",
+    )
+    records = [row["observation"] for row in ledger.observations()]
+    polls = [
+        record for record in records if record["kind"] in {"poll_call", "poll_exit"}
+    ]
+    assert [record["kind"] for record in polls] == ["poll_call", "poll_exit"]
+    assert polls[0]["callId"] == polls[1]["callId"]
+    assert polls[0]["atMs"] <= polls[1]["atMs"]
+    assert ledger.records()[-1]["phase"] == "SEALED"
+
+
+@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.parametrize("broken_stdout", [None, BrokenPipeError, ValueError])
+def test_wrapper_publication_does_not_replace_sdk_result_or_error(
+    monkeypatch, raises, broken_stdout
+):
+    ledger = install_ledger(monkeypatch)
+    event = invocation()
+    root = event.initial_execution_state.operations[0]
+    assert root.execution_details is not None
+    root = replace(
+        root,
+        execution_details=replace(
+            root.execution_details, input_payload=json.dumps(shared_payload())
+        ),
+    )
+    event = replace(
+        event,
+        initial_execution_state=replace(
+            event.initial_execution_state, operations=[root]
+        ),
+    )
+    original_error = ValueError("SDK raised")
+    returned = {"Status": "SUCCEEDED", "Result": '"marker"'}
+    sdk = Mock(side_effect=original_error) if raises else Mock(return_value=returned)
+    monkeypatch.setattr(fixture, "durable_execution", Mock(return_value=sdk))
+    put = ledger.put_object
+
+    def write(**kwargs):
+        record = json.loads(kwargs["Body"])
+        if record["phase"] == ("WRAPPER_RAISE" if raises else "WRAPPER_RETURN"):
+            raise OSError("unavailable completion sink")
+        return put(**kwargs)
+
+    if broken_stdout:
+
+        def broken_print(*args, **kwargs):
+            raise broken_stdout("logging stream closed")
+
+        monkeypatch.setattr(fixture, "print", broken_print, raising=False)
+
+    monkeypatch.setattr(ledger, "put_object", write)
+    if raises:
+        with pytest.raises(ValueError) as error:
+            fixture.handler(event, lambda_context(30_000))
+        assert error.value is original_error
+    else:
+        assert fixture.handler(event, lambda_context(30_000)) is returned
+    assert all(
+        row["phase"] not in {"WRAPPER_RAISE", "WRAPPER_RETURN", "SEALED"}
+        for row in ledger.records()
+    )
+
+
+@pytest.mark.parametrize("known_payload", [False, True])
+def test_fixture_keeps_sdk_classification_of_failed_initial_fetch(
+    monkeypatch, known_payload
+):
+    ledger = install_ledger(monkeypatch)
+    event = invocation()
+    root = event.initial_execution_state.operations[0]
+    assert root.execution_details is not None
+    payload = shared_payload()
+    payload["sharedScenario"] = "normal-return"
+    root = replace(
+        root,
+        execution_details=replace(
+            root.execution_details, input_payload=json.dumps(payload)
+        ),
+    )
+    client = event.service_client
+    service_error = GetExecutionStateError("page access denied")
+    monkeypatch.setattr(service_error, "is_retryable", lambda: False)
+    client.get_execution_state = Mock(side_effect=service_error)
+    event = replace(
+        event,
+        initial_execution_state=replace(
+            event.initial_execution_state,
+            operations=[root] if known_payload else [],
+            next_marker="page-two",
+        ),
+    )
+    result = fixture.handler(event, lambda_context(30_000))
+    assert result["Status"] == "FAILED"
+    assert result["Error"]["ErrorMessage"] == "page access denied"
+    client.get_execution_state.assert_called_once()
+    kinds = [row["observation"]["kind"] for row in ledger.observations()]
+    assert "admission_probe" not in kinds
+    if known_payload:
+        assert {"poll_call", "poll_exit", "wrapper_return", "observation_error"} <= set(
+            kinds
+        )
+    else:
+        assert not ledger.records()
+
+
+def test_admission_worker_start_failure_does_not_replace_sdk_return(monkeypatch):
+    ledger = install_ledger(monkeypatch)
+    event = invocation()
+    root = event.initial_execution_state.operations[0]
+    assert root.execution_details is not None
+    payload = shared_payload()
+    payload["sharedScenario"] = "normal-return"
+    root = replace(
+        root,
+        execution_details=replace(
+            root.execution_details, input_payload=json.dumps(payload)
+        ),
+    )
+    event = replace(
+        event,
+        initial_execution_state=replace(
+            event.initial_execution_state, operations=[root]
+        ),
+    )
+    monkeypatch.setattr(
+        fixture.Trace,
+        "start_worker",
+        Mock(side_effect=OSError("worker startup unavailable")),
+    )
+    result = fixture.handler(event, lambda_context(30_000))
+    assert result["Status"] == "SUCCEEDED"
+    assert json.loads(result["Result"]) == "marker"
+    assert not any(row["phase"] == "SEALED" for row in ledger.records())
+
+
+@pytest.mark.parametrize(
+    ("retry", "mapped", "parallel", "diagnostic"),
+    [
+        (None, [1, 2, 3], ["marker", "marker"], "Retried step"),
+        ("marker", [1, 3], ["marker", "marker"], "Replayed map"),
+        ("marker", [True, 2, 3], ["marker", "marker"], "Replayed map"),
+        (
+            "marker",
+            [1, 2, 3],
+            [["left", "marker"], ["left", "marker"]],
+            "Replayed parallel",
+        ),
+    ],
+)
+def test_replay_rejects_incomplete_actual_values(retry, mapped, parallel, diagnostic):
+    context = Mock()
+    context.step.side_effect = [
+        "marker",
+        StepError("expected:marker", "ValueError"),
+        retry,
+    ]
+    context.run_in_child_context.return_value.get_results.return_value = mapped
+    context.parallel.return_value.get_results.return_value = parallel
+    with pytest.raises(AssertionError, match=diagnostic):
+        fixture.run_workflow(
+            {"marker": "marker", "scenario": "replay"}, context, LocalTrace()
+        )
+
+
+def test_body_publication_failure_does_not_fail_real_sdk_step(monkeypatch):
+    ledger = install_ledger(monkeypatch)
+    event = invocation()
+    root = event.initial_execution_state.operations[0]
+    assert root.execution_details is not None
+    root = replace(
+        root,
+        execution_details=replace(
+            root.execution_details, input_payload=json.dumps(shared_payload())
+        ),
+    )
+    event = replace(
+        event,
+        initial_execution_state=replace(
+            event.initial_execution_state, operations=[root]
+        ),
+    )
+    put = ledger.put_object
+
+    def write(**kwargs):
+        if json.loads(kwargs["Body"])["phase"] == "BODY":
+            raise OSError("body ledger unavailable")
+        return put(**kwargs)
+
+    monkeypatch.setattr(ledger, "put_object", write)
+    result = fixture.handler(event, lambda_context(30_000))
+    assert result["Status"] == "SUCCEEDED"
+    assert json.loads(result["Result"]) == "marker"
+    assert not any(row["phase"] == "SEALED" for row in ledger.records())
+
+
+def test_optimized_fixture_still_waits_on_callback():
+    script = """
+from unittest.mock import Mock
+from aws_durable_execution_sdk_python import StepError
+from lmi_tests import fixture
+from lmi_tests.tests.unit.test_fixture import LocalTrace
+
+context = Mock()
+context.step.side_effect = ["marker", StepError("expected:marker", "ValueError"), "marker"]
+context.run_in_child_context.return_value.get_results.return_value = [1, 2, 3]
+context.parallel.return_value.get_results.return_value = [["left", "marker"], ["right", "marker"]]
+context.create_callback.return_value.result.return_value = "marker"
+fixture.run_workflow({"marker": "marker", "scenario": "replay"}, context, LocalTrace())
+context.create_callback.return_value.result.assert_called_once_with()
+context.step.side_effect = ["marker", StepError("expected:marker", "ValueError"), "marker"]
+context.create_callback.return_value.result.return_value = "different"
+try:
+    fixture.run_workflow({"marker": "marker", "scenario": "replay"}, context, LocalTrace())
+except AssertionError as error:
+    if "callback returned the wrong value" not in str(error):
+        raise
+else:
+    raise RuntimeError("wrong callback result was accepted")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from collections import Counter
 
 from aws_durable_execution_sdk_python_testing import DurableFunctionTestRunner
@@ -18,6 +20,23 @@ def values(ledger, kind):
     ]
 
 
+def assert_sealed(ledger, request):
+    records = [event for event in ledger.records() if event["request"] == request]
+    seal = records[-1]
+    assert seal["phase"] == "SEALED"
+    assert seal["sourceProtocol"] == 2
+    assert "observation" not in seal
+    assert [event["phase"] for event in records].count("SEALED") == 1
+    captures = sorted(
+        event["observation"]["captureSequence"]
+        for event in records
+        if event["phase"] == "CONFORMANCE"
+    )
+    assert captures == list(range(1, seal["throughCapture"] + 1))
+    assert [event["sequence"] for event in records] == list(range(1, len(records) + 1))
+    return seal
+
+
 def test_actual_fixture_public_hooks_bind_bodies_checkpoints_and_root_lifetime(
     monkeypatch,
 ):
@@ -26,6 +45,7 @@ def test_actual_fixture_public_hooks_bind_bodies_checkpoints_and_root_lifetime(
         result = runner.run(input=json.dumps(shared_payload()), execution_timeout=30)
     assert result.result == '"marker"'
     assert values(ledger, "observation_error") == []
+    assert_sealed(ledger, ledger.records()[0]["request"])
     body = values(ledger, "body")
     assert (
         len(body) == 1
@@ -68,6 +88,9 @@ def test_actual_service_replay_keeps_operation_identity_and_skips_completed_bodi
         "success": 1,
         "failure": 1,
         "retry": 2,
+        "item": 3,
+        "left": 1,
+        "right": 1,
     }
     assert {
         item["operationId"] for item in bodies if item["operation"] == "success"
@@ -82,6 +105,8 @@ def test_actual_service_replay_keeps_operation_identity_and_skips_completed_bodi
     )
     assert "PENDING" in {item["outcome"] for item in values(ledger, "wrapper_return")}
     observations = ledger.observations()
+    for request in {event["request"] for event in observations}:
+        assert_sealed(ledger, request)
     for record in observations:
         if record["observation"]["kind"] != "pending":
             continue
@@ -95,12 +120,18 @@ def test_actual_service_replay_keeps_operation_identity_and_skips_completed_bodi
 
 
 def test_warm_invocation_observes_late_work_under_its_original_request(monkeypatch):
+    from aws_durable_execution_conformance_tests.lmi.artifacts import case_key
+
     ledger = install_ledger(monkeypatch)
     owner = shared_payload("warm-owner")
     owner["sharedScenario"] = "warm-reuse"
+    owner["caseId"] = "local-warm-reuse"
+    owner["controlPrefix"] = f"runs/unit/cases/{case_key(owner['caseId'])}/control/"
+    ledger.objects[owner["controlPrefix"] + "release-all"] = b"hold"
     warm = {**owner, "scenario": "warm-probe", "role": "warm", "marker": "warm-marker"}
     with DurableFunctionTestRunner(handler=fixture.handler) as runner:
         first = runner.run(input=json.dumps(owner), execution_timeout=15)
+        assert not any(event["phase"] == "SEALED" for event in ledger.records())
         second = runner.run(input=json.dumps(warm), execution_timeout=15)
     assert first.result == '"marker"'
     assert second.result == '"warm-marker"'
@@ -121,3 +152,47 @@ def test_warm_invocation_observes_late_work_under_its_original_request(monkeypat
     assert late["execution"] == original["execution"]
     assert late["observation"]["observedDuringRequestId"] == entered["request"]
     assert original["time"] < entered["time"] <= late["time"] <= ended["time"]
+    assert_sealed(ledger, entered["request"])
+    # The real SDK can leave its post-closure operation probe waiting.
+    # Such an owner must remain unsealed until its own worker exits.
+    owner_rows = [event for event in raw if event["request"] == original["request"]]
+    owner_exits = [
+        event
+        for event in owner_rows
+        if event.get("observation", {}).get("kind") == "task_exit"
+        and event["observation"].get("taskId") == "late-callback"
+    ]
+    assert any(event["phase"] == "SEALED" for event in owner_rows) == bool(owner_exits)
+
+
+@pytest.mark.parametrize("lost_phase", ["WRAPPER_ENTER", "USER_EXIT", "STORED_FAILURE"])
+def test_source_write_failure_preserves_real_suspend_and_resume(
+    monkeypatch, lost_phase
+):
+    ledger = install_ledger(monkeypatch)
+    put = ledger.put_object
+
+    def store(**kwargs):
+        if json.loads(kwargs["Body"])["phase"] == lost_phase:
+            raise OSError("evidence store unavailable")
+        return put(**kwargs)
+
+    monkeypatch.setattr(ledger, "put_object", store)
+    with DurableFunctionTestRunner(handler=fixture.handler) as runner:
+        arn = runner.run_async(
+            input=json.dumps(shared_payload("replay")), execution_timeout=30
+        )
+        callback = runner.wait_for_callback(arn, name="completion", timeout=20)
+        runner.send_callback_success(callback, result=b"marker")
+        result = runner.wait_for_result(arn, timeout=20)
+        history = runner.get_execution_history(
+            arn, include_execution_data=True
+        ).to_dict()["Events"]
+    assert result.result == '"marker"'
+    completion_ids = {
+        event["InvocationCompletedDetails"]["RequestId"]
+        for event in history
+        if event["EventType"] == "InvocationCompleted"
+    }
+    assert len(completion_ids) > 1
+    assert not any(row["phase"] == "SEALED" for row in ledger.records())

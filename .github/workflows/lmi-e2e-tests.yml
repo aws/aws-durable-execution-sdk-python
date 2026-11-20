@@ -5,6 +5,17 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - '.github/workflows/lmi-e2e-tests.yml'
+      - '.github/scripts/lmi-ci.sh'
+      - 'lmi_tests/**'
+      - '!lmi_tests/**/*.md'
+      - 'packages/aws-durable-execution-sdk-python/src/**'
+      - 'packages/aws-durable-execution-sdk-python/pyproject.toml'
+      - 'packages/aws-durable-execution-sdk-python-testing/src/**'
+      - 'packages/aws-durable-execution-sdk-python-testing/pyproject.toml'
+      - 'pyproject.toml'
   workflow_dispatch:
     inputs:
       region:

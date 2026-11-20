@@ -11,14 +11,14 @@ case "${1:?Expected a workflow stage}" in
     ;;
   harness)
     hatch run lmi:lint
-    hatch run lmi:shared-tests --junitxml=lmi_tests/artifacts/unit.xml
-    hatch run examples:python - <<'PYTHON'
+    hatch run lmi:python - <<'PYTHON'
 from pathlib import Path
 import aws_durable_execution_sdk_python as sdk
 
 source = Path('packages/aws-durable-execution-sdk-python/src').resolve()
 assert Path(sdk.__file__).resolve().is_relative_to(source), sdk.__file__
 PYTHON
+    hatch run lmi:shared-tests --junitxml=lmi_tests/artifacts/unit.xml
     ;;
   build) hatch run lmi:build ;;
   deploy)

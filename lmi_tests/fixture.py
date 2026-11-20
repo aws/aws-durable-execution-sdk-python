@@ -2,18 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fault-injection handlers for real LMI. Never install these as SDK examples."""
 
-from contextlib import nullcontext
+from collections.abc import Callable
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 import fcntl
+import hashlib
 import json
 import os
 import threading
 import time
+from typing import Any
 import uuid
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_durable_execution_sdk_python import StepError, durable_execution
 from aws_durable_execution_sdk_python.config import (
@@ -25,7 +28,13 @@ from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationInput,
     DurableExecutionInvocationInputWithClient,
 )
-from aws_durable_execution_sdk_python.lambda_service import LambdaClient
+from aws_durable_execution_sdk_python.lambda_service import (
+    LambdaClient,
+)
+from aws_durable_execution_sdk_python.plugin import (
+    DurableInstrumentationPlugin,
+    InvocationStartInfo,
+)
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -34,13 +43,13 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
 )
 from lmi_tests.shared_observations import (
-    GateRelease,
-    LifecycleObservationFactory,
     LifecycleObservations,
 )
 
 
 PROCESS_ID = uuid.uuid4().hex
+PUBLICATION_BUDGET_SECONDS = 5.0
+publication_clock = time.monotonic
 IO_CONFIG = Config(connect_timeout=2, read_timeout=3, retries={"total_max_attempts": 1})
 NO_RETRY = StepConfig(retry_strategy=lambda _error, _attempt: RetryDecision.no_retry())
 
@@ -63,54 +72,47 @@ def resources():
     return {"threads": [{"id": t.ident, "name": t.name} for t in threading.enumerate()]}
 
 
-def observe(trace, kind, **fields):
-    """Preserve the legacy ledger when this invocation is not a shared case."""
-    if trace.payload.get("coverageProfile"):
-        return trace.observe(kind, **fields)
-    return None
-
-
-def configuration(trace, name, max_concurrency):
-    if trace.payload.get("coverageProfile"):
-        return trace.observer.configuration(name, max_concurrency)
-    return nullcontext()
-
-
 class Trace:
     def __init__(self, payload, context, execution_arn):
         self.payload = dict(payload)
-        if "runId" in self.payload:
-            self.payload.setdefault("run", self.payload["runId"])
-        self.shared = bool(self.payload.get("coverageProfile"))
-        if self.shared:
-            for key in (
-                "runId",
-                "caseId",
-                "role",
-                "sharedScenario",
-                "controlPrefix",
-            ):
-                if not isinstance(self.payload.get(key), str) or not self.payload[key]:
-                    raise ValueError(f"Shared invocation requires {key}")
-            if not self.payload["controlPrefix"].startswith(
-                f"runs/{self.payload['run']}/cases/"
-            ) or not self.payload["controlPrefix"].endswith("/"):
-                raise ValueError("Shared controls must use a case-owned run prefix")
+        for key in (
+            "runId",
+            "caseId",
+            "role",
+            "coverageProfile",
+            "sharedScenario",
+            "controlPrefix",
+        ):
+            if not isinstance(self.payload.get(key), str) or not self.payload[key]:
+                raise ValueError(f"Shared invocation requires {key}")
+        run = self.payload["runId"]
+        if self.payload.get("run", run) != run or run != os.environ["LMI_RUN_ID"]:
+            raise ValueError("Input belongs to a different deployment")
+        self.payload["run"] = run
+        # The deployed fixture bundle omits the conformance package. Match
+        # its case_key derivation when checking the supplied control namespace.
+        owner = hashlib.sha256(self.payload["caseId"].encode()).hexdigest()[:20]
+        if self.payload["controlPrefix"] != f"runs/{run}/cases/{owner}/control/":
+            raise ValueError("Shared controls must use the case-owned run prefix")
         self.context = context
         self.s3 = boto3.client("s3", config=IO_CONFIG)
         self.bucket = os.environ["LMI_BUCKET"]
+        # Publication sequences are assigned under the ledger lock.
         self.lock = threading.Lock()
-        # Never make observation capture wait for the S3 publication lock.
-        self.capture_lock = threading.Lock()
+        # Work registration and seal eligibility share this separate state lock.
+        self.state_lock = threading.Lock()
         self.capture_sequence = 0
+        self.publication_seconds = 0.0
+        self.active_workers = 0
+        self.wrapper_finished = False
+        self.source_failed = False
+        self.closed = False
         self.sequence = 0
         self.call_sequence = 0
         self.sdk_request_count = 0
-        self.sdk_completed_at = None
-        self.sdk_observation = None
-        self.sdk_resources = None
+        self.durable_context = None
         self.identity = {
-            "run": os.environ["LMI_RUN_ID"],
+            "run": run,
             "commit": os.environ["LMI_COMMIT"],
             "marker": self.payload["marker"],
             "scenario": self.payload["scenario"],
@@ -120,71 +122,179 @@ class Trace:
             "process": PROCESS_ID,
             "pid": os.getpid(),
         }
-        if self.shared:
-            self.identity.update(
-                {
-                    key: self.payload[key]
-                    for key in (
-                        "runId",
-                        "caseId",
-                        "role",
-                        "coverageProfile",
-                        "sharedScenario",
-                        "behaviorBudgets",
-                    )
-                    if key in self.payload
-                }
-            )
-        self.control_prefix = self.payload.get(
-            "controlPrefix", f"runs/{self.identity['run']}/control/"
+        self.identity.update(
+            {
+                key: self.payload[key]
+                for key in (
+                    "runId",
+                    "caseId",
+                    "role",
+                    "coverageProfile",
+                    "sharedScenario",
+                    "behaviorBudgets",
+                )
+                if key in self.payload
+            }
         )
+        self.control_prefix = self.payload["controlPrefix"]
         self.deadline_observed_at_ms = time.time() * 1000
         self.remaining_ms = context.get_remaining_time_in_millis()
         self.deadline = (self.deadline_observed_at_ms + self.remaining_ms) / 1000
-        self.observer = LifecycleObservations(self) if self.shared else None
+        self.observer = LifecycleObservations(self)
 
     def emit(self, phase, **fields):
-        # Keep original evidence order independently of retrospective boundaries.
         with self.lock:
-            self.sequence += 1
-            if phase == "CONFORMANCE":
-                fields["observation"] = {
-                    **fields["observation"],
-                    "sourceSequence": self.sequence,
-                }
-            event = {
-                **self.identity,
-                "phase": phase,
-                "sequence": self.sequence,
-                "time": time.time(),
-                "deadline": self.deadline,
-                **fields,
-            }
-            print("LMI_TEST " + json.dumps(event), flush=True)
-            self.s3.put_object(
-                Bucket=self.bucket,
-                Key=f"runs/{self.identity['run']}/events/{self.identity['marker']}/{self.identity['request']}/{self.sequence:06d}.json",
-                Body=json.dumps(event).encode(),
-                ContentType="application/json",
+            return self._publish_record(phase, **fields)
+
+    def _publish_record(self, phase: str, **fields: Any) -> dict[str, Any]:
+        with self.state_lock:
+            # Once a pre-seal record is lost, further evidence uploads cannot
+            # certify this request. Avoid repeating a slow failed retry budget.
+            if self.source_failed and not self.closed:
+                return {}
+        try:
+            event = self._write_record(phase, **fields)
+        except Exception as error:
+            self.fail_source(f"Could not publish {phase}", error)
+            return {}
+        if not self.closed and self.publication_seconds >= PUBLICATION_BUDGET_SECONDS:
+            self.fail_source(
+                "Publication budget exhausted", TimeoutError("Slow evidence storage")
             )
         return event
 
-    def capture_observation(self, kind, **fields):
-        with self.capture_lock:
+    def fail_source(self, message: str, error: Exception) -> None:
+        with self.state_lock:
+            self.source_failed = True
+        with suppress(OSError, ValueError):
+            print(f"LMI_TEST_PUBLICATION_ERROR {message}: {error}", flush=True)
+
+    def _write_record(self, phase: str, **fields: Any) -> dict[str, Any]:
+        self.sequence += 1
+        if phase == "CONFORMANCE":
             self.capture_sequence += 1
-            at_ms = fields.pop("atMs", time.time_ns() / 1_000_000)
-            return {
-                "kind": kind,
-                "atMs": at_ms,
-                **fields,
+            fields["observation"] = {
+                **fields["observation"],
+                "sourceSequence": self.sequence,
                 "captureSequence": self.capture_sequence,
             }
+        event = {
+            **self.identity,
+            "phase": phase,
+            "sequence": self.sequence,
+            "time": time.time(),
+            "deadline": self.deadline,
+            **fields,
+        }
+        content = json.dumps(event)
+        with suppress(OSError, ValueError):
+            print("LMI_TEST " + content, flush=True)
+        key = (
+            f"runs/{self.identity['run']}/events/{self.identity['marker']}/"
+            f"{self.identity['request']}/{self.sequence:06d}.json"
+        )
+        self._commit_record(key, content.encode())
+        return event
 
-    def publish_observation(self, observation):
-        return self.emit("CONFORMANCE", observation=observation)
+    def _commit_record(self, key: str, content: bytes) -> None:
+        started = publication_clock()
+        failed = False
+        try:
+            for attempt in range(2):
+                try:
+                    self.s3.put_object(
+                        Bucket=self.bucket,
+                        Key=key,
+                        Body=content,
+                        ContentType="application/json",
+                        IfNoneMatch="*",
+                    )
+                    return
+                except (BotoCoreError, ClientError) as error:
+                    failed = True
+                    try:
+                        response = self.s3.get_object(Bucket=self.bucket, Key=key)
+                        with response["Body"] as body:
+                            existing = body.read()
+                    except (BotoCoreError, ClientError):
+                        if attempt:
+                            raise error from None
+                    else:
+                        if existing == content:
+                            return
+                        raise ValueError(
+                            f"Evidence record already exists with different content: {key}"
+                        ) from error
+        finally:
+            if failed:
+                self.publication_seconds += publication_clock() - started
+
+    def _seal_if_ready(self) -> None:
+        with self.state_lock:
+            if not self.wrapper_finished or self.active_workers:
+                return
+        with self.lock:
+            with self.state_lock:
+                if self.active_workers or self.source_failed or self.closed:
+                    return
+                self.closed = True
+            # This shares the publication boundary with every other record.
+            self._publish_record(
+                "SEALED", sourceProtocol=2, throughCapture=self.capture_sequence
+            )
+
+    def finish_wrapper(self) -> None:
+        with self.state_lock:
+            self.wrapper_finished = True
+        self._seal_if_ready()
+
+    def _begin_work(self) -> bool:
+        with self.state_lock:
+            self.active_workers += 1
+            return self.closed
+
+    def _end_work(self) -> None:
+        with self.state_lock:
+            self.active_workers -= 1
+        self._seal_if_ready()
+
+    @contextmanager
+    def publishing(self):
+        # Registration and checking the seal are atomic with seal eligibility.
+        already_sealed = self._begin_work()
+        try:
+            yield already_sealed
+        finally:
+            self._end_work()
+
+    def start_worker(
+        self, operation: Callable[[], None], name: str
+    ) -> threading.Thread:
+        def run() -> None:
+            try:
+                operation()
+            except BaseException:
+                with self.state_lock:
+                    self.source_failed = True
+                raise
+            finally:
+                self._end_work()
+
+        thread = threading.Thread(target=run, daemon=True, name=name)
+        self._begin_work()
+        try:
+            thread.start()
+        except BaseException:
+            with self.state_lock:
+                self.active_workers -= 1
+                self.source_failed = True
+            raise
+        return thread
 
     def observe(self, kind, **fields):
-        return self.publish_observation(self.capture_observation(kind, **fields))
+        if "atMs" not in fields:
+            fields["atMs"] = time.time_ns() / 1_000_000
+        return self.emit("CONFORMANCE", observation={"kind": kind, **fields})
 
     def next_call_id(self, kind):
         with self.lock:
@@ -192,11 +302,6 @@ class Trace:
             if kind in {"checkpoint", "poll"}:
                 self.sdk_request_count += 1
             return f"{self.identity['request']}:{kind}:{self.call_sequence}"
-
-    def signal(self, name):
-        self.s3.put_object(
-            Bucket=self.bucket, Key=self.control_prefix + name, Body=b"release"
-        )
 
     def released(self, name):
         try:
@@ -208,106 +313,85 @@ class Trace:
             if state not in {b"hold", b"release"}:
                 raise ValueError(f"Invalid control state for {name}")
             return state == b"release"
-        except (ClientError, ValueError) as error:
+        except (BotoCoreError, ClientError, ValueError) as error:
             self.emit("CONTROL_ERROR", gate=name, error=str(error))
-            observe(self, "control_error", gateId=name, error=str(error))
+            self.observe("control_error", gateId=name, error=str(error))
             raise
 
-    def gate(self, name, *, effects=False, attempt=1, ready=None, preparation=False):
-        # This return value is checkpointed by existing controlled-io steps.
-        self.gate_release(
-            name, effects=effects, attempt=attempt, ready=ready, preparation=preparation
-        )
-
-    def gate_release(
+    def gate(
         self,
         name,
         *,
         effects=False,
         attempt=1,
-        ready=None,
-        on_hold=None,
-        on_release=None,
         preparation=False,
     ):
         """Observe normal versus emergency release without changing step results."""
         end = time.monotonic() + 150
         entered = False
         held_at_ms = None
-        task_id = self.next_call_id("io") if self.shared else None
-        observe(self, "io_start", taskId=task_id, gateId=name)
+        task_id = self.next_call_id("io")
+        native_overlap = self.payload.get("sharedScenario") == "native-overlap"
+        self.observe("io_start", taskId=task_id, gateId=name)
         try:
             while True:
                 # Shared cleanup releases the case abort control first. It must
                 # not masquerade as a normal measurement release of the target.
-                if self.shared and self.released("release-all"):
+                if self.released("release-all"):
                     mode = "emergency"
                     release_observed_at_ms = time.time_ns() / 1_000_000
                 else:
                     specific_release = self.released(name)
                     target_observed_at_ms = time.time_ns() / 1_000_000
+                    # Shared cleanup releases the abort first. If it raced
+                    # the target read, observe it before crediting a normal release.
+                    abort = specific_release and self.released("release-all")
                     mode = (
-                        "normal"
-                        if specific_release
-                        else "emergency"
-                        if not self.shared and self.released("release-all")
-                        else None
+                        "emergency" if abort else "normal" if specific_release else None
                     )
                     release_observed_at_ms = (
-                        target_observed_at_ms
-                        if specific_release
-                        else time.time_ns() / 1_000_000
+                        time.time_ns() / 1_000_000 if abort else target_observed_at_ms
                     )
                 if mode is not None:
-                    released = GateRelease(
-                        name, release_observed_at_ms, mode, held_at_ms
-                    )
-                    if on_release is not None:
-                        on_release(released)
-                    if preparation and mode == "normal":
-                        # The driver releases preparation only after the peer
-                        # joined. This observes the cohort barrier within the
-                        # original invocations' overlap, not at early warm-up.
-                        observe(
-                            self,
+                    if (preparation or native_overlap) and mode == "normal":
+                        # The driver releases these controls only after observing
+                        # live overlap. BLOCKED retains the earlier held-read time.
+                        self.observe(
                             "barrier_arrived",
                             gateId=name,
-                            atMs=released.observed_at_ms,
+                            atMs=release_observed_at_ms,
                             source="cohort-admission",
                         )
-                    observe(
-                        self,
+                    self.observe(
                         "fault_released",
                         gateId=name,
                         mode=mode,
-                        atMs=released.observed_at_ms,
+                        atMs=release_observed_at_ms,
                         source="control-poll",
                     )
-                    return released
+                    return
                 if (
                     self.payload["scenario"] == "deadline"
                     and not preparation
                     and time.time() >= self.deadline + 0.2
                 ):
-                    observe(self, "cooperative_io_cancelled", source="runtime-deadline")
+                    self.observe("cooperative_io_cancelled", source="runtime-deadline")
                     raise TimeoutError(
                         "Cooperative fixture I/O crossed the runtime deadline"
                     )
                 if not entered:
                     held_at_ms = target_observed_at_ms
-                    if on_hold is not None:
-                        on_hold(held_at_ms)
                     self.emit("BLOCKED", gate=name)
-                    observe(self, "blocked", gateId=name, atMs=held_at_ms)
-                    if not preparation and not self.payload.get("preparation_gate"):
-                        observe(self, "barrier_arrived", gateId=name, atMs=held_at_ms)
+                    self.observe("blocked", gateId=name, atMs=held_at_ms)
+                    if not (native_overlap or self.payload.get("preparation_gate")):
+                        self.observe("barrier_arrived", gateId=name, atMs=held_at_ms)
                     if self.payload["scenario"] == "deadline" and not preparation:
-                        observe(self, "work_in_flight", gateId=name, atMs=held_at_ms)
+                        self.observe("work_in_flight", gateId=name, atMs=held_at_ms)
                     if self.payload.get("role") == "recovery":
-                        observe(self, "worker_recovered", atMs=held_at_ms)
+                        self.observe("worker_recovered", atMs=held_at_ms)
                 if time.monotonic() >= end:
                     self.emit("ESCAPE", gate=name)
-                    observe(self, "escape", gateId=name)
+                    self.observe("escape", gateId=name)
                     raise TimeoutError(
                         "Test emergency release; never a passing regression"
                     )
@@ -315,8 +399,7 @@ class Trace:
                     self.emit(
                         "EFFECT", operation="blocked-io", gate=name, attempt=attempt
                     )
-                    observe(
-                        self,
+                    self.observe(
                         "effect",
                         operation="blocked-io",
                         gateId=name,
@@ -324,17 +407,14 @@ class Trace:
                     )
                 else:
                     self.emit("ALIVE", gate=name)
-                    observe(self, "alive", gateId=name)
+                    self.observe("alive", gateId=name)
                     if self.payload.get("role") == "peer":
-                        observe(self, "peer_progress", gateId=name)
-                if not entered and ready:
-                    self.signal(ready)
+                        self.observe("peer_progress", gateId=name)
                 entered = True
                 time.sleep(0.2)  # fault-injected blocking I/O, not a durable delay
         except BaseException as error:
             self.emit("IO_INTERRUPTED", gate=name, error=type(error).__name__)
-            observe(
-                self,
+            self.observe(
                 "io_interrupted",
                 taskId=task_id,
                 gateId=name,
@@ -344,14 +424,22 @@ class Trace:
         finally:
             exited_at = time.time() * 1000
             self.emit("IO_EXIT", gate=name)
-            observe(self, "io_exit", taskId=task_id, gateId=name, atMs=exited_at)
+            self.observe("io_exit", taskId=task_id, gateId=name, atMs=exited_at)
 
     def body(self, name, value, step=None):
         attempt = getattr(step, "attempt", 1)
         self.emit("BODY", operation=name, value=value, attempt=attempt)
-        if self.shared:
-            self.observer.body(name, value, attempt)
+        self.observer.body(name, value, attempt)
         return value
+
+
+@dataclass(frozen=True)
+class FixtureObserverFactory:
+    bind: Callable[[dict[str, Any]], Trace]
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        trace = self.bind(info.execution_input)
+        return trace.observer
 
 
 class ObservedClient:
@@ -359,45 +447,53 @@ class ObservedClient:
 
     Evidence publication is isolated from the backend call: a failed record
     can neither discard a successful response nor replace the backend's own
-    error. It is reported as an observation error instead, which the shared
-    harness treats as incomplete evidence rather than an SDK outcome.
+    error. A failed record leaves a publication gap and prevents a new seal.
     """
 
-    def __init__(self, client, trace):
+    def __init__(self, client, trace=None):
         self.client, self.trace = client, trace
+        self.initial_polls: list[tuple[float, float]] = []
 
-    def _record(self, phase, kind, emitted=None, **observed):
-        for publish in (
-            lambda: self.trace.emit(phase, **(emitted or {})),
-            lambda: observe(self.trace, kind, **observed),
-        ):
-            try:
-                publish()
-            except Exception as error:
-                self._publication_failed(phase, error)
+    def _record(self, phase, kind, emitted=None, *, prepublished=False, **observed):
+        if not prepublished:
+            self.trace.emit(phase, **(emitted or {}), time=observed["atMs"] / 1000)
+        self.trace.observe(kind, **observed)
 
-    def _publication_failed(self, phase, error):
-        message = (
-            f"Evidence publication failed for {phase}: {type(error).__name__}: {error}"
-        )
-        try:
-            observe(self.trace, "observation_error", message=message)
-        except Exception:
-            # The missing per-request sequence number still marks the loss.
-            print("LMI_TEST_PUBLICATION_ERROR " + message, flush=True)
+    def bind_trace(self, trace) -> None:
+        self.trace = trace
+        for start, end in self.initial_polls:
+            call_id = self.trace.next_call_id("poll")
+            self._record("POLL_CALL", "poll_call", callId=call_id, atMs=start)
+            self._record("POLL_EXIT", "poll_exit", callId=call_id, atMs=end)
+        self.initial_polls.clear()
 
     def get_execution_state(self, **kwargs):
-        call_id = (
-            self.trace.next_call_id("poll")
-            if self.trace.payload.get("coverageProfile")
-            else None
-        )
-        self._record("POLL_CALL", "poll_call", callId=call_id)
-        try:
-            return self.client.get_execution_state(**kwargs)
-        finally:
-            exited_at = time.time() * 1000
-            self._record("POLL_EXIT", "poll_exit", callId=call_id, atMs=exited_at)
+        if self.trace is None:
+            # The SDK owns pagination. Until its start hook exposes the input,
+            # retain only the bootstrap poll times, never transport responses.
+            start = time.time_ns() / 1_000_000
+            try:
+                return self.client.get_execution_state(**kwargs)
+            finally:
+                self.initial_polls.append((start, time.time_ns() / 1_000_000))
+
+        with self.trace.publishing() as sealed:
+            call_id = self.trace.next_call_id("poll")
+            if sealed:
+                self.trace.emit("POLL_CALL")
+            start = time.time_ns() / 1_000_000
+            try:
+                return self.client.get_execution_state(**kwargs)
+            finally:
+                end = time.time_ns() / 1_000_000
+                self._record(
+                    "POLL_CALL",
+                    "poll_call",
+                    prepublished=sealed,
+                    callId=call_id,
+                    atMs=start,
+                )
+                self._record("POLL_EXIT", "poll_exit", callId=call_id, atMs=end)
 
     def checkpoint(self, **kwargs):
         updates = [
@@ -409,60 +505,63 @@ class ObservedClient:
             }
             for u in kwargs["updates"]
         ]
-        call_id = (
-            self.trace.next_call_id("checkpoint")
-            if self.trace.payload.get("coverageProfile")
-            else None
-        )
-        self._record(
-            "CHECKPOINT_CALL",
-            "checkpoint_call",
-            {"updates": updates},
-            callId=call_id,
-            updates=updates,
-        )
-        try:
-            response = self.client.checkpoint(**kwargs)
-        except BaseException as error:
-            self._record(
-                "CHECKPOINT_ERROR",
-                "checkpoint_error",
-                {"error": type(error).__name__},
-                callId=call_id,
-                error=type(error).__name__,
-            )
-            raise
-        else:
-            # Recorded outside the backend's try block, so a failed record
-            # cannot be mistaken for a failed checkpoint.
-            self._record(
-                "CHECKPOINT_ACK",
-                "checkpoint_ack",
-                {"updates": updates},
-                callId=call_id,
-                operationIds=[item["id"] for item in updates],
-                source="service",
-                atMs=time.time() * 1000,
-            )
-            return response
-        finally:
-            exited_at = time.time() * 1000
-            self._record(
-                "CHECKPOINT_EXIT", "checkpoint_exit", callId=call_id, atMs=exited_at
-            )
+        with self.trace.publishing() as sealed:
+            call_id = self.trace.next_call_id("checkpoint")
+            if sealed:
+                self.trace.emit("CHECKPOINT_CALL", updates=updates)
+            start = time.time_ns() / 1_000_000
+            try:
+                try:
+                    response = self.client.checkpoint(**kwargs)
+                finally:
+                    end = time.time_ns() / 1_000_000
+                    self._record(
+                        "CHECKPOINT_CALL",
+                        "checkpoint_call",
+                        {"updates": updates},
+                        prepublished=sealed,
+                        callId=call_id,
+                        updates=updates,
+                        atMs=start,
+                    )
+            except BaseException as error:
+                error_type = type(error).__name__
+                self._record(
+                    "CHECKPOINT_ERROR",
+                    "checkpoint_error",
+                    {"error": error_type},
+                    callId=call_id,
+                    error=error_type,
+                    atMs=end,
+                )
+                raise
+            else:
+                self._record(
+                    "CHECKPOINT_ACK",
+                    "checkpoint_ack",
+                    {"updates": updates},
+                    callId=call_id,
+                    operationIds=[item["id"] for item in updates],
+                    source="service",
+                    atMs=end,
+                )
+                return response
+            finally:
+                self._record(
+                    "CHECKPOINT_EXIT", "checkpoint_exit", callId=call_id, atMs=end
+                )
 
 
 def workflow(event, context, trace):
     trace.durable_context = context
-    scope = trace.observer.root_scope() if trace.shared else nullcontext()
-    with scope:
+    with trace.observer.root_scope():
         try:
             result = run_workflow(event, context, trace)
         except Exception:
-            observe(trace, "root_completed", outcome="FAILED")
+            trace.observe("root_completed", outcome="FAILED")
             raise
         else:
-            observe(trace, "root_completed", outcome="SUCCEEDED")
+            trace.observe("root_completed", outcome="SUCCEEDED")
             return result
 
 
@@ -479,19 +578,6 @@ def run_workflow(event, context, trace):
     }:
         raise ValueError(f"Unsupported lifecycle fixture: {scenario}")
     try:
-        if target := event.get("target_environment"):
-            # Record placement before any fault work. Replays consume the same
-            # decision even if Lambda later resumes in another environment.
-            accepted = context.step(
-                lambda _: trace.identity["environment"] == target,
-                name="placement-admission",
-                config=NO_RETRY,
-            )
-            trace.emit(
-                "PLACEMENT_ACCEPTED" if accepted else "PLACEMENT_MISS", target=target
-            )
-            if not accepted:
-                return marker
         value = context.step(lambda s: trace.body("success", marker, s), name="success")
         if scenario == "failure":
             raise ValueError("expected:" + marker)
@@ -516,8 +602,8 @@ def run_workflow(event, context, trace):
                     original_request is not None
                     and trace.identity["request"] != original_request
                 ):
-                    observe(
-                        trace, "fault_not_reapplied", originalRequestId=original_request
+                    trace.observe(
+                        "fault_not_reapplied", originalRequestId=original_request
                     )
                     return None
                 return trace.gate(
@@ -547,14 +633,22 @@ def run_workflow(event, context, trace):
             try:
                 context.step(fail, name="failure", config=NO_RETRY)
             except StepError as error:
+                if (
+                    error.error_type != "ValueError"
+                    or error.message != "expected:" + marker
+                ):
+                    raise AssertionError(
+                        "Stored step failure has unexpected details"
+                    ) from error
                 trace.emit(
                     "STORED_FAILURE", message=error.message, error_type=error.error_type
                 )
-                observe(
-                    trace,
+                trace.observe(
                     "stored_failure",
                     error={"type": error.error_type, "message": error.message},
                 )
+            else:
+                raise AssertionError("Stored step failure returned as a value")
 
             def retry(step):
                 trace.body("retry", marker, step)
@@ -562,7 +656,7 @@ def run_workflow(event, context, trace):
                     raise ValueError("retry once")
                 return marker
 
-            context.step(
+            retried = context.step(
                 retry,
                 name="retry",
                 config=StepConfig(
@@ -573,33 +667,47 @@ def run_workflow(event, context, trace):
                     )
                 ),
             )
-            context.run_in_child_context(
+            if retried != marker:
+                raise AssertionError("Retried step returned the wrong value")
+            mapped = context.run_in_child_context(
                 lambda c: c.map(
                     [1, 2, 3],
                     lambda inner, item, _index, _all: inner.step(
-                        lambda _: item, name="item"
+                        lambda step: trace.body("item", item, step), name="item"
                     ),
                     name="items",
                     config=MapConfig(max_concurrency=3),
                 ),
                 name="nested",
             )
-            context.parallel(
+            items = mapped.get_results()
+            if items != [1, 2, 3] or any(type(item) is not int for item in items):
+                raise AssertionError("Replayed map returned the wrong items")
+            parallel = context.parallel(
                 [
-                    lambda c: c.step(lambda _: value, name="left"),
-                    lambda c: c.step(lambda _: value, name="right"),
+                    lambda c: c.step(
+                        lambda step: trace.body("left", ["left", value], step),
+                        name="left",
+                    ),
+                    lambda c: c.step(
+                        lambda step: trace.body("right", ["right", value], step),
+                        name="right",
+                    ),
                 ],
                 name="pair",
             )
+            if parallel.get_results() != [["left", value], ["right", value]]:
+                raise AssertionError("Replayed parallel returned the wrong values")
             context.wait(Duration.from_seconds(2), name="pause")
             callback = context.create_callback(name="completion")
-            assert callback.result() == marker
+            if callback.result() != marker:
+                raise AssertionError("Replayed callback returned the wrong value")
         trace.emit("USER_RESULT", value=value)
         return value
     finally:
         exited_at = time.time() * 1000
         trace.emit("USER_EXIT")
-        observe(trace, "user_exit", atMs=exited_at)
+        trace.observe("user_exit", atMs=exited_at)
 
 
 def admission_probes(trace):
@@ -671,10 +779,7 @@ def admission_probes(trace):
 def start_admission_probes(trace):
     # A broken SDK can leave a late operation waiting forever. Keep that real
     # task visible to the retirement audit instead of declaring it settled.
-    thread = threading.Thread(
-        target=admission_probes, args=(trace,), daemon=True, name="lmi-admission-probes"
-    )
-    thread.start()
+    thread = trace.start_worker(lambda: admission_probes(trace), "lmi-admission-probes")
     # Every probe observation is a separate S3 publication, and the runtime
     # freezes this environment as soon as the handler returns. Wait for the
     # declared admission budget -- the same window the shared validator allows
@@ -689,32 +794,36 @@ def start_admission_probes(trace):
 
 @dataclass
 class WarmWork:
-    trace: object
     ready: threading.Event = field(default_factory=threading.Event)
     observed_during: str | None = None
+    worker: threading.Thread | None = None
 
 
-WARM_WORK = {}
+WARM_WORK: dict[tuple[str, str], WarmWork] = {}
 WARM_LOCK = threading.Lock()
 
 
 def start_warm_work(trace):
     key = (trace.payload["runId"], trace.payload["caseId"])
-    work = WarmWork(trace)
+    work = WarmWork()
     with WARM_LOCK:
         if key in WARM_WORK:
             raise ValueError("A warm case cannot replace its original work")
         WARM_WORK[key] = work
 
     def late():
-        trace.observe("task_start", taskId="late-callback", source="fixture")
         try:
-            if not work.ready.wait(timeout=120):
-                trace.observe(
-                    "observation_error",
-                    message="Original late work never observed warm reuse",
-                )
-                return
+            trace.observe("task_start", taskId="late-callback", source="fixture")
+            end = time.monotonic() + 120
+            while not work.ready.wait(timeout=0.2):
+                if trace.released("release-all"):
+                    return
+                if time.monotonic() >= end:
+                    trace.observe(
+                        "observation_error",
+                        message="Original late work never observed warm reuse",
+                    )
+                    return
             trace.observe("late_activity", observedDuringRequestId=work.observed_during)
             admission_probes(trace)
         finally:
@@ -722,7 +831,12 @@ def start_warm_work(trace):
             with WARM_LOCK:
                 WARM_WORK.pop(key, None)
 
-    threading.Thread(target=late, daemon=True, name="lmi-late-callback").start()
+    try:
+        work.worker = trace.start_worker(late, "lmi-late-callback")
+    except BaseException:
+        with WARM_LOCK:
+            WARM_WORK.pop(key, None)
+        raise
     return None
 
 
@@ -734,8 +848,11 @@ def release_warm_work(trace):
         raise ValueError("Warm request did not reuse the original process")
     work.observed_during = trace.identity["request"]
     work.ready.set()
-    # Keep the warm invocation alive long enough to observe the old callback.
-    time.sleep(0.5)
+    # The old invocation owns its callback and seal. Let that work complete
+    # while this warm invocation is still active and the process can run it.
+    assert work.worker is not None
+    budget = trace.payload.get("behaviorBudgets", {}).get("admissionMs", 5000)
+    work.worker.join(timeout=max(0.5, budget / 1000))
     return None
 
 
@@ -745,56 +862,21 @@ def handler(event, context):
         if isinstance(event, DurableExecutionInvocationInputWithClient)
         else DurableExecutionInvocationInput.from_json_dict(event)
     )
-    payload = next(
-        json.loads(op.execution_details.input_payload)
-        for op in invocation.initial_execution_state.operations
-        if op.execution_details and op.execution_details.input_payload
-    )
-    payload = dict(payload)
-    if "runId" in payload:
-        payload.setdefault("run", payload["runId"])
-    if payload["run"] != os.environ["LMI_RUN_ID"]:
-        raise ValueError("Input belongs to a different deployment")
-    trace = Trace(payload, context, invocation.durable_execution_arn)
+    started_at = time.time_ns() / 1_000_000
     source_client = (
         invocation.service_client
         if isinstance(invocation, DurableExecutionInvocationInputWithClient)
         else LambdaClient.initialize_client()
     )
-    client = ObservedClient(source_client, trace)
-    injected = DurableExecutionInvocationInputWithClient.from_durable_execution_invocation_input(
-        invocation, client
-    )
-
-    def invoke(plugins=None):
-        configured_plugins = (
-            [LifecycleObservationFactory(trace.observer), *(plugins or [])]
-            if payload.get("coverageProfile")
-            else plugins
-        )
-        decorated = durable_execution(
-            lambda e, c: workflow(e, c, trace), plugins=configured_plugins
-        )
-        try:
-            return decorated(injected, context)
-        finally:
-            # Preserve the actual SDK boundary before post-call evidence I/O.
-            completed_at_ns = time.time_ns()
-            trace.sdk_completed_at = completed_at_ns / 1_000_000_000
-            # Both semantic records describe this same boundary. Converting
-            # seconds back to milliseconds can round to a different float.
-            trace.sdk_completed_at_ms = completed_at_ns / 1_000_000
-            if payload.get("coverageProfile"):
-                trace.sdk_observation = trace.capture_observation(
-                    "sdk_completion", atMs=trace.sdk_completed_at_ms
-                )
-            trace.sdk_resources = resources()
-
+    client = ObservedClient(source_client)
     before = resources()
-    entered_at = time.time() * 1000
-    trace.emit("WRAPPER_ENTER", resources=before)
-    observe(trace, "wrapper_enter", atMs=entered_at, resources=before)
-    if payload.get("coverageProfile"):
+
+    def bind_trace(event_input: dict[str, Any]) -> Trace:
+        if client.trace is not None:
+            return client.trace
+        trace = Trace(event_input, context, invocation.durable_execution_arn)
+        trace.emit("WRAPPER_ENTER", time=started_at / 1000, resources=before)
+        trace.observe("wrapper_enter", atMs=started_at, resources=before)
         trace.observe(
             "runtime_deadline",
             atMs=trace.deadline_observed_at_ms,
@@ -802,65 +884,94 @@ def handler(event, context):
             deadlineAtMs=trace.deadline * 1000,
             source="runtime",
         )
-    try:
-        result = invoke()
-        trace.emit(
-            "WRAPPER_RETURN",
-            status=result["Status"],
-            resources=trace.sdk_resources,
-            time=trace.sdk_completed_at,
-        )
-        if payload.get("coverageProfile"):
-            trace.publish_observation(
-                {
-                    **trace.sdk_observation,
-                    "kind": "wrapper_return",
-                    "outcome": result["Status"],
-                    "resources": trace.sdk_resources,
-                }
+        client.bind_trace(trace)
+        return trace
+
+    # The initial page often has the input. Bind it immediately so failed
+    # initialization still has a request ledger. Otherwise the SDK will
+    # provide the input after fetching pages and before running user code.
+    for operation in invocation.initial_execution_state.operations:
+        if operation.execution_details and operation.execution_details.input_payload:
+            bind_trace(json.loads(operation.execution_details.input_payload))
+            break
+
+    injected = DurableExecutionInvocationInputWithClient.from_durable_execution_invocation_input(
+        invocation, client
+    )
+    decorated = durable_execution(
+        lambda e, c: workflow(e, c, bind_trace(e)),
+        plugins=[FixtureObserverFactory(bind_trace)],
+    )
+
+    def complete(*, result=None, error=None):
+        trace = client.trace
+        if trace is None:
+            return
+        completed_at_ns = time.time_ns()
+        if error is None:
+            phase, kind, outcome = (
+                "WRAPPER_RETURN",
+                "wrapper_return",
+                result["Status"],
             )
-        if result["Status"] == "PENDING":
-            observe(
-                trace,
+            raw = {"status": outcome}
+            details = {}
+        else:
+            phase, kind, outcome = "WRAPPER_RAISE", "wrapper_raise", "THREW"
+            raw = {"error": type(error).__name__}
+            details = {"error": {"type": type(error).__name__, "message": str(error)}}
+        completed_resources = resources()
+        trace.emit(
+            phase,
+            resources=completed_resources,
+            time=completed_at_ns / 1_000_000_000,
+            **raw,
+        )
+        trace.observe(
+            kind,
+            outcome=outcome,
+            resources=completed_resources,
+            atMs=completed_at_ns / 1_000_000,
+            **details,
+        )
+        if outcome == "PENDING":
+            trace.observe(
                 "pending",
-                atMs=trace.sdk_completed_at_ms,
+                atMs=completed_at_ns / 1_000_000,
                 source="sdk-wrapper",
             )
-        return result
+        if needs_admission_probes(trace):
+            if trace.durable_context is None:
+                trace.observe(
+                    "observation_error",
+                    message="SDK did not initialize a context for admission probes",
+                )
+            else:
+                try:
+                    start_admission_probes(trace)
+                except Exception as probe_error:
+                    trace.fail_source("Could not start admission probes", probe_error)
+        trace.finish_wrapper()
+
+    try:
+        result = decorated(injected, context)
     except BaseException as error:
-        if payload.get("coverageProfile") and trace.sdk_observation is None:
-            trace.sdk_observation = trace.capture_observation("sdk_completion")
-        trace.emit(
-            "WRAPPER_RAISE",
-            error=type(error).__name__,
-            resources=getattr(trace, "sdk_resources", None) or resources(),
-            time=getattr(trace, "sdk_completed_at", None) or time.time(),
-        )
-        if payload.get("coverageProfile"):
-            trace.publish_observation(
-                {
-                    **trace.sdk_observation,
-                    "kind": "wrapper_raise",
-                    "outcome": "THREW",
-                    "error": {"type": type(error).__name__, "message": str(error)},
-                    "resources": getattr(trace, "sdk_resources", None) or resources(),
-                }
-            )
+        complete(error=error)
         raise
-    finally:
-        if (
-            payload.get("sharedScenario")
-            in {
-                "normal-return",
-                "normal-failure",
-                "deadline-during-step",
-                "peer-recovery",
-            }
-            and payload.get("role") == "victim"
-            and (
-                payload.get("sharedScenario") != "peer-recovery"
-                or trace.identity["request"]
-                == getattr(trace, "recovery_original_request", None)
-            )
-        ):
-            start_admission_probes(trace)
+    else:
+        complete(result=result)
+        return result
+
+
+def needs_admission_probes(trace: Trace) -> bool:
+    scenario = trace.payload.get("sharedScenario")
+    return (
+        scenario
+        in {"normal-return", "normal-failure", "deadline-during-step", "peer-recovery"}
+        and trace.payload.get("role") == "victim"
+        and (
+            scenario != "peer-recovery"
+            or trace.identity["request"]
+            == getattr(trace, "recovery_original_request", None)
+        )
+    )
