@@ -8,7 +8,7 @@ CATALOG_PATH = Path(__file__).resolve().parents[2] / "examples-catalog.json"
 
 # The request step of an HTTP delivery retries for up to retry_window, 60
 # seconds by default. It needs at least 11 seconds left in the invocation
-# when it starts. So the extras README asks for a function timeout of at
+# when it starts. So the extensions README asks for a function timeout of at
 # least retry_window plus 11 seconds.
 HTTP_DELIVERY_MIN_TIMEOUT_SECONDS = 60 + 11
 

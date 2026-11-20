@@ -22,8 +22,8 @@ mypy --install-types --non-interactive \
   packages/aws-durable-execution-sdk-python-compute-worker/tests
 
 mypy --install-types --non-interactive \
-  packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras \
-  packages/aws-durable-execution-sdk-python-extras/tests
+  packages/aws-durable-execution-sdk-python-extensions/src/aws_durable_execution_sdk_python_extensions \
+  packages/aws-durable-execution-sdk-python-extensions/tests
 
 # comment out this for now as there are many type check errors in this package
 #mypy --install-types --non-interactive \
