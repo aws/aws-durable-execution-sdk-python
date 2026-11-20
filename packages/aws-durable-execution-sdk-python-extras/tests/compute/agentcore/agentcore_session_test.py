@@ -50,7 +50,6 @@ Body = Callable[[_SessionHandle, DurableContext], Any]
 def session_config(client: Any, **fields: Any) -> AgentcoreSessionConfig:
     values: dict[str, Any] = {
         "agent_runtime_arn": ARN,
-        "timeout": Duration.from_minutes(30),
         "client": client,
         "retry_strategy": lambda error, attempt: RetryDecision.no_retry(),
         **fields,
@@ -298,8 +297,8 @@ def test_validates_the_config_before_any_durable_operation(
         try:
             agentcore_session(
                 context,
-                "review",
-                config=session_config(client, timeout=Duration.from_seconds(0)),
+                "",
+                config=session_config(client),
                 handler=lambda session, ctx: calls.append("handler"),
             )
         except ValidationError as error:
@@ -308,22 +307,20 @@ def test_validates_the_config_before_any_durable_operation(
 
     result = run(handler)
 
-    assert outcome(result) == 'AgentCore "review": timeout must be at least 1 second'
+    assert outcome(result) == "an AgentCore operation requires a non-empty name"
     assert result.operations == []
     assert calls == []
     assert client.calls == []
 
 
 def test_accepts_a_valid_config() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
-    )
+    config = AgentcoreSessionConfig(agent_runtime_arn=ARN)
 
-    assert _validate_session_config("review", config) == 1800
+    _validate_session_config("review", config)
 
 
 def test_config_has_no_default_runtime_arn() -> None:
-    fields: dict[str, Any] = {"timeout": Duration.from_minutes(30)}
+    fields: dict[str, Any] = {}
 
     with pytest.raises(TypeError, match="agent_runtime_arn"):
         AgentcoreSessionConfig(**fields)
@@ -340,9 +337,7 @@ def test_config_has_no_timeout() -> None:
 
 
 def test_rejects_an_empty_name() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
-    )
+    config = AgentcoreSessionConfig(agent_runtime_arn=ARN)
 
     with pytest.raises(
         ValidationError, match="an AgentCore operation requires a non-empty name"
@@ -351,22 +346,9 @@ def test_rejects_an_empty_name() -> None:
 
 
 def test_rejects_a_non_string_name() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
-    )
+    config = AgentcoreSessionConfig(agent_runtime_arn=ARN)
 
     with pytest.raises(
         ValidationError, match="an AgentCore operation requires a non-empty name"
     ):
         _validate_session_config(1, config)  # type: ignore[arg-type]
-
-
-def test_rejects_a_timeout_under_1_second() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_seconds(0)
-    )
-
-    with pytest.raises(
-        ValidationError, match='AgentCore "review": timeout must be at least 1 second'
-    ):
-        _validate_session_config("review", config)
