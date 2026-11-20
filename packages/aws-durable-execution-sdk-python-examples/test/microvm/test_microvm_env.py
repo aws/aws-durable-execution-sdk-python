@@ -3,9 +3,9 @@
 import pytest
 
 
-# The examples import the extras. So an environment without the extras skips
+# The examples import the extensions. So an environment without the extensions skips
 # this module.
-pytest.importorskip("aws_durable_execution_sdk_python_extras")
+pytest.importorskip("aws_durable_execution_sdk_python_extensions")
 
 from src.microvm import (  # noqa: E402
     microvm_run_job,

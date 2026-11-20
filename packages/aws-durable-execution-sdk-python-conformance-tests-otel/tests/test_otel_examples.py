@@ -540,6 +540,29 @@ def test_exporter_headers_are_hidden(template: dict[str, Any]) -> None:
     assert template["Parameters"]["OtelExporterHeaders"]["NoEcho"] is True
 
 
+def test_an_unset_otlp_endpoint_is_omitted(template: dict[str, Any]) -> None:
+    # ADOT treats an empty OTEL_EXPORTER_OTLP_ENDPOINT as a custom endpoint and
+    # skips its Lambda X-Ray exporter, so the ADOT profile must not receive one.
+    globals_variables: dict[str, Any] = template["Globals"]["Function"]["Environment"][
+        "Variables"
+    ]
+
+    assert template["Parameters"]["OtelExporterEndpoint"]["Default"] == ""
+    assert template["Conditions"]["HasOtelExporterEndpoint"] == CfnTag(
+        "!Not", [CfnTag("!Equals", [ref("OtelExporterEndpoint"), ""])]
+    )
+    assert globals_variables["OTEL_EXPORTER_OTLP_ENDPOINT"] == CfnTag(
+        "!If",
+        [
+            "HasOtelExporterEndpoint",
+            ref("OtelExporterEndpoint"),
+            ref("AWS::NoValue"),
+        ],
+    )
+    for resource in template["Resources"].values():
+        assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in environment_variables(resource)
+
+
 def test_the_test_collector_is_optional(template: dict[str, Any]) -> None:
     globals_variables: dict[str, Any] = template["Globals"]["Function"]["Environment"][
         "Variables"

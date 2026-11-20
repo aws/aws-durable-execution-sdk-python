@@ -755,20 +755,28 @@ def test_source_fingerprint_changes_with_local_edits(tmp_path: Path) -> None:
     assert run.source_fingerprint(tmp_path) != untracked
 
 
-@pytest.mark.parametrize("has_microvm_packages", [False, True])
+@pytest.mark.parametrize(
+    "extensions_package",
+    [
+        None,
+        "packages/aws-durable-execution-sdk-js-extras",
+        "packages/aws-durable-execution-sdk-js-extensions",
+    ],
+)
 def test_build_produces_example_workspace_dependencies(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    has_microvm_packages: bool,
+    extensions_package: str | None,
 ) -> None:
+    has_microvm_packages = extensions_package is not None
     core = "packages/aws-durable-execution-sdk-js"
     testing = "packages/aws-durable-execution-sdk-js-testing"
     otel = "packages/aws-durable-execution-sdk-js-otel"
-    extras = "packages/aws-durable-execution-sdk-js-extras"
+    extras = extensions_package
     worker = "packages/aws-durable-execution-sdk-js-compute-worker"
     examples_package = "packages/aws-durable-execution-sdk-js-examples"
     packages = [core, testing, otel, examples_package]
-    if has_microvm_packages:
+    if extras is not None:
         packages.extend([extras, worker])
     for package in packages:
         directory = tmp_path / package
@@ -785,7 +793,8 @@ def test_build_produces_example_workspace_dependencies(
         if workspace == worker:
             assert testing in built
         if workspace == examples_package and has_microvm_packages:
-            # The generator imports extras/microvm and typechecks the worker.
+            # The generator imports extensions/microvm and typechecks the
+            # worker.
             # A successful examples build requires both artifacts to exist.
             assert extras in built
             assert worker in built
