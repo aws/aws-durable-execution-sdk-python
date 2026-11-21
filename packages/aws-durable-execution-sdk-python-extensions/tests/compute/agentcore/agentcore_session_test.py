@@ -427,6 +427,56 @@ def test_two_jobs_use_the_same_session_and_their_own_callbacks(
     ]
 
 
+def test_labels_every_operation_with_its_subtype(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client()
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        session.invoke(ctx, "build", job_input={}, options=OPTIONS)
+        return session.invoke(ctx, "test", job_input={}, options=OPTIONS)
+
+    runner = DurableFunctionTestRunner(
+        handler=session_handler(session_config(client), body), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        for name in ("build.callback", "test.callback"):
+            callback_id = runner.wait_for_callback(arn, name=name, timeout=WAIT)
+            runner.send_callback_success(callback_id, b'"done"')
+        result = runner.wait_for_result(arn, timeout=WAIT)
+        history = runner.get_execution_history(arn)
+    finally:
+        runner.close()
+
+    assert outcome(result) == {"result": "done"}
+    expected = {
+        "review": "AgentcoreSession",
+        "review.session": "AgentcoreSessionId",
+        "build": "RunInChildContext",
+        "build.callback": "AgentcoreCallback",
+        "build.request": "AgentcoreRequest",
+        "test": "RunInChildContext",
+        "test.callback": "AgentcoreCallback",
+        "test.request": "AgentcoreRequest",
+        "review.stop": "AgentcoreStop",
+    }
+    context = result.get_context("review")
+    recorded_tree: dict[str | None, str | None] = {"review": context.sub_type}
+    for child in context.child_operations:
+        recorded_tree[child.name] = child.sub_type
+        if child.name in ("build", "test"):
+            job = context.get_context(child.name)
+            for step in job.child_operations:
+                recorded_tree[step.name] = step.sub_type
+    assert recorded_tree == expected
+    # The execution history carries the subtype on every event of each
+    # operation.
+    recorded: dict[str, set[str | None]] = {}
+    for event in history.events:
+        if event.name in expected:
+            recorded.setdefault(event.name, set()).add(event.sub_type)
+    assert recorded == {name: {sub_type} for name, sub_type in expected.items()}
+
+
 @pytest.mark.parametrize(
     ("fields", "invokes", "complete", "expected"),
     [

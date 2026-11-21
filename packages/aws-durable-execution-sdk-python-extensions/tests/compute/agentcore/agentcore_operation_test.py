@@ -796,9 +796,10 @@ def test_labels_every_operation_with_its_subtype(fake_agentcore_client: Any) -> 
         if event.name in expected:
             recorded.setdefault(event.name, set()).add(event.sub_type)
     assert recorded == {name: {sub_type} for name, sub_type in expected.items()}
-    assert {member.value for member in AgentcoreOperationSubType} == set(
-        expected.values()
-    )
+    # Every other subtype belongs to agentcore_session.
+    assert {member.value for member in AgentcoreOperationSubType} - {
+        AgentcoreOperationSubType.SESSION
+    } == set(expected.values())
 
 
 def stop_failure_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
