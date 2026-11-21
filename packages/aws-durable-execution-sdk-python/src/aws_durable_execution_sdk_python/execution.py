@@ -7,7 +7,7 @@ import json
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
@@ -166,12 +166,39 @@ class DurableExecutionInvocationInputWithClient(DurableExecutionInvocationInput)
 # endregion Invocation models
 
 
+@overload
+def durable_execution(
+    func: Callable[[Any, DurableContext], Any],
+    *,
+    boto3_client: Boto3LambdaClient | None = None,
+    plugins: list[DurableInstrumentationPluginFactory] | None = None,
+) -> Callable[[Any, LambdaContext], Any]: ...
+
+
+@overload
+def durable_execution(
+    func: None = None,
+    *,
+    boto3_client: Boto3LambdaClient | None = None,
+    plugins: list[DurableInstrumentationPluginFactory] | None = None,
+) -> Callable[
+    [Callable[[Any, DurableContext], Any]],
+    Callable[[Any, LambdaContext], Any],
+]: ...
+
+
 def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
     boto3_client: Boto3LambdaClient | None = None,
     plugins: list[DurableInstrumentationPluginFactory] | None = None,
-) -> Callable[[Any, LambdaContext], Any]:
+) -> (
+    Callable[[Any, LambdaContext], Any]
+    | Callable[
+        [Callable[[Any, DurableContext], Any]],
+        Callable[[Any, LambdaContext], Any],
+    ]
+):
     """
     Decorator to create a durable execution handler.
 
