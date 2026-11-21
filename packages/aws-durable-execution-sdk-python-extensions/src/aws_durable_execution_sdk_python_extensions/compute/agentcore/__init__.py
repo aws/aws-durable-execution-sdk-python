@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python_extensions.compute.agentcore.retry import 
 )
 from aws_durable_execution_sdk_python_extensions.compute.agentcore.session import (
     AgentcoreSession,
+    agentcore_session,
 )
 from aws_durable_execution_sdk_python_extensions.compute.agentcore.subtypes import (
     AgentcoreOperationSubType,
@@ -52,5 +53,6 @@ __all__ = [
     "AgentcoreTimeoutError",
     "ComputeError",
     "agentcore",
+    "agentcore_session",
     "default_agentcore_retry_strategy",
 ]
