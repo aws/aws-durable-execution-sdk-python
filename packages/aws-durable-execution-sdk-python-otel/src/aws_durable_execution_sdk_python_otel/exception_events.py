@@ -27,7 +27,10 @@ def error_object_exception_attributes(error: ErrorObject) -> dict[str, Any]:
         attributes["exception.type"] = error.type
     if error.message is not None:
         attributes["exception.message"] = error.message
-    stack_trace = "\n".join(error.stack_trace or [])
+    # Stored stack entries may include values other than strings.
+    stack_trace = "\n".join(
+        frame for frame in (error.stack_trace or []) if isinstance(frame, str)
+    )
     if stack_trace:
         attributes["exception.stacktrace"] = stack_trace
     return attributes
