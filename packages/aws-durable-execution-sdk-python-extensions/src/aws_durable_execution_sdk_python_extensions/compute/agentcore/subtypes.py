@@ -25,6 +25,8 @@ class AgentcoreOperationSubType(StrEnum):
     """The child context of an ``agentcore`` call."""
     SESSION = "AgentcoreSession"
     """The child context of an ``agentcore_session`` call."""
+    SESSION_JOB = "AgentcoreSessionJob"
+    """The child context of one :meth:`AgentcoreSession.invoke` job."""
     SESSION_ID = "AgentcoreSessionId"
     """The step that generates and checkpoints the runtime session ID."""
     CALLBACK = "AgentcoreCallback"

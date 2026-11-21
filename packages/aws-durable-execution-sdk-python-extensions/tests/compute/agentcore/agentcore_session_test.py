@@ -451,10 +451,10 @@ def test_labels_every_operation_with_its_subtype(fake_agentcore_client: Any) -> 
     expected = {
         "review": "AgentcoreSession",
         "review.session": "AgentcoreSessionId",
-        "build": "RunInChildContext",
+        "build": "AgentcoreSessionJob",
         "build.callback": "AgentcoreCallback",
         "build.request": "AgentcoreRequest",
-        "test": "RunInChildContext",
+        "test": "AgentcoreSessionJob",
         "test.callback": "AgentcoreCallback",
         "test.request": "AgentcoreRequest",
         "review.stop": "AgentcoreStop",

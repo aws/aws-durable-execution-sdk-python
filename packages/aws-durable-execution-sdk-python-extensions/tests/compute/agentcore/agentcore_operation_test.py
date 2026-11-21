@@ -798,7 +798,8 @@ def test_labels_every_operation_with_its_subtype(fake_agentcore_client: Any) -> 
     assert recorded == {name: {sub_type} for name, sub_type in expected.items()}
     # Every other subtype belongs to agentcore_session.
     assert {member.value for member in AgentcoreOperationSubType} - {
-        AgentcoreOperationSubType.SESSION
+        AgentcoreOperationSubType.SESSION,
+        AgentcoreOperationSubType.SESSION_JOB,
     } == set(expected.values())
 
 

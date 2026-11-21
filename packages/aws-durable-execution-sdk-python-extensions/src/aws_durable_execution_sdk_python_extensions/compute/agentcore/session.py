@@ -160,7 +160,11 @@ class AgentcoreSession:
             return _run_job(job_context, scope, session_id, job_input, lambda: None)
 
         try:
-            return context.run_in_child_context(run, name=name)
+            return context.run_in_child_context(
+                run,
+                name=name,
+                config=ChildConfig(sub_type=AgentcoreOperationSubType.SESSION_JOB),
+            )
         except ChildContextError as error:
             raise AgentcoreError.from_child_context_error(name, error) from error
 
@@ -220,10 +224,10 @@ def agentcore_session(
     A stop for one of them would end a session that the replay still uses,
     or add an operation that the replay does not expect.
 
-    The child context records the subtype ``AgentcoreSession``. The
-    session's steps and each job's callback and request record the
-    subtypes of :func:`agentcore`. A job's own child context keeps the
-    default subtype of ``run_in_child_context``.
+    The child context records the subtype ``AgentcoreSession``. Each
+    job's own child context records the subtype ``AgentcoreSessionJob``.
+    The session's steps and each job's callback and request record the
+    subtypes of :func:`agentcore`.
 
     A failed :meth:`AgentcoreSession.invoke` raises inside the handler. The
     handler can catch the error and send the next job to the same session.
