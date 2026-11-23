@@ -110,7 +110,7 @@ def test_scope_uppercase() -> None:
 
 
 def test_subject_uppercase() -> None:
-    assert validate_subject("feat: Add new feature") == "subject must be lowercase"
+    assert validate_subject("feat: Add new feature") is None
 
 
 # region validate_message

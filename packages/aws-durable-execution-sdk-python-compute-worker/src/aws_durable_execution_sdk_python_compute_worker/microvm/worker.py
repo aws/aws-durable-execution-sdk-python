@@ -2207,9 +2207,9 @@ def _too_large(
     4. A client that is still sending can get the reset before it reads
        the 400.
 
-    The MicroVM operations of both SDK extras packages, JS
-    (``@aws/durable-execution-sdk-js-extras``) and Python
-    (``aws-durable-execution-sdk-python-extras``), reject a job input that
+    The MicroVM operations of the JS package
+    (``@aws/durable-execution-sdk-js-extras``) and the Python package
+    (``aws-durable-execution-sdk-python-extensions``) reject a job input that
     does not fit before they send the job. So only another sender can get
     the reset.
     """

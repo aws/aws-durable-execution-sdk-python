@@ -26,10 +26,41 @@ _DEFAULT_RETRYABLE_ERROR_PATTERN = re.compile(r".*")
 
 @dataclass
 class RetryDecision:
-    """Decision about whether to retry a step and with what delay."""
+    """Decision about whether to retry a step and with what delay.
+
+    Attributes:
+        should_retry: True to run another attempt.
+        delay: The time to wait before the next attempt.
+        pause: Experimental; may change or be removed in a future release.
+            True pauses the durable execution after this failed attempt.
+            The default False never pauses. context.step uses this field,
+            including the wait_for_callback submitter. with_retry ignores
+            it. The field applies only when should_retry is True. It does
+            not change how many attempts run.
+            On a pause, the SDK records the normal retry checkpoint, then
+            calls the Lambda PauseDurableExecution API, and ends the
+            invocation with PENDING. The step resumes with its next attempt
+            after an operator calls ResumeDurableExecution.
+            Only an attempt that raised in the current invocation can pause.
+            An AT_MOST_ONCE_PER_RETRY attempt that was interrupted does not
+            pause.
+            The pause applies to the whole durable execution. A step in a map
+            or parallel branch can still pause the execution after the map or
+            parallel operation has finished, for example when its completion
+            config needs only some branches. No checkpointed data is lost.
+            Resume the execution to continue.
+            You must give the function's execution role permission for
+            lambda:PauseDurableExecution on its own durable executions. If
+            the function uses a customer managed AWS KMS key, the role also
+            needs kms:Decrypt on that key. If the pause call fails, the SDK
+            logs a warning with the error and the step retries as usual. A
+            missing permission is one possible cause. A service client
+            without pause support also retries as usual.
+    """
 
     should_retry: bool
     delay: Duration
+    pause: bool = False
 
     @property
     def delay_seconds(self) -> int:
@@ -37,9 +68,15 @@ class RetryDecision:
         return self.delay.to_seconds()
 
     @classmethod
-    def retry(cls, delay: Duration) -> RetryDecision:
-        """Create a retry decision."""
-        return cls(should_retry=True, delay=delay)
+    def retry(cls, delay: Duration, *, pause: bool = False) -> RetryDecision:
+        """Create a retry decision.
+
+        Args:
+            delay: The time to wait before the next attempt.
+            pause: Experimental. True pauses the durable execution after
+                this attempt. See the pause attribute.
+        """
+        return cls(should_retry=True, delay=delay, pause=pause)
 
     @classmethod
     def no_retry(cls) -> RetryDecision:
@@ -49,6 +86,28 @@ class RetryDecision:
 
 @dataclass
 class RetryStrategyConfig:
+    """Configuration for create_retry_strategy.
+
+    Attributes:
+        pause_every: Experimental; may change or be removed in a future
+            release. Pause the durable execution after every Nth failed
+            attempt that the strategy retries. For example, 5 pauses after
+            attempts 5, 10, 15, and so on. None (the default) never pauses.
+            Use a positive integer. The SDK does not validate the value.
+            The strategy returns RetryDecision.retry(delay, pause=True) on
+            these attempts. So the step behaves as the RetryDecision.pause
+            attribute describes. The option does not change how many
+            attempts run, and it does not change the delay or the jitter.
+            When the strategy stops, the step fails as usual and does not
+            pause.
+            The pause applies to the whole durable execution. A step in a map
+            or parallel branch can still pause the execution after the map or
+            parallel operation has finished. You must give the function's
+            execution role permission for lambda:PauseDurableExecution on its
+            own durable executions. If the function uses a customer managed
+            AWS KMS key, the role also needs kms:Decrypt on that key.
+    """
+
     max_attempts: int = 3
     initial_delay: Duration = field(default_factory=lambda: Duration.from_seconds(5))
     max_delay: Duration = field(
@@ -58,6 +117,7 @@ class RetryStrategyConfig:
     jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
     retryable_errors: list[str | re.Pattern] | None = None
     retryable_error_types: list[type[Exception]] | None = None
+    pause_every: int | None = field(default=None, kw_only=True)
 
     @property
     def initial_delay_seconds(self) -> int:
@@ -154,9 +214,12 @@ def create_retry_strategy(
             config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
             config.max_delay_seconds,
         )
+        pause: bool = (
+            config.pause_every is not None and attempts_made % config.pause_every == 0
+        )
         final_delay: int = config.jitter_strategy.finalize_delay(base_delay)
 
-        return RetryDecision.retry(Duration(seconds=final_delay))
+        return RetryDecision.retry(Duration(seconds=final_delay), pause=pause)
 
     return retry_strategy
 
@@ -302,6 +365,8 @@ class WithRetryConfig(Generic[T]):
         child_context_config: Optional ChildConfig forwarded to
             run_in_child_context when wrapping is enabled. Ignored when
             wrap_with_run_in_child_context is False.
+
+    with_retry ignores RetryDecision.pause, so it never pauses the execution.
     """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None

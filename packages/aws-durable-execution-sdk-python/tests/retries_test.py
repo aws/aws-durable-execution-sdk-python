@@ -89,6 +89,20 @@ def test_no_retry_factory():
     decision = RetryDecision.no_retry()
     assert decision.should_retry is False
     assert decision.delay_seconds == 0
+    assert decision.pause is False
+
+
+def test_retry_decision_pause_defaults_to_false():
+    """Existing callers that pass only should_retry and delay get pause=False."""
+    assert RetryDecision(True, Duration.from_seconds(3)).pause is False  # noqa: FBT003
+    assert RetryDecision.retry(Duration.from_seconds(3)).pause is False
+
+
+def test_retry_factory_with_pause():
+    decision = RetryDecision.retry(Duration.from_seconds(30), pause=True)
+    assert decision.should_retry is True
+    assert decision.delay_seconds == 30
+    assert decision.pause is True
 
 
 # endregion
@@ -718,6 +732,96 @@ def test_retry_presets_fixed_stops_at_max_attempts():
 
     assert strategy(Exception("e"), 4).should_retry is True
     assert strategy(Exception("e"), 5).should_retry is False
+
+
+# endregion
+
+
+# region pause_every
+
+
+def _pausing_strategy(jitter: JitterStrategy = JitterStrategy.NONE, pause_every=5):
+    return create_retry_strategy(
+        RetryStrategyConfig(
+            max_attempts=20,
+            initial_delay=Duration.from_seconds(60),
+            backoff_rate=1,
+            jitter_strategy=jitter,
+            pause_every=pause_every,
+        )
+    )
+
+
+def test_pause_every_defaults_to_none_and_never_pauses():
+    assert RetryStrategyConfig().pause_every is None
+    strategy = create_retry_strategy(RetryStrategyConfig(max_attempts=20))
+    assert not any(strategy(Exception("e"), n).pause for n in range(1, 20))
+
+
+@pytest.mark.parametrize(
+    ("attempt", "pause"),
+    [(1, False), (4, False), (5, True), (6, False), (9, False), (10, True), (15, True)],
+)
+def test_pause_every_pauses_on_multiples_only(attempt, pause):
+    decision = _pausing_strategy()(Exception("e"), attempt)
+    assert decision.should_retry is True
+    assert decision.pause is pause
+
+
+def test_pause_every_does_not_pause_when_attempts_are_exhausted():
+    """The strategy stops at max_attempts, so a multiple there does not pause."""
+    strategy = _pausing_strategy(pause_every=20)
+    decision = strategy(Exception("e"), 20)
+    assert decision.should_retry is False
+    assert decision.pause is False
+
+
+def test_pause_every_does_not_pause_non_retryable_errors():
+    strategy = create_retry_strategy(
+        RetryStrategyConfig(retryable_errors=["timeout"], pause_every=1)
+    )
+    decision = strategy(Exception("permission denied"), 1)
+    assert decision.should_retry is False
+    assert decision.pause is False
+
+
+@pytest.mark.parametrize(
+    ("jitter", "delay"),
+    [(JitterStrategy.FULL, 1), (JitterStrategy.HALF, 30), (JitterStrategy.NONE, 60)],
+)
+@patch("random.random", return_value=0.0)
+def test_pause_every_keeps_configured_jitter_on_the_pausing_attempt(
+    _mock_random, jitter, delay
+):
+    """The pausing attempt uses jitter_strategy like every other attempt."""
+    decision = _pausing_strategy(jitter)(Exception("e"), 5)
+    assert decision.pause is True
+    assert decision.delay_seconds == delay
+
+
+@patch("random.random", return_value=0.0)
+def test_pause_every_keeps_jitter_on_other_attempts(_mock_random):
+    strategy = _pausing_strategy(JitterStrategy.FULL)
+    assert strategy(Exception("e"), 4).delay_seconds == 1
+    assert strategy(Exception("e"), 6).delay_seconds == 1
+
+
+def test_pause_every_uses_backoff_delay_on_the_pausing_attempt():
+    """The pausing attempt uses the backoff and the max_delay cap."""
+    strategy = create_retry_strategy(
+        RetryStrategyConfig(
+            max_attempts=10,
+            initial_delay=Duration.from_seconds(10),
+            max_delay=Duration.from_seconds(100),
+            backoff_rate=2,
+            jitter_strategy=JitterStrategy.NONE,
+            pause_every=2,
+        )
+    )
+    # attempt 2: 10 * 2 = 20; attempt 4: 10 * 8 = 80; attempt 6: capped at 100.
+    assert strategy(Exception("e"), 2).delay_seconds == 20
+    assert strategy(Exception("e"), 4).delay_seconds == 80
+    assert strategy(Exception("e"), 6).delay_seconds == 100
 
 
 # endregion

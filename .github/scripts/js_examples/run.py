@@ -72,18 +72,25 @@ EXAMPLES_REL = Path("packages/aws-durable-execution-sdk-js-examples")
 # examples of that ref import it. A ref from after the rename has only
 # compute-worker. So the list names both, and the build skips the one that
 # the checkout does not have. See OPTIONAL_JS_BUILD_WORKSPACES.
+#
+# The list also holds both names of the extensions package, extras and
+# extensions, for the same reason. A ref from before the rename in
+# aws/aws-durable-execution-sdk-js#1266 has only extras. A ref from after it
+# has only extensions.
 JS_BUILD_WORKSPACES = (
     "packages/aws-durable-execution-sdk-js",
     "packages/aws-durable-execution-sdk-js-testing",
     "packages/aws-durable-execution-sdk-js-otel",
     "packages/aws-durable-execution-sdk-js-extras",
+    "packages/aws-durable-execution-sdk-js-extensions",
     "packages/aws-durable-execution-sdk-js-microvm-worker",
     "packages/aws-durable-execution-sdk-js-compute-worker",
     "packages/aws-durable-execution-sdk-js-examples",
 )
 # The build skips a workspace in this set when the JS checkout does not have
 # it. Older JS refs predate extras, and their examples do not need it. A JS
-# ref has at most one of the two worker names, because of the rename above.
+# ref has at most one of the two worker names, and at most one of the two
+# extensions names, because of the renames above.
 # Until aws/aws-durable-execution-sdk-js#1204 merges, JS main still has
 # microvm-worker. So removing microvm-worker now would break the default run
 # against main. After the merge, it stays so that a run with an older js_ref
@@ -91,6 +98,7 @@ JS_BUILD_WORKSPACES = (
 OPTIONAL_JS_BUILD_WORKSPACES = frozenset(
     {
         "packages/aws-durable-execution-sdk-js-extras",
+        "packages/aws-durable-execution-sdk-js-extensions",
         "packages/aws-durable-execution-sdk-js-microvm-worker",
         "packages/aws-durable-execution-sdk-js-compute-worker",
     }

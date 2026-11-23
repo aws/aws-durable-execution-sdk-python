@@ -86,8 +86,8 @@ Do NOT add or modify **conformance tests** without coordinating with the team. C
   Exporter (`aws-durable-execution-sdk-python-telemetry-exporter`), the compute
   worker with the Lambda MicroVM worker in its `microvm` subpackage
   (`aws-durable-execution-sdk-python-compute-worker`), the
-  extras package with custom operations such as `microvm`
-  (`aws-durable-execution-sdk-python-extras`), and examples
+  extensions package with custom operations such as `microvm`
+  (`aws-durable-execution-sdk-python-extensions`), and examples
   (`aws-durable-execution-sdk-python-examples`).
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes, and
   follow its [rules for every change](CONTRIBUTING.md#rules-for-every-change).

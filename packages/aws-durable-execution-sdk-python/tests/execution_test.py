@@ -4617,6 +4617,33 @@ def _plugin_decorated_handler():
     return decorator(test_handler), test_handler
 
 
+@durable_execution
+def _bare_decorator_typed_handler(
+    event: Any, context: DurableContext
+) -> dict[str, Any]:
+    """Verify bare decorator form type checks properly."""
+    return {"result": "success"}
+
+
+@durable_execution(plugins=[])
+def _parameterized_decorator_typed_handler(
+    event: Any, context: DurableContext
+) -> dict[str, Any]:
+    """Verify parameterized decorator form type checks properly."""
+    return {"result": "success"}
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [_bare_decorator_typed_handler, _parameterized_decorator_typed_handler],
+    ids=["bare", "parameterized"],
+)
+def test_typed_decorated_handler_signature(handler) -> None:
+    """Verify decorated handlers have the expected (event, context) signature."""
+    signature = inspect.signature(handler)
+    assert list(signature.parameters) == ["event", "context"]
+
+
 @pytest.mark.parametrize(
     "build_handler",
     [_bare_decorated_handler, _plugin_decorated_handler],
