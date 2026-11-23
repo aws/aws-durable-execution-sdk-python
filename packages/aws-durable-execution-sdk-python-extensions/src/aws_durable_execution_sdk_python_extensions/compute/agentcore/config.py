@@ -126,6 +126,12 @@ class AgentcoreSessionConfig:
 
     The rules of :class:`AgentcoreConfig` for ``agent_runtime_arn``,
     ``qualifier``, ``retry_strategy`` and ``client`` apply here too.
+
+    The session has no timeout of its own. AgentCore ends a session at the
+    agent runtime's ``maxLifetime``: at most 8 hours for a microVM session,
+    and at most 14 days on Instances. A job that still runs then ends with
+    the session. So keep the handler, including its durable waits between
+    jobs, within the runtime's ``maxLifetime``.
     """
 
     agent_runtime_arn: str
@@ -139,15 +145,6 @@ class AgentcoreSessionConfig:
     new microVM without an error, and the memory and files of the old one
     are lost. So set the idle timeout longer than any wait between two jobs
     of the session.
-    """
-
-    timeout: Duration
-    """The lifetime of the session, including durable waits between jobs.
-
-    It must be at least 1 second. AgentCore ends a session at the agent
-    runtime's ``maxLifetime``: at most 8 hours for a microVM session, and at
-    most 14 days on Instances. So keep the timeout within the runtime's
-    ``maxLifetime``.
     """
 
     qualifier: str | None = None
@@ -179,9 +176,9 @@ class AgentcoreInvokeOptions:
     timeout: Duration
     """The longest time to wait for this job's result.
 
-    It must be at least 1 second. The session's ``timeout`` does not shorten
-    it. A job that runs after the session ends can never report. So keep the
-    job within the session's ``timeout``.
+    It must be at least 1 second. A job that still runs at the agent
+    runtime's ``maxLifetime`` ends with the session and can never report.
+    So keep the job within the runtime's ``maxLifetime``.
     """
 
     heartbeat_timeout: Duration | None = None
