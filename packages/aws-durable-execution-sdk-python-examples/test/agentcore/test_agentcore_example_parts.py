@@ -13,9 +13,9 @@ from types import SimpleNamespace
 import pytest
 
 
-# The example imports the extras. The examples package does not depend on
-# the extras. So an environment without them skips this module.
-pytest.importorskip("aws_durable_execution_sdk_python_extras")
+# The example imports the extensions. The examples package does not depend on
+# the extensions. So an environment without them skips this module.
+pytest.importorskip("aws_durable_execution_sdk_python_extensions")
 
 from src.agentcore import agentcore_run_job  # noqa: E402
 

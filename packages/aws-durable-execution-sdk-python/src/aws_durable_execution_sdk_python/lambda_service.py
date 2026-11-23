@@ -3,11 +3,20 @@ from __future__ import annotations
 import builtins
 import copy
 import datetime
+import hashlib
 import logging
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeAlias, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NoReturn,
+    Protocol,
+    TypeAlias,
+    cast,
+    runtime_checkable,
+)
 
 import boto3
 from botocore.config import Config
@@ -1170,6 +1179,44 @@ class StateOutput:
         return cls(operations=operations, next_marker=data.get("NextMarker"))
 
 
+# The PauseDurableExecution API accepts a reason of at most 1024 characters.
+_MAX_PAUSE_REASON = 1024
+
+
+@dataclass(frozen=True)
+class PauseExecutionRequest:
+    """Input for the PauseDurableExecution API, without the execution ARN.
+
+    Experimental; may change or be removed in a future release.
+    """
+
+    client_token: str
+    reason: str
+
+    @classmethod
+    def create_for_step_attempt(
+        cls,
+        identifier: OperationIdentifier,
+        attempt: int,
+        *,
+        durable_execution_arn: str,
+    ) -> PauseExecutionRequest:
+        """Create the pause request for a failed step attempt.
+
+        The client token is a 64-character hash of the durable execution ARN,
+        the operation id and the attempt. So a repeated request for the same
+        attempt of the same execution is idempotent. Each attempt and each
+        execution gets its own token.
+        """
+        client_token: str = hashlib.blake2b(
+            f"pause:{durable_execution_arn}:{identifier.operation_id}:{attempt}".encode(),
+            digest_size=32,
+        ).hexdigest()
+        step_label: str = identifier.name or identifier.operation_id
+        reason: str = f'Step "{step_label}" failed attempt {attempt}'
+        return cls(client_token=client_token, reason=reason[:_MAX_PAUSE_REASON])
+
+
 # endregion model
 
 
@@ -1194,7 +1241,25 @@ class DurableServiceClient(Protocol):
     ) -> StateOutput: ...  # pragma: no cover
 
 
-class LambdaClient(DurableServiceClient):
+@runtime_checkable
+class PausableDurableServiceClient(Protocol):
+    """A Durable Service client that can pause a durable execution.
+
+    Experimental; may change or be removed in a future release.
+
+    This method is optional. The SDK pauses an execution for
+    ``RetryDecision.pause`` only when the client implements it.
+    Otherwise the step retries as usual.
+    """
+
+    def pause_durable_execution(
+        self,
+        durable_execution_arn: str,
+        request: PauseExecutionRequest,
+    ) -> None: ...  # pragma: no cover
+
+
+class LambdaClient(DurableServiceClient, PausableDurableServiceClient):
     """Persist durable operations to the Lambda Durable Function APIs."""
 
     _cached_boto_client: Boto3LambdaClient | None = None
@@ -1289,6 +1354,27 @@ class LambdaClient(DurableServiceClient):
                 "Failed to get execution state.", extra=error.build_logger_extras()
             )
             raise error from None
+
+    def pause_durable_execution(
+        self,
+        durable_execution_arn: str,
+        request: PauseExecutionRequest,
+    ) -> None:
+        """Call the Lambda PauseDurableExecution API.
+
+        Experimental; may change or be removed in a future release.
+
+        The execution timeout pauses too (the API default). Errors from the
+        client propagate unchanged to the caller.
+        """
+        # boto3-stubs for Lambda does not have this operation yet. botocore
+        # 1.44.5 and later has it.
+        client: Any = self.client
+        client.pause_durable_execution(
+            DurableExecutionArn=durable_execution_arn,
+            ClientToken=request.client_token,
+            Reason=request.reason,
+        )
 
 
 # endregion client
