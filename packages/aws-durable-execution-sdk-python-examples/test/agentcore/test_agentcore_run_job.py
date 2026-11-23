@@ -19,10 +19,10 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 
 
-# The examples package does not depend on the extras. So an environment
-# without the extras skips this module instead of failing to import the
+# The examples package does not depend on the extensions. So an environment
+# without the extensions skips this module instead of failing to import the
 # example.
-pytest.importorskip("aws_durable_execution_sdk_python_extras")
+pytest.importorskip("aws_durable_execution_sdk_python_extensions")
 
 from src.agentcore import agentcore_run_job  # noqa: E402
 from test.conftest import deserialize_operation_payload  # noqa: E402
