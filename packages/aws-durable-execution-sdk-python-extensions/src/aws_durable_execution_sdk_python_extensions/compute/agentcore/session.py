@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     ExecutionError,
@@ -30,6 +31,9 @@ from aws_durable_execution_sdk_python_extensions.compute.agentcore.operation imp
 )
 from aws_durable_execution_sdk_python_extensions.compute.agentcore.retry import (
     default_agentcore_retry_strategy,
+)
+from aws_durable_execution_sdk_python_extensions.compute.agentcore.subtypes import (
+    AgentcoreOperationSubType,
 )
 
 
@@ -156,7 +160,11 @@ class AgentcoreSession:
             return _run_job(job_context, scope, session_id, job_input, lambda: None)
 
         try:
-            return context.run_in_child_context(run, name=name)
+            return context.run_in_child_context(
+                run,
+                name=name,
+                config=ChildConfig(sub_type=AgentcoreOperationSubType.SESSION_JOB),
+            )
         except ChildContextError as error:
             raise AgentcoreError.from_child_context_error(name, error) from error
 
@@ -215,6 +223,11 @@ def agentcore_session(
 
     A stop for one of them would end a session that the replay still uses,
     or add an operation that the replay does not expect.
+
+    The child context records the subtype ``AgentcoreSession``. Each
+    job's own child context records the subtype ``AgentcoreSessionJob``.
+    The session's steps and each job's callback and request record the
+    subtypes of :func:`agentcore`.
 
     A failed :meth:`AgentcoreSession.invoke` raises inside the handler. The
     handler can catch the error and send the next job to the same session.
@@ -276,7 +289,11 @@ def agentcore_session(
         return result
 
     try:
-        return context.run_in_child_context(run, name=name)
+        return context.run_in_child_context(
+            run,
+            name=name,
+            config=ChildConfig(sub_type=AgentcoreOperationSubType.SESSION),
+        )
     except ChildContextError as error:
         # The handler is caller code. So only an AgentCore error is restored
         # to its class. Every other error keeps the SDK's ChildContextError.
