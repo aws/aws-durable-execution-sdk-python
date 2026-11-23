@@ -60,6 +60,7 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
                     "python3.12",
                     "python3.13",
                     "python3.14",
+                    "python3.15",
                 ],
                 "Description": "Python runtime to use for all example Lambda functions.",
             },
