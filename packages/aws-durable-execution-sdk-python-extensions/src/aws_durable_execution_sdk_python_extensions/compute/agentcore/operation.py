@@ -570,6 +570,17 @@ def _reported_error_type(callback: Callback) -> str | None:
     return reported
 
 
+def _validate_name(name: str) -> None:
+    """Validate the operation name.
+
+    Raises:
+        ValidationError: When ``name`` is not a non-empty string.
+    """
+    if not isinstance(name, str) or not name:
+        msg = "an AgentCore operation requires a non-empty name"
+        raise ValidationError(msg)
+
+
 def _validate_base(name: str, timeout: Duration) -> int:
     """Validate the name and the timeout, and return the timeout in seconds.
 
@@ -577,9 +588,7 @@ def _validate_base(name: str, timeout: Duration) -> int:
         ValidationError: When ``name`` is empty, or the timeout is less
             than 1 second.
     """
-    if not isinstance(name, str) or not name:
-        msg = "an AgentCore operation requires a non-empty name"
-        raise ValidationError(msg)
+    _validate_name(name)
     timeout_seconds = timeout.to_seconds()
     if timeout_seconds < 1:
         msg = f'AgentCore "{name}": timeout must be at least 1 second'
