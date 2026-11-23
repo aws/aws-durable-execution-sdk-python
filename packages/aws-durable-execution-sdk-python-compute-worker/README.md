@@ -183,7 +183,7 @@ if __name__ == "__main__":
     start_agentcore_worker(handler=review).wait()
 ```
 
-The durable function sends the job with the `agentcore` operation of the [extras](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras#run-a-job-in-agentcore-runtime) package:
+The durable function sends the job with the `agentcore` operation of the [extensions](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extensions#run-a-job-in-agentcore-runtime) package:
 
 ```python
 review = agentcore(context, "review", job_input={"pr": 7}, config=AGENT)
@@ -240,7 +240,7 @@ The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuc
 ## Reference
 
 - [docs/worker.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-compute-worker/docs/worker.md): the request flow, the lifecycle hooks, idle suspend outcomes, the job documents, reporting, heartbeats, logging fields, and best practices.
-- [extras](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras): the `microvm` and `microvm_session` operations that send jobs.
+- [extensions](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extensions): the `microvm` and `microvm_session` operations that send jobs.
 - [Source](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-compute-worker/src/aws_durable_execution_sdk_python_compute_worker/microvm): lower-level building blocks such as `MicrovmWorkerListener` and `CallbackReporter`.
 
 ## License
