@@ -327,7 +327,7 @@ def handler(ticket: dict, context: DurableContext) -> dict:
 ```
 
 - The decision model can run on any server (`endpoint=`), or on SageMaker, Lambda, or AgentCore Runtime (`sagemaker_transport`, `lambda_transport`, `agentcore_transport`). The transports use boto3, which this package already depends on.
-- `llm()` needs `bedrock:InvokeModel` on the model.
+- `llm()` needs `bedrock:InvokeModel` on the model, and on the inference profile when the model ID names one. The default model ID names a global inference profile.
 - A reply that is not usable fails the step with an `AiError` subclass, such as `DeciderInvalidResponseError`. The step uses the core SDK's default retry strategy. Pass `retry_strategy=` to choose which errors to retry.
 
 The [AI operations reference](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extensions/docs/ai.md) covers every host, the errors, and the permissions.
