@@ -297,6 +297,41 @@ Permissions:
 - The function's execution role needs `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on two resources: the agent runtime ARN, and `<runtime ARN>/runtime-endpoint/*`. Without the endpoint resource, both calls are denied on `<runtime ARN>/runtime-endpoint/DEFAULT`. To allow one endpoint only, name the endpoint of `qualifier` instead of `*`.
 - The agent runtime's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the function ARN.
 
+## Ask a model in a step
+
+> The `ai` module is experimental, like `compute.microvm`. Its API can change in any release.
+
+The `ai` module has two factories. Each call is one durable step. A replay returns the checkpointed answer and does not call the model again.
+
+| Factory | Operations | Model |
+|---|---|---|
+| `decider()` | `check` (yes or no), `classify` (one choice), `label` (every choice that applies), `score` (0 to 1) | A decision model that you deploy, such as [Strands Decider](https://github.com/strands-labs/strands-decider) |
+| `llm()` | `ask` (text) | A large language model on Amazon Bedrock |
+
+```python
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_extensions.ai import decider, llm, sagemaker_transport
+
+decide = decider(transport=sagemaker_transport("strands-decider-2b-qwen3-5-v1-2610"))
+model = llm()
+
+
+@durable_execution
+def handler(ticket: dict, context: DurableContext) -> dict:
+    if decide.check(context, "Is the customer asking for a human?", ticket["body"]):
+        return {"escalate": True}
+    team = decide.classify(context, "Which team?", ["returns", "billing"], ticket["body"])
+    summary = model.ask(context, "Summarize in one sentence.", ticket["body"])
+    return {"team": team, "summary": summary}
+```
+
+- The decision model can run on any server (`endpoint=`), or on SageMaker, Lambda, or AgentCore Runtime (`sagemaker_transport`, `lambda_transport`, `agentcore_transport`). The transports use boto3, which this package already depends on.
+- `llm()` needs `bedrock:InvokeModel` on the model, and on the inference profile when the model ID names one. The default model ID names a global inference profile.
+- A reply that is not usable fails the step with an `AiError` subclass, such as `DeciderInvalidResponseError`. The step uses the core SDK's default retry strategy. Pass `retry_strategy=` to choose which errors to retry.
+
+The [AI operations reference](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extensions/docs/ai.md) covers every host, the errors, and the permissions.
+
 ## Reference
 
 - [docs/microvm.md](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/packages/aws-durable-execution-sdk-python-extensions/docs/microvm.md): job delivery, the durable operations each call records, all errors, the retry tiers, the state check, every permission, and best practices.
