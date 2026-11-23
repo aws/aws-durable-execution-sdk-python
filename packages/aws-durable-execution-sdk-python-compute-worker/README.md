@@ -205,7 +205,7 @@ While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent ru
 
 ### State in a session
 
-AgentCore runs every request with the same runtime session ID in the same microVM and the same worker process. So the jobs of one session share state:
+AgentCore runs the requests with the same runtime session ID in the same instance: one microVM with one worker process. So the jobs that run on one instance share state:
 
 - Files that a job writes to disk stay there for the next job.
 - Values that a handler keeps in module-level variables stay in memory for the next job.
@@ -214,17 +214,18 @@ The worker clears no state between jobs. A handler that needs a clean start must
 
 The worker starts each job when its request arrives, also while another job of the session runs. The server is a `ThreadingHTTPServer`, and each job runs in its own thread. So jobs that run at the same time share the process state. Keep shared state safe for parallel jobs, or send the jobs one at a time.
 
-The state lasts until one of these ends the session:
+Two settings of the agent runtime end the instance:
 
 - The idle timeout (`idleRuntimeSessionTimeout`). It counts only time with no running job.
-- The agent runtime's `maxLifetime`.
-- The durable function, when it stops the session.
+- The `maxLifetime`.
 
-The files and memory of the session are then lost. So set the idle timeout longer than any wait between the jobs of one session.
+The next job of the same session ID then gets a new instance. The new instance has no memory or files from earlier jobs. So set the idle timeout longer than any wait between the jobs of one session.
+
+The durable function ends the session when it stops the session.
 
 The handler reads the runtime session ID from `context.session_id` (`AgentcoreJobContext.session_id`).
 
-The [extras README](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extras#run-a-job-in-agentcore-runtime) describes how a durable function sends jobs to AgentCore.
+The [extensions README](https://github.com/aws/aws-durable-execution-sdk-python/tree/main/packages/aws-durable-execution-sdk-python-extensions#run-a-job-in-agentcore-runtime) describes how a durable function sends jobs to AgentCore.
 
 ### Rules for AgentCore jobs
 
