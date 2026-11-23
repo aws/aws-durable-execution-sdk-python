@@ -61,10 +61,11 @@ class AgentcoreConfig:
     timeout: Duration
     """The longest time to wait for the agent to report a result.
 
-    It must be at least 1 second. AgentCore ends a session at the agent
-    runtime's ``maxLifetime``: at most 8 hours for a microVM session, and at
-    most 14 days on Instances. A job that runs longer than its session can
-    never report. Keep the timeout within the runtime's ``maxLifetime``.
+    It must be at least 1 second. AgentCore stops the session's instance at
+    the agent runtime's ``maxLifetime``: at most 8 hours for a microVM
+    session, and at most 14 days on Instances. A job that runs longer than
+    its instance can never report. Keep the timeout within the runtime's
+    ``maxLifetime``.
     """
 
     qualifier: str | None = None
@@ -127,11 +128,12 @@ class AgentcoreSessionConfig:
     The rules of :class:`AgentcoreConfig` for ``agent_runtime_arn``,
     ``qualifier``, ``retry_strategy`` and ``client`` apply here too.
 
-    The session has no timeout of its own. AgentCore ends a session at the
-    agent runtime's ``maxLifetime``: at most 8 hours for a microVM session,
-    and at most 14 days on Instances. A job that still runs then ends with
-    the session. So keep the handler, including its durable waits between
-    jobs, within the runtime's ``maxLifetime``.
+    The session has no timeout of its own. The agent runtime's
+    ``maxLifetime`` ends the current instance of the session, not the
+    session. The next job with the same session ID gets a new instance. The
+    memory and the files outside configured session storage are lost. A job
+    that runs when the instance stops fails at its heartbeat timeout or its
+    job timeout.
     """
 
     agent_runtime_arn: str
@@ -176,9 +178,9 @@ class AgentcoreInvokeOptions:
     timeout: Duration
     """The longest time to wait for this job's result.
 
-    It must be at least 1 second. A job that still runs at the agent
-    runtime's ``maxLifetime`` ends with the session and can never report.
-    So keep the job within the runtime's ``maxLifetime``.
+    It must be at least 1 second. The agent runtime's ``maxLifetime`` ends
+    the session's current instance. A job that runs when the instance stops
+    fails at its heartbeat timeout or at this timeout.
     """
 
     heartbeat_timeout: Duration | None = None
