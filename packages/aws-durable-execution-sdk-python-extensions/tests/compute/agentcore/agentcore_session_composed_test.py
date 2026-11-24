@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import http.client
 import json
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+import pytest
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import (
@@ -103,8 +106,18 @@ def deliver_to(worker: AgentcoreWorker, request: dict[str, Any]) -> bytes:
         connection.close()
 
 
+@pytest.fixture
+def closers() -> Iterator[list[Callable[[], None]]]:
+    """Run each close at teardown in reverse order, even if one fails."""
+    closers: list[Callable[[], None]] = []
+    yield closers
+    with ExitStack() as stack:
+        for close in closers:
+            stack.callback(close)
+
+
 def test_runs_two_jobs_in_one_session_of_one_worker(
-    fake_agentcore_client: Any, tmp_path: Path
+    fake_agentcore_client: Any, tmp_path: Path, closers: list[Callable[[], None]]
 ) -> None:
     def job(job_input: Any, context: AgentcoreJobContext) -> Any:
         # Each session gets its own directory, as in a session's storage.
@@ -128,6 +141,7 @@ def test_runs_two_jobs_in_one_session_of_one_worker(
         return agentcore_session(context, "review", config=config, handler=body)
 
     runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
+    closers.append(runner.close)
     callbacks = RunnerCallbacks(runner)
     worker = start_agentcore_worker(
         handler=job,
@@ -136,16 +150,13 @@ def test_runs_two_jobs_in_one_session_of_one_worker(
         host="127.0.0.1",
         port=0,
     )
+    closers.append(worker.close)
     client = fake_agentcore_client(
         invokes=[lambda request: deliver_to(worker, request)] * 2
     )
-    try:
-        arn = runner.run_async(input="{}", execution_timeout=WAIT)
-        result = runner.wait_for_result(arn, timeout=WAIT)
-        assert worker.idle(WAIT)
-    finally:
-        worker.close()
-        runner.close()
+    arn = runner.run_async(input="{}", execution_timeout=WAIT)
+    result = runner.wait_for_result(arn, timeout=WAIT)
+    assert worker.idle(WAIT)
 
     assert result.status is InvocationStatus.SUCCEEDED, result.error
     [stop] = client.requests("stop_runtime_session")
