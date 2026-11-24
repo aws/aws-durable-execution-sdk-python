@@ -222,6 +222,34 @@ def test_reports_the_result_to_the_callback_of_the_job(start: Any) -> None:
     assert context.region == "us-west-2"
 
 
+def test_logs_the_session_id_and_the_job_count_when_a_job_starts(
+    start: Any, logger: Any
+) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+    deliveries = (("cb-1", "s" * 36), ("cb-1", "s" * 36), ("cb-2", "t" * 36))
+    for callback_id, session_id in deliveries:
+        request(
+            worker,
+            "POST",
+            "/invocations",
+            job_body(callback_id),
+            {"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id},
+        )
+        assert worker.idle(WAIT)
+
+    started = [data for _, message, data in logger.lines if message == "job started"]
+    assert started == [
+        {"callbackId": "cb-1", "runtimeSessionId": "s" * 36, "jobCount": 1},
+        {"callbackId": "cb-2", "runtimeSessionId": "t" * 36, "jobCount": 2},
+    ]
+    # The repeated delivery of cb-1 does not count, and its line has no
+    # jobCount.
+    repeated = [
+        data for _, message, data in logger.lines if message == "ignored a repeated job"
+    ]
+    assert repeated == [{"callbackId": "cb-1"}]
+
+
 def test_reports_the_error_of_a_failed_job(start: Any) -> None:
     def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
         msg = "3 tests failed"
@@ -454,6 +482,30 @@ def test_answers_500_and_forgets_a_job_whose_thread_did_not_start(
     assert worker.idle(WAIT)
     assert runs == [{"n": 2}]
     assert client.names() == ["success"]
+
+
+def test_a_failed_start_does_not_use_a_job_number(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The counter advances only after the thread starts. So the first job
+    # that starts logs jobCount 1, even after a failed start.
+    worker, _, _ = start(lambda job_input, context: None)
+    original = threading.Thread.start
+
+    def fail_job_threads(self: threading.Thread) -> None:
+        if self.name.startswith("agentcore-job-"):
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_job_threads)
+    assert request(worker, "POST", "/invocations", job_body("cb-1"))[0] == 500
+    monkeypatch.setattr(threading.Thread, "start", original)
+
+    assert request(worker, "POST", "/invocations", job_body("cb-2"))[0] == 200
+    assert worker.idle(WAIT)
+    started = [data for _, message, data in logger.lines if message == "job started"]
+    assert [data["jobCount"] for data in started] == [1]
 
 
 def test_a_duplicate_during_a_failing_start_never_gets_200(

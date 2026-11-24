@@ -180,6 +180,10 @@ class _JobRunner:
         # The Unix time, in seconds, of the last change between Healthy and
         # HealthyBusy. The worker's start counts as a change.
         self._last_status_change = _now()
+        # The number of jobs that this process has started, counting the
+        # jobs that still run. A job counts when the worker starts its
+        # thread. Each job's log lines carry it.
+        self._job_count = 0
 
     def ping(self) -> dict[str, object]:
         """The answer to ``GET /ping``.
@@ -236,12 +240,6 @@ class _JobRunner:
         # The thread waits on this event before it runs the handler. So a
         # handler that holds the GIL does not delay the answer.
         answered = threading.Event()
-        thread = threading.Thread(
-            target=self._run_job,
-            args=(job, request.region, session_id, answered),
-            name=f"agentcore-job-{job.callback_id[:16]}",
-            daemon=True,
-        )
         start_error: Exception | None = None
         # The ID check, the registration, and Thread.start() hold one lock. A
         # duplicate request waits for the lock. So it sees the callback ID
@@ -255,8 +253,19 @@ class _JobRunner:
                 if not self._running:
                     self._last_status_change = _now()
                 self._running.add(job.callback_id)
+                # A job counts when the worker starts its thread. So the
+                # counter advances only after Thread.start() returns, and a
+                # failed start does not use a job number.
+                job_count = self._job_count + 1
+                thread = threading.Thread(
+                    target=self._run_job,
+                    args=(job, request.region, session_id, answered, job_count),
+                    name=f"agentcore-job-{job.callback_id[:16]}",
+                    daemon=True,
+                )
                 try:
                     thread.start()
+                    self._job_count = job_count
                 except Exception as error:  # noqa: BLE001
                     # The job never ran. The callback ID is forgotten under
                     # the same lock, so that a waiting duplicate or a later
@@ -302,11 +311,15 @@ class _JobRunner:
         region: str,
         session_id: str | None,
         answered: threading.Event,
+        job_count: int,
     ) -> None:
         answered.wait()
+        # The fields of the worker's own log lines of the job. ``jobCount``
+        # counts this job too, so the first job of a process logs 1.
         fields: dict[str, object] = {
             "callbackId": job.callback_id,
             "runtimeSessionId": session_id,
+            "jobCount": job_count,
         }
         try:
             self._run_job_and_report(job, region, session_id, fields)
@@ -467,6 +480,15 @@ def start_agentcore_worker(
         handler: The job to run for each job request.
         logger: Receives the worker's log lines. Defaults to the standard
             library logger ``aws_durable_execution_sdk_python_compute_worker.agentcore``.
+            The worker's own lines from a job's thread, such as job started,
+            job succeeded and job failed, have the fields ``callbackId``,
+            ``runtimeSessionId`` and ``jobCount``. ``jobCount`` is the number
+            of jobs this worker has started, this job included. The lines
+            "ignored a repeated job" and "could not start the job's thread",
+            and the heartbeat and callback lines, have only ``callbackId``.
+            The handler's ``context.logger`` calls get none of these fields.
+            The handler can add ``callbackId`` and ``runtimeSessionId`` from
+            its context.
         create_client: Creates the Lambda client for the callback calls of
             one job, from the durable function's Region. Defaults to a boto3
             client with the default credential chain, which resolves the
