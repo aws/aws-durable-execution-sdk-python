@@ -128,9 +128,9 @@ def agentcore(
        failure, and timeout alike, and after a failed delivery.
 
     A stop failure does not fail the operation. The job's outcome is already
-    recorded when stop runs, and AgentCore ends an idle session at the agent
-    runtime's idle timeout. So the operation logs an error and returns the
-    job's outcome.
+    recorded when stop runs, and AgentCore ends an idle session's instance
+    at the agent runtime's idle timeout. So the operation logs an error and
+    returns the job's outcome.
 
     The session lives only for this one job. After the idle timeout, the
     same session ID would get a new microVM without its memory and files.
@@ -419,8 +419,8 @@ def _stop_session(
     """Run the stop step, and log a final failure instead of raising.
 
     The job's outcome is already recorded when stop runs. AgentCore ends
-    an idle session at the agent runtime's idle timeout. So a stop
-    failure must not discard the outcome. The step's failure is
+    an idle session's instance at the agent runtime's idle timeout. So a
+    stop failure must not discard the outcome. The step's failure is
     checkpointed. So on replay the step fails again at once, with the
     same outcome.
 
@@ -444,12 +444,12 @@ def _stop_session(
             ),
         )
     except StepError as error:
-        # The session keeps running, and is billed, until AgentCore ends
-        # it. A missing permission fails every stop this way. This log
-        # is the only sign of it. So it is an error, not a warning. The
-        # permission hint is added only for an AccessDenied answer. A
-        # stop that never ran, for example for lack of invocation time,
-        # names its own cause in the error.
+        # The session's instance keeps running, and is billed, until
+        # AgentCore ends it. A missing permission fails every stop this
+        # way. This log is the only sign of it. So it is an error, not a
+        # warning. The permission hint is added only for an AccessDenied
+        # answer. A stop that never ran, for example for lack of
+        # invocation time, names its own cause in the error.
         detail = error.message or error.error_type
         hint = (
             " A missing permission needs "
@@ -461,8 +461,8 @@ def _stop_session(
         )
         child.logger.error(
             f'AgentCore "{name}": StopRuntimeSession failed for '
-            f"session {session_id}. The session keeps running until the "
-            "agent runtime's idle timeout or maximum lifetime ends it."
+            f"session {session_id}. The session's instance keeps running "
+            "until the idle timeout or maxLifetime ends it."
             f"{hint} Error: {detail}",
             extra={"runtimeSessionId": session_id, "error": error.message},
         )
@@ -482,8 +482,8 @@ def _stop_call(
     except ClientError as error:
         # The service answers 404 ResourceNotFoundException for a
         # session that was stopped or never started, measured live. A
-        # session that the idle timeout ended answers 200. Either way,
-        # no session runs.
+        # session whose instance the idle timeout ended answers 200.
+        # Either way, no instance runs.
         if error.response.get("Error", {}).get("Code") != ("ResourceNotFoundException"):
             raise
 
