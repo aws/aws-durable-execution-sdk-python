@@ -613,3 +613,161 @@ def test_a_job_uses_the_session_config_and_the_job_options(
     assert denied["qualifier"] == "DEFAULT"
     assert accepted["qualifier"] == "DEFAULT"
     assert payload(accepted)["heartbeatTimeoutSeconds"] == 60
+
+
+class ReplayedSession:
+    """A session with two jobs and an approval wait between them.
+
+    Each wait ends an invocation, and the next invocation replays the
+    handler. So the handler runs at least once per wait. ``session_ids``
+    holds the session ID that each run of the handler sees.
+    ``at_approval`` holds the calls that the client had received while the
+    execution waited for the approval.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+        self.session_ids: list[str] = []
+        self.at_approval: list[str] = []
+
+    def body(self, session: AgentcoreSession, ctx: DurableContext) -> Any:
+        self.session_ids.append(session.runtime_session_id)
+        build = session.invoke(ctx, "build", job_input={"step": 1}, options=OPTIONS)
+        approval = ctx.create_callback(name="approval").result()
+        return session.invoke(
+            ctx,
+            "test",
+            job_input={"build": build, "approval": approval},
+            options=OPTIONS,
+        )
+
+    def run(self) -> DurableFunctionTestResult:
+        runner = DurableFunctionTestRunner(
+            handler=session_handler(session_config(self.client), self.body),
+            poll_interval=0.05,
+        )
+        try:
+            arn = runner.run_async(input="{}", execution_timeout=WAIT)
+            build = runner.wait_for_callback(arn, name="build.callback", timeout=WAIT)
+            runner.send_callback_success(build, b'{"built": true}')
+            approval = runner.wait_for_callback(arn, name="approval", timeout=WAIT)
+            self.at_approval = [call for call, _ in self.client.calls]
+            runner.send_callback_success(approval, b"yes")
+            test = runner.wait_for_callback(arn, name="test.callback", timeout=WAIT)
+            runner.send_callback_success(test, b'"passed"')
+            return runner.wait_for_result(arn, timeout=WAIT)
+        finally:
+            runner.close()
+
+
+def test_replay_keeps_the_same_session_id(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client()
+    session = ReplayedSession(client)
+
+    result = session.run()
+
+    assert outcome(result) == {"result": "passed"}
+    # The first run, and one replay after each of the three waits.
+    assert len(session.session_ids) >= 4
+    [stop] = client.requests("stop_runtime_session")
+    build, test = client.requests("invoke_agent_runtime")
+    assert set(session.session_ids) == {stop["runtimeSessionId"]}
+    assert build["runtimeSessionId"] == stop["runtimeSessionId"]
+    assert test["runtimeSessionId"] == stop["runtimeSessionId"]
+
+
+def test_replay_sends_no_second_request_for_a_completed_job(
+    fake_agentcore_client: Any,
+) -> None:
+    client = fake_agentcore_client()
+    session = ReplayedSession(client)
+
+    result = session.run()
+
+    assert outcome(result) == {"result": "passed"}
+    assert session.at_approval == ["invoke_agent_runtime"]
+    build, test = client.requests("invoke_agent_runtime")
+    assert payload(build)["input"] == {"step": 1}
+    assert payload(test)["input"] == {"build": {"built": True}, "approval": "yes"}
+
+
+def test_a_wait_between_jobs_records_no_stop(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client()
+    session = ReplayedSession(client)
+
+    result = session.run()
+
+    assert outcome(result) == {"result": "passed"}
+    assert "stop_runtime_session" not in session.at_approval
+    assert [call for call, _ in client.calls] == [
+        "invoke_agent_runtime",
+        "invoke_agent_runtime",
+        "stop_runtime_session",
+    ]
+    assert operation_names(result) == [
+        "review.session",
+        "build",
+        "approval",
+        "test",
+        "review.stop",
+    ]
+
+
+def test_replay_reads_job_results_and_errors_from_checkpoints(
+    fake_agentcore_client: Any,
+) -> None:
+    # Each job's callback wait ends an invocation. So the later runs of the
+    # handler read the outcome of each earlier job from its checkpoint.
+    client = fake_agentcore_client()
+    config = session_config(client)
+    seen: list[tuple[str, Any]] = []
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        try:
+            session.invoke(ctx, "build", job_input={}, options=OPTIONS)
+        except AgentcoreError as error:
+            seen.append(("build", type(error).__name__))
+        seen.append(
+            ("lint", session.invoke(ctx, "lint", job_input={}, options=OPTIONS))
+        )
+        return session.invoke(ctx, "test", job_input={}, options=OPTIONS)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            agentcore_session(context, "review", config=config, handler=body)
+        except AgentcoreError as error:
+            return {"error": type(error).__name__, "message": error.message}
+        return None
+
+    result = run_jobs(
+        handler,
+        {
+            "build.callback": FAILED,
+            "lint.callback": b'{"ok": true}',
+            "test.callback": FAILED,
+        },
+    )
+
+    assert outcome(result) == {
+        "error": "AgentcoreJobFailedError",
+        "message": 'AgentCore "test": the job failed (RuntimeError): 3 tests failed',
+    }
+    builds = [value for job, value in seen if job == "build"]
+    lints = [value for job, value in seen if job == "lint"]
+    # The build error is read in the run after the build, and in the
+    # replays after the lint and the test.
+    assert len(builds) >= 3
+    assert set(builds) == {"AgentcoreJobFailedError"}
+    assert len(lints) >= 2
+    assert all(lint == {"ok": True} for lint in lints)
+    # The failed test job still stops the session, once.
+    assert len(client.requests("invoke_agent_runtime")) == 3
+    assert len(client.requests("stop_runtime_session")) == 1
+    assert operation_names(result) == [
+        "review.session",
+        "build",
+        "lint",
+        "test",
+        "review.stop",
+    ]
