@@ -181,8 +181,8 @@ class _JobRunner:
         # HealthyBusy. The worker's start counts as a change.
         self._last_status_change = _now()
         # The number of jobs that this process has started, counting the
-        # jobs that still run. A job counts when the worker accepts it. Each
-        # job's log lines carry it.
+        # jobs that still run. A job counts when the worker starts its
+        # thread. Each job's log lines carry it.
         self._job_count = 0
 
     def ping(self) -> dict[str, object]:
@@ -253,17 +253,19 @@ class _JobRunner:
                 if not self._running:
                     self._last_status_change = _now()
                 self._running.add(job.callback_id)
-                # A job counts when the worker accepts it. So the count
-                # follows the order in which the worker accepts the jobs.
-                self._job_count += 1
+                # A job counts when the worker starts its thread. So the
+                # counter advances only after Thread.start() returns, and a
+                # failed start does not use a job number.
+                job_count = self._job_count + 1
                 thread = threading.Thread(
                     target=self._run_job,
-                    args=(job, request.region, session_id, answered, self._job_count),
+                    args=(job, request.region, session_id, answered, job_count),
                     name=f"agentcore-job-{job.callback_id[:16]}",
                     daemon=True,
                 )
                 try:
                     thread.start()
+                    self._job_count = job_count
                 except Exception as error:  # noqa: BLE001
                     # The job never ran. The callback ID is forgotten under
                     # the same lock, so that a waiting duplicate or a later

@@ -399,6 +399,30 @@ def test_answers_500_and_forgets_a_job_whose_thread_did_not_start(
     assert client.names() == ["success"]
 
 
+def test_a_failed_start_does_not_use_a_job_number(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The counter advances only after the thread starts. So the first job
+    # that starts logs jobCount 1, even after a failed start.
+    worker, _, _ = start(lambda job_input, context: None)
+    original = threading.Thread.start
+
+    def fail_job_threads(self: threading.Thread) -> None:
+        if self.name.startswith("agentcore-job-"):
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_job_threads)
+    assert request(worker, "POST", "/invocations", job_body("cb-1"))[0] == 500
+    monkeypatch.setattr(threading.Thread, "start", original)
+
+    assert request(worker, "POST", "/invocations", job_body("cb-2"))[0] == 200
+    assert worker.idle(WAIT)
+    started = [data for _, message, data in logger.lines if message == "job started"]
+    assert [data["jobCount"] for data in started] == [1]
+
+
 def test_a_duplicate_during_a_failing_start_never_gets_200(
     start: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
