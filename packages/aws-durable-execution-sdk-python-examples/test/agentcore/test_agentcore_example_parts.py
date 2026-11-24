@@ -17,38 +17,51 @@ import pytest
 # the extensions. So an environment without them skips this module.
 pytest.importorskip("aws_durable_execution_sdk_python_extensions")
 
-from src.agentcore import agentcore_run_job  # noqa: E402
+from src.agentcore import agentcore_run_job, agentcore_session  # noqa: E402
 
 
 PACKAGE_DIR = Path(__file__).resolve().parents[2]
 RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/agent-abc"
+# Each AgentCore example defines its own _require_agent_runtime_arn.
+EXAMPLES = pytest.mark.parametrize(
+    "example", [agentcore_run_job, agentcore_session], ids=["run_job", "session"]
+)
 
 
-def test_returns_the_agent_runtime_arn(monkeypatch):
+@EXAMPLES
+def test_returns_the_agent_runtime_arn(example, monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_ARN", RUNTIME_ARN)
 
-    assert agentcore_run_job._require_agent_runtime_arn() == RUNTIME_ARN
+    assert example._require_agent_runtime_arn() == RUNTIME_ARN
 
 
+@EXAMPLES
 @pytest.mark.parametrize("unset", [True, False], ids=["unset", "empty"])
-def test_names_the_variable_when_it_is_missing(unset, monkeypatch):
+def test_names_the_variable_when_it_is_missing(example, unset, monkeypatch):
     if unset:
         monkeypatch.delenv("AGENT_RUNTIME_ARN", raising=False)
     else:
         monkeypatch.setenv("AGENT_RUNTIME_ARN", "")
 
     with pytest.raises(RuntimeError, match="AGENT_RUNTIME_ARN must be set"):
-        agentcore_run_job._require_agent_runtime_arn()
+        example._require_agent_runtime_arn()
 
 
-def test_the_catalog_entry_needs_an_agent_runtime():
+@pytest.mark.parametrize(
+    ("name", "handler"),
+    [
+        ("AgentCore Run Job", "agentcore_run_job.handler"),
+        ("AgentCore Session", "agentcore_session.handler"),
+    ],
+)
+def test_the_catalog_entry_needs_an_agent_runtime(name, handler):
     examples = json.loads(
         (PACKAGE_DIR / "examples-catalog.json").read_text(encoding="utf-8")
     )["examples"]
-    entry = next(e for e in examples if e["name"] == "AgentCore Run Job")
+    entry = next(e for e in examples if e["name"] == name)
 
     assert entry["usesAgentcore"] is True
-    assert entry["handler"] == "agentcore_run_job.handler"
+    assert entry["handler"] == handler
     assert (PACKAGE_DIR / entry["path"]).is_file()
 
 
