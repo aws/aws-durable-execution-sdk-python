@@ -191,8 +191,8 @@ def agentcore_session(
        returns or raises an error that ends the session.
 
     A stop failure does not fail the operation. AgentCore ends an idle
-    session at the agent runtime's idle timeout. So the operation logs an
-    error and returns the handler's outcome.
+    session's instance at the agent runtime's idle timeout. So the
+    operation logs an error and returns the handler's outcome.
 
     Some errors do not end the session, and the session is not stopped for
     them:

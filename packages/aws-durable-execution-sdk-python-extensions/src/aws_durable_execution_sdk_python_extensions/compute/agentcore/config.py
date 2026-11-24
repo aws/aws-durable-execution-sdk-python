@@ -51,11 +51,11 @@ class AgentcoreConfig:
     The worker answers ``/ping`` with ``HealthyBusy`` while a job runs. A
     live run kept a session through a 180-second job with an idle timeout
     of 60 seconds. So the agent runtime's ``idleRuntimeSessionTimeout``
-    does not end a running job. After the idle timeout, a session with no
-    running job ends. A later request with the same session ID then gets a
-    new microVM without an error, and the memory and files of the old one
-    are lost. This operation sends one job per session, so it does not
-    depend on state across that gap.
+    does not end a running job. After the idle timeout with no running
+    job, the session's instance ends. A later request with the same
+    session ID then gets a new instance (microVM) without an error, and
+    without the memory and files of the old one. This operation sends one
+    job per session, so it does not depend on state across that gap.
     """
 
     timeout: Duration
@@ -142,11 +142,11 @@ class AgentcoreSessionConfig:
     The agent runtime and the two execution roles need the same setup as
     :attr:`AgentcoreConfig.agent_runtime_arn`.
 
-    After the agent runtime's ``idleRuntimeSessionTimeout``, a session with
-    no running job ends. A later job with the same session ID then gets a
-    new microVM without an error, and the memory and files of the old one
-    are lost. So set the idle timeout longer than any wait between two jobs
-    of the session.
+    After the agent runtime's ``idleRuntimeSessionTimeout`` with no
+    running job, the session's instance ends. A later job with the same
+    session ID then gets a new instance (microVM) without an error, and
+    without the memory and files of the old one. So set the idle timeout
+    longer than any wait between two jobs of the session.
     """
 
     qualifier: str | None = None

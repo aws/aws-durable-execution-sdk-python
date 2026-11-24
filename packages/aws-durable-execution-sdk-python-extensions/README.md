@@ -273,7 +273,7 @@ The operation records `review.session`, `review.callback`, `review.request`, and
 
 Each `InvokeAgentRuntime` and `StopRuntimeSession` call must end 10 seconds before the Lambda invocation times out, as the MicroVM calls must. A Lambda timeout during a step attempt records no outcome for the attempt. So a call that has not ended by then fails its attempt with a `TimeoutError`, and the default retry strategy retries it in a later invocation. A step attempt with less than 11 seconds left makes no call. It fails with a message that asks for a longer function timeout.
 
-While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout, a session with no running job ends. A later request with the same session ID then gets a new microVM without an error, and the memory and files of the old one are lost. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
+While a job runs, the worker answers `/ping` with `HealthyBusy`, so the agent runtime's idle timeout (`idleRuntimeSessionTimeout`) does not end the job. After the idle timeout with no running job, the session's instance ends. A later request with the same session ID then gets a new instance (microVM) without an error, and without the memory and files of the old one. The `agentcore` operation sends one job per session, so this loss cannot affect a job.
 
 Delivery is at-least-once, so make the job handler's side effects idempotent:
 

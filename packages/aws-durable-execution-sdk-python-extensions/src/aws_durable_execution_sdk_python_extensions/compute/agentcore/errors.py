@@ -94,8 +94,8 @@ class AgentcoreTimeoutError(AgentcoreError):
     """No result arrived within the job's timeout, or no heartbeat arrived
     within its heartbeat timeout.
 
-    An agent session that crashed, or that AgentCore ended at its idle
-    timeout, ends this way.
+    A job whose instance crashed, or ended at the idle timeout or
+    ``maxLifetime``, ends this way.
     """
 
 
