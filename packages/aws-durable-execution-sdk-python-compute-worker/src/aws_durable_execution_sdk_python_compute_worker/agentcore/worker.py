@@ -312,8 +312,8 @@ class _JobRunner:
         job_count: int,
     ) -> None:
         answered.wait()
-        # The fields of every log line of the job. ``jobCount`` counts this
-        # job too, so the first job of a process logs 1.
+        # The fields of the worker's own log lines of the job. ``jobCount``
+        # counts this job too, so the first job of a process logs 1.
         fields: dict[str, object] = {
             "callbackId": job.callback_id,
             "runtimeSessionId": session_id,
@@ -478,9 +478,15 @@ def start_agentcore_worker(
         handler: The job to run for each job request.
         logger: Receives the worker's log lines. Defaults to the standard
             library logger ``aws_durable_execution_sdk_python_compute_worker.agentcore``.
-            Each log line of a job has the fields ``callbackId``,
+            The worker's own lines from a job's thread, such as job started,
+            job succeeded and job failed, have the fields ``callbackId``,
             ``runtimeSessionId`` and ``jobCount``. ``jobCount`` is the number
-            of jobs this worker has started, this job included.
+            of jobs this worker has started, this job included. The lines
+            "ignored a repeated job" and "could not start the job's thread",
+            and the heartbeat and callback lines, have only ``callbackId``.
+            The handler's ``context.logger`` calls get none of these fields.
+            The handler can add ``callbackId`` and ``runtimeSessionId`` from
+            its context.
         create_client: Creates the Lambda client for the callback calls of
             one job, from the durable function's Region. Defaults to a boto3
             client with the default credential chain, which resolves the
