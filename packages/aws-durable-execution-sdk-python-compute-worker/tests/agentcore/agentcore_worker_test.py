@@ -160,6 +160,42 @@ def test_ping_changes_the_time_when_the_first_job_starts_and_the_last_ends(
     assert client.names() == ["success", "success"]
 
 
+def test_ping_stays_busy_until_the_last_of_two_parallel_jobs_ends(
+    start: Any, clock: list[int]
+) -> None:
+    release = {"cb-1": threading.Event(), "cb-2": threading.Event()}
+    started = threading.Semaphore(0)
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        started.release()
+        assert release[context.callback_id].wait(WAIT)
+        return context.callback_id
+
+    worker, client, _ = start(handler)
+    runner = worker._runner  # noqa: SLF001
+    request(worker, "POST", "/invocations", job_body("cb-1"))
+    request(worker, "POST", "/invocations", job_body("cb-2"))
+    assert started.acquire(timeout=WAIT)
+    assert started.acquire(timeout=WAIT)
+    busy = ping(worker)
+    # The first job ends while the second job runs.
+    release["cb-1"].set()
+    with runner._changed:  # noqa: SLF001
+        assert runner._changed.wait_for(  # noqa: SLF001
+            lambda: "cb-1" in runner._finished,  # noqa: SLF001
+            WAIT,
+        )
+    after_first = ping(worker)
+    release["cb-2"].set()
+    assert worker.idle(WAIT)
+    healthy = ping(worker)
+
+    assert busy == {"status": "HealthyBusy", "time_of_last_update": 101}
+    assert after_first == busy
+    assert healthy == {"status": "Healthy", "time_of_last_update": 102}
+    assert client.names() == ["success", "success"]
+
+
 def test_reports_the_result_to_the_callback_of_the_job(start: Any) -> None:
     seen: list[AgentcoreJobContext] = []
 
