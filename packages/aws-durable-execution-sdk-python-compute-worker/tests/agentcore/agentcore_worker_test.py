@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.client
 import inspect
 import json
+import os
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -238,6 +239,54 @@ def test_runs_a_repeated_callback_id_once(start: Any) -> None:
 
     assert runs == ["cb-1"]
     assert client.names() == ["success"]
+
+
+def test_runs_jobs_in_a_row_that_share_the_files_of_the_process(
+    start: Any, tmp_path: Any
+) -> None:
+    shared = tmp_path / "notes.txt"
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        if job_input["step"] == 1:
+            shared.write_text("job 1")
+        else:
+            shared.write_text(shared.read_text() + f", job {job_input['step']}")
+        return {"pid": os.getpid(), "notes": shared.read_text()}
+
+    worker, client, _ = start(handler)
+    # Each job starts after the previous job has reported its outcome.
+    for step in (1, 2, 3):
+        body = job_body(f"cb-{step}", input={"step": step})
+        assert request(worker, "POST", "/invocations", body) == (
+            200,
+            {"accepted": True},
+        )
+        assert worker.idle(WAIT)
+
+    pid = os.getpid()
+    assert client.calls == [
+        (
+            "success",
+            {
+                "CallbackId": "cb-1",
+                "Result": f'{{"pid":{pid},"notes":"job 1"}}'.encode(),
+            },
+        ),
+        (
+            "success",
+            {
+                "CallbackId": "cb-2",
+                "Result": f'{{"pid":{pid},"notes":"job 1, job 2"}}'.encode(),
+            },
+        ),
+        (
+            "success",
+            {
+                "CallbackId": "cb-3",
+                "Result": f'{{"pid":{pid},"notes":"job 1, job 2, job 3"}}'.encode(),
+            },
+        ),
+    ]
 
 
 def test_sends_heartbeats_for_a_job_with_a_heartbeat_timeout(
