@@ -281,13 +281,77 @@ Delivery is at-least-once, so make the job handler's side effects idempotent:
 2. The worker ignores a second delivery of a job that it already accepted. It remembers the callback IDs only in its process memory. So the worker runs a job once per process.
 3. An answer can be lost after the job finished. The retry can then arrive after the idle timeout replaced the session's process. The new process runs the same job again.
 
+### Run several jobs in one AgentCore session
+
+`agentcore_session` sends several jobs to one AgentCore Runtime session. A later job can use the memory and files that an earlier job left, as long as the session keeps the same instance. AgentCore uses three terms:
+
+- The agent runtime is the agent that you deploy. It sets the idle timeout (`idleRuntimeSessionTimeout`) and `maxLifetime`.
+- The session is the work under one runtime session ID. It stays valid until the durable function stops it or the agent runtime is deleted.
+- The instance is the microVM that runs the session now. The idle timeout and `maxLifetime` end the instance, not the session. The next request with the same session ID gets a new instance, without the memory and files of the old one.
+
+```python
+import os
+from typing import Any
+
+from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_extensions.compute.agentcore import (
+    AgentcoreInvokeOptions,
+    AgentcoreSession,
+    AgentcoreSessionConfig,
+    agentcore_session,
+)
+
+SESSION = AgentcoreSessionConfig(
+    agent_runtime_arn=os.environ["AGENT_RUNTIME_ARN"],
+    qualifier="DEFAULT",
+)
+
+JOB = AgentcoreInvokeOptions(
+    timeout=Duration.from_minutes(30),
+    heartbeat_timeout=Duration.from_minutes(2),
+)
+
+
+def review(session: AgentcoreSession, ctx: DurableContext) -> Any:
+    draft = session.invoke(ctx, "draft", job_input={"pr": 42}, options=JOB)
+    ctx.wait(Duration.from_minutes(5), name="pause")
+    return session.invoke(ctx, "revise", job_input=draft, options=JOB)
+
+
+@durable_execution
+def handler(event: dict, context: DurableContext) -> Any:
+    return agentcore_session(context, "review", config=SESSION, handler=review)
+```
+
+Pass `session.invoke` the context that the session handler receives, or a context nested in it. `session.invoke` raises `TypeError` for the context that `agentcore_session` was called with. The session has no timeout of its own. Each job has its own `timeout` and `heartbeat_timeout`.
+
+Rules for an AgentCore session:
+
+- Set the agent runtime's idle timeout longer than any wait between two jobs. The `pause` wait above runs with no job, so the idle timeout counts during it.
+- The idle timeout and `maxLifetime` end the instance, not the session. The next job gets a new instance, without the memory and files of the old one.
+- A job that runs when the instance stops fails at its heartbeat timeout or its job timeout, with `AgentcoreTimeoutError`.
+- Parallel `invoke` calls on one session run in the same instance. Your job handlers must allow that.
+- The session stops when its handler returns or raises. A wait in the handler does not stop the session.
+- A failed `invoke` raises in the handler and does not stop the session. The handler can catch the error and send the next job.
+
+The operation records these operations, each with a subtype from `AgentcoreOperationSubType`:
+
+- `review`, the child context of the session, with the subtype `AgentcoreSession`.
+- `review.session`, the step that generates and checkpoints the runtime session ID, with the subtype `AgentcoreSessionId`.
+- For each job, such as `draft`: a child context `draft` with the subtype `AgentcoreSessionJob`, a callback `draft.callback` with the subtype `AgentcoreCallback`, and a step `draft.request` with the subtype `AgentcoreRequest`.
+- `review.stop`, the step that calls `StopRuntimeSession` after the handler, with the subtype `AgentcoreStop`. A failed stop is logged, and does not hide the handler's result or error.
+
+A failed job raises `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, or `AgentcoreTimeoutError`, as from `agentcore`. An AgentCore error that leaves the handler reaches the caller with its own class. Any other error from the handler reaches the caller as `ChildContextError`.
+
 ### Rules for AgentCore jobs
 
 1. Set `heartbeat_timeout`. It ends the job when the worker crashes or stops reporting. The first heartbeat period starts when the callback is created, before the job is delivered. So it must cover the request step with its retries and a cold session start, which took 1.4 to 3.1 seconds in a live test. 30 seconds or more is a safe value.
 2. `timeout` must fit the agent runtime's configured `maxLifetime`.
 3. A job can run more than once when AgentCore replaces the worker process. Make handler side effects safe to repeat.
 4. Your logger must not throw.
-5. The runtime's idle timeout applies only while no job is running. One `agentcore()` call runs one job, so it does not lose state between jobs.
+5. The runtime's idle timeout applies only while no job is running. One `agentcore()` call runs one job, so it does not lose state between jobs. To run several jobs in one session, use `agentcore_session`.
 6. Give the durable function a timeout of at least 11 seconds. Each AgentCore call needs the 10-second invocation reserve and 1 second for the call.
 
 Every AgentCore failure is an `AgentcoreError`, and every `AgentcoreError` is a `ComputeError`. The subclasses are `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, and `AgentcoreTimeoutError`.
