@@ -11,8 +11,10 @@ import boto3
 import pytest
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import RetryDecision
+from botocore.config import Config
 from botocore.stub import Stubber
 
+from aws_durable_execution_sdk_python_extensions.__about__ import __version__
 from aws_durable_execution_sdk_python_extensions.ai import (
     DEFAULT_LLM_MODEL_ID,
     BedrockCallOptions,
@@ -245,3 +247,54 @@ def test_a_replay_returns_the_checkpointed_reply_without_calling_the_model(
 
     assert value == {"result": "A short summary."}
     assert len(client.calls) == 1
+
+
+def test_default_client_sets_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    original: Any = boto3.client
+    created: list[Any] = []
+    stubbers: list[Stubber] = []
+
+    def spy_client(service: str, **kwargs: Any) -> Any:
+        client = original(service, **kwargs)
+        stubber = Stubber(client)
+        stubber.add_response("converse", reply("ok"))
+        stubber.activate()
+        created.append(client)
+        stubbers.append(stubber)
+        return client
+
+    monkeypatch.setattr(boto3, "client", spy_client)
+    model = llm()
+    try:
+        assert model._converse(model._config, "Question: Q?") == "ok"
+        [client] = created
+        assert client.meta.config.user_agent_extra == (
+            f"aws-durable-execution-sdk-python-extensions/{__version__} md/ai"
+        )
+    finally:
+        for stubber in stubbers:
+            stubber.deactivate()
+        for client in created:
+            client.close()
+
+
+def test_passed_client_keeps_its_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_boto_client(*args: Any, **kwargs: Any) -> Any:
+        msg = "boto3.client must not be called when client is passed"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(boto3, "client", fail_boto_client)
+    custom: Any = boto3.session.Session().client(
+        "bedrock-runtime",
+        region_name="us-east-1",
+        config=Config(user_agent_extra="custom-agent/1.0"),
+    )
+    model = llm(BedrockConfig(client=custom))
+    try:
+        with Stubber(custom) as stubber:
+            stubber.add_response("converse", reply("ok"))
+            assert model._converse(model._config, "Question: Q?") == "ok"
+        assert custom.meta.config.user_agent_extra == "custom-agent/1.0"
+    finally:
+        custom.close()

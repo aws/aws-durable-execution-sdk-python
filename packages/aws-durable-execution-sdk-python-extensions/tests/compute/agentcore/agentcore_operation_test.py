@@ -32,10 +32,12 @@ from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
 )
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from botocore.stub import ANY, Stubber
 
+from aws_durable_execution_sdk_python_extensions.__about__ import __version__
 from aws_durable_execution_sdk_python_extensions.compute.agentcore import (
     MAX_JOB_INPUT_BYTES,
     AgentcoreConfig,
@@ -497,6 +499,31 @@ def test_default_clients_creates_one_client_per_region() -> None:
     assert clients.get("us-west-2") is first
     assert first.meta.region_name == "us-west-2"
     assert clients.get("eu-west-1") is not first
+
+
+def test_default_client_sets_user_agent() -> None:
+    clients = operation._DefaultClients()  # noqa: SLF001
+    client: Any = clients.get("us-west-2")
+    try:
+        assert client.meta.config.user_agent_extra == (
+            f"aws-durable-execution-sdk-python-extensions/{__version__} md/agentcore"
+        )
+    finally:
+        client.close()
+
+
+def test_passed_client_keeps_its_user_agent() -> None:
+    custom: Any = boto3.client(
+        "bedrock-agentcore",
+        region_name="us-west-2",
+        config=Config(user_agent_extra="custom-agent/1.0"),
+    )
+    try:
+        assert operation._client(config_with(custom)) is custom  # noqa: SLF001
+        client_config: Any = custom.meta.config
+        assert client_config.user_agent_extra == "custom-agent/1.0"
+    finally:
+        custom.close()
 
 
 @pytest.mark.parametrize(

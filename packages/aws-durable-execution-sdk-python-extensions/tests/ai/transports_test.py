@@ -12,9 +12,11 @@ from typing import Any
 import boto3
 import pytest
 from aws_durable_execution_sdk_python.retries import RetryDecision
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
+from aws_durable_execution_sdk_python_extensions.__about__ import __version__
 from aws_durable_execution_sdk_python_extensions.ai import (
     DeciderError,
     DeciderInvalidResponseError,
@@ -359,7 +361,7 @@ def test_creates_the_default_client_on_first_use(
     made: list[str] = []
     client = FakeClient("invoke_endpoint", {"Body": stream(json.dumps(REPLY))})
 
-    def fake_client(service: str) -> Any:
+    def fake_client(service: str, *, config: Any = None) -> Any:
         made.append(service)
         return client
 
@@ -370,3 +372,118 @@ def test_creates_the_default_client_on_first_use(
     send(REQUEST)
 
     assert made == ["sagemaker-runtime"]
+
+
+@pytest.mark.parametrize(
+    ("make_transport", "operation_name", "response"),
+    [
+        (
+            lambda client=None: agentcore_transport(ARN, client=client),
+            "invoke_agent_runtime",
+            {
+                "contentType": "application/json",
+                "statusCode": 200,
+                "response": stream(json.dumps(REPLY)),
+            },
+        ),
+        (
+            lambda client=None: sagemaker_transport(ENDPOINT, client=client),
+            "invoke_endpoint",
+            {"Body": stream(json.dumps(REPLY))},
+        ),
+        (
+            lambda client=None: lambda_transport(FUNCTION, client=client),
+            "invoke",
+            {"StatusCode": 200, "Payload": stream(json.dumps(REPLY))},
+        ),
+    ],
+    ids=["agentcore", "sagemaker", "lambda"],
+)
+def test_default_transport_client_sets_user_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    make_transport: Any,
+    operation_name: str,
+    response: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    original: Any = boto3.client
+    created: list[Any] = []
+    stubbers: list[Stubber] = []
+
+    def spy_client(service: str, **kwargs: Any) -> Any:
+        client = original(service, **kwargs)
+        stubber = Stubber(client)
+        stubber.add_response(operation_name, response)
+        stubber.activate()
+        created.append(client)
+        stubbers.append(stubber)
+        return client
+
+    monkeypatch.setattr(boto3, "client", spy_client)
+    send = make_transport()
+    try:
+        assert send(REQUEST) == REPLY
+        [client] = created
+        assert client.meta.config.user_agent_extra == (
+            f"aws-durable-execution-sdk-python-extensions/{__version__} md/ai"
+        )
+    finally:
+        for stubber in stubbers:
+            stubber.deactivate()
+        for client in created:
+            client.close()
+
+
+@pytest.mark.parametrize(
+    ("service", "make_transport", "operation_name", "response"),
+    [
+        (
+            "bedrock-agentcore",
+            lambda client: agentcore_transport(ARN, client=client),
+            "invoke_agent_runtime",
+            {
+                "contentType": "application/json",
+                "statusCode": 200,
+                "response": stream(json.dumps(REPLY)),
+            },
+        ),
+        (
+            "sagemaker-runtime",
+            lambda client: sagemaker_transport(ENDPOINT, client=client),
+            "invoke_endpoint",
+            {"Body": stream(json.dumps(REPLY))},
+        ),
+        (
+            "lambda",
+            lambda client: lambda_transport(FUNCTION, client=client),
+            "invoke",
+            {"StatusCode": 200, "Payload": stream(json.dumps(REPLY))},
+        ),
+    ],
+    ids=["agentcore", "sagemaker", "lambda"],
+)
+def test_passed_transport_client_keeps_its_user_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    service: str,
+    make_transport: Any,
+    operation_name: str,
+    response: dict[str, Any],
+) -> None:
+    def fail_boto_client(*args: Any, **kwargs: Any) -> Any:
+        msg = "boto3.client must not be called when client is passed"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(boto3, "client", fail_boto_client)
+    session: Any = boto3.session.Session()
+    custom: Any = session.client(
+        service,
+        region_name="us-east-1",
+        config=Config(user_agent_extra="custom-agent/1.0"),
+    )
+    try:
+        with Stubber(custom) as stubber:
+            stubber.add_response(operation_name, response)
+            assert make_transport(custom)(REQUEST) == REPLY
+        assert custom.meta.config.user_agent_extra == "custom-agent/1.0"
+    finally:
+        custom.close()

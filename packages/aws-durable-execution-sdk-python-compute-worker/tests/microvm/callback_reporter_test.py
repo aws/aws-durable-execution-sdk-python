@@ -12,10 +12,13 @@ import threading
 import time
 from typing import Any
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from botocore.stub import Stubber
 
+from aws_durable_execution_sdk_python_compute_worker.__about__ import __version__
 from aws_durable_execution_sdk_python_compute_worker.microvm import callback_reporter
 from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     CLOSED_CALLBACK_CODE,
@@ -475,6 +478,31 @@ def test_requests_match_the_lambda_api_model():
         reporter.heartbeat()
         stub.assert_no_pending_responses()
     client.close()
+
+
+def test_default_client_sets_user_agent() -> None:
+    client: Any = callback_reporter._create_client("us-east-1")  # noqa: SLF001
+    try:
+        assert client.meta.config.user_agent_extra == (
+            f"aws-durable-execution-sdk-python-compute-worker/{__version__} md/microvm"
+        )
+    finally:
+        client.close()
+
+
+def test_passed_client_keeps_its_user_agent() -> None:
+    custom: Any = boto3.session.Session().client(
+        "lambda",
+        region_name="us-east-1",
+        config=Config(user_agent_extra="custom-agent/1.0"),
+    )
+    try:
+        reporter = CallbackReporter("cb-1", custom)
+        assert reporter._client is custom  # noqa: SLF001
+        client_config: Any = custom.meta.config
+        assert client_config.user_agent_extra == "custom-agent/1.0"
+    finally:
+        custom.close()
 
 
 # endregion client
