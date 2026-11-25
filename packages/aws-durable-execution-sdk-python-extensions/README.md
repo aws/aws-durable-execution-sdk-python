@@ -343,7 +343,7 @@ The operation records these operations, each with a subtype from `AgentcoreOpera
 - For each job, such as `draft`: a child context `draft` with the subtype `AgentcoreSessionJob`, a callback `draft.callback` with the subtype `AgentcoreCallback`, and a step `draft.request` with the subtype `AgentcoreRequest`.
 - `review.stop`, the step that calls `StopRuntimeSession` after the handler, with the subtype `AgentcoreStop`. A failed stop is logged, and does not hide the handler's result or error.
 
-A failed job raises `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, or `AgentcoreTimeoutError`, as from `agentcore`. An AgentCore error that leaves the handler reaches the caller with its own class. Any other error from the handler reaches the caller as `ChildContextError`.
+A failed job raises `AgentcoreDeliveryError`, `AgentcoreJobFailedError`, or `AgentcoreTimeoutError`, as from `agentcore`. An AgentCore error that the handler raises itself reaches the caller with its own class. An AgentCore error that crosses a child context that the handler created reaches the caller as `ChildContextError`, with its message but not its class. Any other error from the handler reaches the caller as `ChildContextError`.
 
 ### Rules for AgentCore jobs
 
