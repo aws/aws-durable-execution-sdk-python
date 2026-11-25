@@ -16,7 +16,9 @@ from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import StepError
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
+from botocore.config import Config
 
+from aws_durable_execution_sdk_python_extensions.__about__ import __version__
 from aws_durable_execution_sdk_python_extensions.ai.errors import (
     AiError,
     DeciderInvalidResponseError,
@@ -130,5 +132,13 @@ class LazyClient:
     def get(self) -> Any:
         with self._lock:
             if self._client is None:
-                self._client = boto3.client(self._service)  # type: ignore[call-overload]
+                self._client = boto3.client(  # type: ignore[call-overload]
+                    self._service,
+                    config=Config(
+                        user_agent_extra=(
+                            f"aws-durable-execution-sdk-python-extensions/{__version__} "
+                            "md/ai"
+                        )
+                    ),
+                )
             return self._client

@@ -454,6 +454,7 @@ The MicroVM operations handle the network, the service, and the worker lifecycle
 ### Custom clients and tests
 
 1. A `client` that you pass must behave as a boto3 `lambda-microvms` client.
+   - It is used as it is and keeps its own user agent.
    - It returns outputs in the boto3 shape, with `ResponseMetadata`. A `RunMicrovm` output without `microvmId`, or without `endpoint` for HTTP delivery, fails the launch with `MicrovmLaunchError`. An output without `ResponseMetadata.RequestId` gives error messages without a request ID.
    - It raises botocore `ClientError` with a `response` that holds `Error.Code` and `ResponseMetadata.HTTPStatusCode`. The default strategy reads both. It fails the step at once for an error of any other class, unless the error is a timeout or a connection failure.
    - It sets connect and read timeouts, such as the 5 and 30 seconds of the default client. botocore's own defaults are 60 seconds each. A `RunMicrovm` or `TerminateMicrovm` call that runs past the function timeout records no outcome for its step attempt. So the step runs again. A `CreateMicrovmAuthToken` or `GetMicrovm` call that reaches the invocation reserve fails its attempt. Its thread keeps running until the call returns. So the call can still reach the service after the step stopped waiting for it.

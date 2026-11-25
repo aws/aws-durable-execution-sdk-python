@@ -82,7 +82,8 @@ class BedrockConfig:
     the function's Region and account."""
     client: Any = None
     """A ``bedrock-runtime`` boto3 client. The default client uses the
-    function's Region and credentials."""
+    function's Region and credentials. A client that you pass is used as it
+    is and keeps its own user agent."""
     temperature: float | None = None
     """The sampling temperature. It is sent only when set, because some newer
     models, such as Claude Haiku 5.5, reject it."""

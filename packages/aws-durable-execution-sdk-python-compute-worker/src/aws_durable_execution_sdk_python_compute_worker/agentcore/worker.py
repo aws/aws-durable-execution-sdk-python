@@ -492,7 +492,8 @@ def start_agentcore_worker(
         create_client: Creates the Lambda client for the callback calls of
             one job, from the durable function's Region. Defaults to a boto3
             client with the default credential chain, which resolves the
-            agent runtime's execution role.
+            agent runtime's execution role. A client that this function
+            returns is used as it is and keeps its own user agent.
         heartbeat_interval_seconds: An explicit heartbeat interval. It is cut
             to a third of the job's heartbeat timeout.
         host: The address to listen on. ``None`` picks ``0.0.0.0``, which

@@ -114,7 +114,8 @@ class AgentcoreConfig:
     Defaults to one client per Region, created on first use. The Region comes
     from the agent runtime ARN. The default client has a 5-second connect
     timeout, a 60-second read timeout, and 3 attempts in botocore's standard
-    retry mode. A client that you pass keeps its own settings.
+    retry mode. A client that you pass is used as it is and keeps its own
+    settings, including its user agent.
     """
 
 
@@ -167,7 +168,8 @@ class AgentcoreSessionConfig:
     """The boto3 ``bedrock-agentcore`` client.
 
     Defaults to one client per Region, created on first use, as in
-    :attr:`AgentcoreConfig.client`.
+    :attr:`AgentcoreConfig.client`. A client that you pass is used as it is
+    and keeps its own settings, including its user agent.
     """
 
 

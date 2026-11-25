@@ -183,9 +183,10 @@ class MicrovmBaseConfig:
     Defaults to one client per Region, created on first use. The Region comes
     from the durable execution ARN. The default client has a 5-second connect
     timeout, a 30-second read timeout, and 3 attempts in botocore's standard
-    retry mode. A client that you pass keeps its own settings. Keep each call
-    shorter than the function's timeout, because a call that runs past it
-    records no outcome for the step attempt.
+    retry mode. A client that you pass is used as it is and keeps its own
+    settings, including its user agent. Keep each call shorter than the
+    function's timeout, because a call that runs past it records no outcome
+    for the step attempt.
     """
 
 

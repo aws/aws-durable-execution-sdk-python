@@ -17,7 +17,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
-
+from aws_durable_execution_sdk_python_compute_worker.__about__ import __version__
 from aws_durable_execution_sdk_python_compute_worker.microvm.logger import (
     MicrovmWorkerLogger,
     safe_get,
@@ -284,6 +284,10 @@ def _create_client(region: str) -> LambdaClient:
             read_timeout=COMPLETION_CALL_TIMEOUT_SECONDS,
             retries={"mode": "standard", "max_attempts": 3},
             tcp_keepalive=True,
+            user_agent_extra=(
+                "aws-durable-execution-sdk-python-compute-worker/"
+                f"{__version__} md/microvm"
+            ),
         ),
     )
 

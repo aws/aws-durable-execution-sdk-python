@@ -98,7 +98,8 @@ def agentcore_transport(
         qualifier: The runtime endpoint name. The default is the runtime's
             default endpoint.
         client: A ``bedrock-agentcore`` boto3 client. The default client uses
-            the function's Region and credentials.
+            the function's Region and credentials. A client that you pass is
+            used as it is and keeps its own user agent.
     """
     lazy = LazyClient("bedrock-agentcore", client)
 
@@ -158,7 +159,8 @@ def sagemaker_transport(endpoint_name: str, *, client: Any = None) -> DeciderTra
         endpoint_name: The name of the SageMaker endpoint that serves the
             model.
         client: A ``sagemaker-runtime`` boto3 client. The default client uses
-            the function's Region and credentials.
+            the function's Region and credentials. A client that you pass is
+            used as it is and keeps its own user agent.
     """
     lazy = LazyClient("sagemaker-runtime", client)
 
@@ -235,7 +237,8 @@ def lambda_transport(
         qualifier: The version or alias to invoke, such as ``live``. The
             default is ``$LATEST``.
         client: A ``lambda`` boto3 client. The default client uses the
-            function's Region and credentials.
+            function's Region and credentials. A client that you pass is
+            used as it is and keeps its own user agent.
     """
     lazy = LazyClient("lambda", client)
 

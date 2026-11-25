@@ -34,6 +34,7 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from botocore.exceptions import ClientError
 
+from aws_durable_execution_sdk_python_extensions.__about__ import __version__
 from aws_durable_execution_sdk_python_extensions.compute.microvm.aws_errors import (
     add_request_id,
     decide_on_original_error,
@@ -1108,6 +1109,10 @@ class _DefaultClients:
                             # max_attempts would count only the retries.
                             "total_max_attempts": _CLIENT_ATTEMPTS,
                         },
+                        user_agent_extra=(
+                            f"aws-durable-execution-sdk-python-extensions/{__version__} "
+                            "md/microvm"
+                        ),
                     ),
                 )
                 self._clients[region] = client
