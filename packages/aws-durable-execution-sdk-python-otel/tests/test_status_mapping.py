@@ -511,6 +511,53 @@ def test_exception_stacktrace_requires_nonempty_joined_stack(
     assert span.start_time <= span.events[0].timestamp <= span.end_time
 
 
+@pytest.mark.parametrize("event_kind", ["operation", "attempt"])
+@pytest.mark.parametrize(
+    ("stack_trace", "expected_stack"),
+    [
+        (
+            ["first frame", None, "last frame"],
+            {"exception.stacktrace": "first frame\nlast frame"},
+        ),
+        ([None, 42], {}),
+    ],
+)
+def test_malformed_stack_does_not_interrupt_span_cleanup(
+    instrumented_view: InstrumentedView,
+    event_kind: str,
+    stack_trace: list[object],
+    expected_stack: dict[str, str],
+) -> None:
+    plugin, exporter = instrumented_view
+    error = ErrorObject.from_dict(
+        {
+            "ErrorType": "RuntimeError",
+            "ErrorMessage": "boom",
+            "StackTrace": stack_trace,
+        }
+    )
+    _start_invocation(plugin)
+    enclosing_context = context.get_current()
+    try:
+        if event_kind == "operation":
+            plugin.on_operation_end(_operation_end_info(error))
+            span_name = "wait"
+        else:
+            _run_failed_step_attempt(plugin, error)
+            span_name = "step-1 attempt 1"
+
+        assert context.get_current() == enclosing_context
+        span = next(s for s in exporter.get_finished_spans() if s.name == span_name)
+        assert span.status.status_code is StatusCode.ERROR
+        assert dict(_exception_attributes(span)) == {
+            "exception.type": "RuntimeError",
+            "exception.message": "boom",
+            **expected_stack,
+        }
+    finally:
+        _end_invocation(plugin)
+
+
 @pytest.mark.parametrize(("message", "error_type", "expected"), PARTIAL_CASES)
 def test_failed_operation_omits_absent_error_fields(
     instrumented_view: InstrumentedView,
