@@ -327,6 +327,15 @@ real Lambda ARNs) and an error `name` of normal length (a type name such as
 message of 8,192 control characters, each escaped as `\u00XX`) fits any limit
 of 128 KB (131,072 bytes) or more.
 
+Truncation finds how many results and how many operations to drop with a
+binary search. So it renders the record about `2 * log2(n)` times for `n`
+operations, with any `render`. The search assumes that each drop makes the
+rendered record smaller. The `operationsByName` map can break this: when one of
+two operations with the same name is dropped, the result and error of the other
+one appear. In such a record, truncation can drop a few more old operations than
+the fewest that fit. The emitted record is always measured, so it never goes
+over the limit.
+
 Names are each language's own and differ across SDKs. For example, a step that
 throws `PaymentError` can be reported as `StepError` in JS,
 `aws_durable_execution_sdk_python.exceptions.StepError` or `PaymentError` in
