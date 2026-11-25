@@ -870,6 +870,18 @@
         "ExecutionTimeout": 900
       },
       "path": "./src/agentcore/agentcore_run_job.py"
+    },
+    {
+      "name": "AgentCore Session",
+      "description": "Runs two jobs in one AgentCore Runtime session, with a durable wait between them",
+      "handler": "agentcore_session.handler",
+      "integration": true,
+      "usesAgentcore": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 900
+      },
+      "path": "./src/agentcore/agentcore_session.py"
     }
   ]
 }
