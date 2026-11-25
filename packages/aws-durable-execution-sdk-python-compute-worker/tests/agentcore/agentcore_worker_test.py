@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.client
 import inspect
 import json
+import os
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -159,6 +160,42 @@ def test_ping_changes_the_time_when_the_first_job_starts_and_the_last_ends(
     assert client.names() == ["success", "success"]
 
 
+def test_ping_stays_busy_until_the_last_of_two_parallel_jobs_ends(
+    start: Any, clock: list[int]
+) -> None:
+    release = {"cb-1": threading.Event(), "cb-2": threading.Event()}
+    started = threading.Semaphore(0)
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        started.release()
+        assert release[context.callback_id].wait(WAIT)
+        return context.callback_id
+
+    worker, client, _ = start(handler)
+    runner = worker._runner  # noqa: SLF001
+    request(worker, "POST", "/invocations", job_body("cb-1"))
+    request(worker, "POST", "/invocations", job_body("cb-2"))
+    assert started.acquire(timeout=WAIT)
+    assert started.acquire(timeout=WAIT)
+    busy = ping(worker)
+    # The first job ends while the second job runs.
+    release["cb-1"].set()
+    with runner._changed:  # noqa: SLF001
+        assert runner._changed.wait_for(  # noqa: SLF001
+            lambda: "cb-1" in runner._finished,  # noqa: SLF001
+            WAIT,
+        )
+    after_first = ping(worker)
+    release["cb-2"].set()
+    assert worker.idle(WAIT)
+    healthy = ping(worker)
+
+    assert busy == {"status": "HealthyBusy", "time_of_last_update": 101}
+    assert after_first == busy
+    assert healthy == {"status": "Healthy", "time_of_last_update": 102}
+    assert client.names() == ["success", "success"]
+
+
 def test_reports_the_result_to_the_callback_of_the_job(start: Any) -> None:
     seen: list[AgentcoreJobContext] = []
 
@@ -183,6 +220,34 @@ def test_reports_the_result_to_the_callback_of_the_job(start: Any) -> None:
     assert context.callback_id == "cb-1"
     assert context.session_id == "s" * 36
     assert context.region == "us-west-2"
+
+
+def test_logs_the_session_id_and_the_job_count_when_a_job_starts(
+    start: Any, logger: Any
+) -> None:
+    worker, _, _ = start(lambda job_input, context: None)
+    deliveries = (("cb-1", "s" * 36), ("cb-1", "s" * 36), ("cb-2", "t" * 36))
+    for callback_id, session_id in deliveries:
+        request(
+            worker,
+            "POST",
+            "/invocations",
+            job_body(callback_id),
+            {"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id},
+        )
+        assert worker.idle(WAIT)
+
+    started = [data for _, message, data in logger.lines if message == "job started"]
+    assert started == [
+        {"callbackId": "cb-1", "runtimeSessionId": "s" * 36, "jobCount": 1},
+        {"callbackId": "cb-2", "runtimeSessionId": "t" * 36, "jobCount": 2},
+    ]
+    # The repeated delivery of cb-1 does not count, and its line has no
+    # jobCount.
+    repeated = [
+        data for _, message, data in logger.lines if message == "ignored a repeated job"
+    ]
+    assert repeated == [{"callbackId": "cb-1"}]
 
 
 def test_reports_the_error_of_a_failed_job(start: Any) -> None:
@@ -238,6 +303,54 @@ def test_runs_a_repeated_callback_id_once(start: Any) -> None:
 
     assert runs == ["cb-1"]
     assert client.names() == ["success"]
+
+
+def test_runs_jobs_in_a_row_that_share_the_files_of_the_process(
+    start: Any, tmp_path: Any
+) -> None:
+    shared = tmp_path / "notes.txt"
+
+    def handler(job_input: Any, context: AgentcoreJobContext) -> Any:
+        if job_input["step"] == 1:
+            shared.write_text("job 1")
+        else:
+            shared.write_text(shared.read_text() + f", job {job_input['step']}")
+        return {"pid": os.getpid(), "notes": shared.read_text()}
+
+    worker, client, _ = start(handler)
+    # Each job starts after the previous job has reported its outcome.
+    for step in (1, 2, 3):
+        body = job_body(f"cb-{step}", input={"step": step})
+        assert request(worker, "POST", "/invocations", body) == (
+            200,
+            {"accepted": True},
+        )
+        assert worker.idle(WAIT)
+
+    pid = os.getpid()
+    assert client.calls == [
+        (
+            "success",
+            {
+                "CallbackId": "cb-1",
+                "Result": f'{{"pid":{pid},"notes":"job 1"}}'.encode(),
+            },
+        ),
+        (
+            "success",
+            {
+                "CallbackId": "cb-2",
+                "Result": f'{{"pid":{pid},"notes":"job 1, job 2"}}'.encode(),
+            },
+        ),
+        (
+            "success",
+            {
+                "CallbackId": "cb-3",
+                "Result": f'{{"pid":{pid},"notes":"job 1, job 2, job 3"}}'.encode(),
+            },
+        ),
+    ]
 
 
 def test_sends_heartbeats_for_a_job_with_a_heartbeat_timeout(
@@ -369,6 +482,30 @@ def test_answers_500_and_forgets_a_job_whose_thread_did_not_start(
     assert worker.idle(WAIT)
     assert runs == [{"n": 2}]
     assert client.names() == ["success"]
+
+
+def test_a_failed_start_does_not_use_a_job_number(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The counter advances only after the thread starts. So the first job
+    # that starts logs jobCount 1, even after a failed start.
+    worker, _, _ = start(lambda job_input, context: None)
+    original = threading.Thread.start
+
+    def fail_job_threads(self: threading.Thread) -> None:
+        if self.name.startswith("agentcore-job-"):
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_job_threads)
+    assert request(worker, "POST", "/invocations", job_body("cb-1"))[0] == 500
+    monkeypatch.setattr(threading.Thread, "start", original)
+
+    assert request(worker, "POST", "/invocations", job_body("cb-2"))[0] == 200
+    assert worker.idle(WAIT)
+    started = [data for _, message, data in logger.lines if message == "job started"]
+    assert [data["jobCount"] for data in started] == [1]
 
 
 def test_a_duplicate_during_a_failing_start_never_gets_200(

@@ -40,8 +40,8 @@ from aws_durable_execution_sdk_python_extensions.compute.agentcore import (
     AgentcoreSessionConfig,
     agentcore_session,
 )
-from aws_durable_execution_sdk_python_extensions.compute.agentcore.session import (
-    _validate_session_config,
+from aws_durable_execution_sdk_python_extensions.compute.agentcore.operation import (
+    _validate_name,
 )
 
 
@@ -54,7 +54,6 @@ Body = Callable[[AgentcoreSession, DurableContext], Any]
 def session_config(client: Any, **fields: Any) -> AgentcoreSessionConfig:
     values: dict[str, Any] = {
         "agent_runtime_arn": ARN,
-        "timeout": Duration.from_minutes(30),
         "client": client,
         "retry_strategy": lambda error, attempt: RetryDecision.no_retry(),
         **fields,
@@ -291,7 +290,7 @@ def test_stops_the_session_for_an_invocation_error_that_is_not_retryable(
     assert len(client.requests("stop_runtime_session")) == 1
 
 
-def test_validates_the_config_before_any_durable_operation(
+def test_validates_the_name_before_any_durable_operation(
     fake_agentcore_client: Any,
 ) -> None:
     client = fake_agentcore_client()
@@ -302,8 +301,8 @@ def test_validates_the_config_before_any_durable_operation(
         try:
             agentcore_session(
                 context,
-                "review",
-                config=session_config(client, timeout=Duration.from_seconds(0)),
+                "",
+                config=session_config(client),
                 handler=lambda session, ctx: calls.append("handler"),
             )
         except ValidationError as error:
@@ -312,58 +311,33 @@ def test_validates_the_config_before_any_durable_operation(
 
     result = run(handler)
 
-    assert outcome(result) == 'AgentCore "review": timeout must be at least 1 second'
+    assert outcome(result) == "an AgentCore operation requires a non-empty name"
     assert result.operations == []
     assert calls == []
     assert client.calls == []
 
 
-def test_accepts_a_valid_config() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
-    )
-
-    assert _validate_session_config("review", config) == 1800
+def test_accepts_a_valid_name() -> None:
+    _validate_name("review")
 
 
 def test_config_has_no_default_runtime_arn() -> None:
+    with pytest.raises(TypeError, match="agent_runtime_arn"):
+        AgentcoreSessionConfig()  # type: ignore[call-arg]
+
+
+def test_config_has_no_timeout() -> None:
     fields: dict[str, Any] = {"timeout": Duration.from_minutes(30)}
 
-    with pytest.raises(TypeError, match="agent_runtime_arn"):
-        AgentcoreSessionConfig(**fields)
-
-
-def test_rejects_an_empty_name() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
-    )
-
-    with pytest.raises(
-        ValidationError, match="an AgentCore operation requires a non-empty name"
-    ):
-        _validate_session_config("", config)
+    with pytest.raises(TypeError, match="timeout"):
+        AgentcoreSessionConfig(agent_runtime_arn=ARN, **fields)
 
 
 def test_rejects_a_non_string_name() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_minutes(30)
-    )
-
     with pytest.raises(
         ValidationError, match="an AgentCore operation requires a non-empty name"
     ):
-        _validate_session_config(1, config)  # type: ignore[arg-type]
-
-
-def test_rejects_a_timeout_under_1_second() -> None:
-    config = AgentcoreSessionConfig(
-        agent_runtime_arn=ARN, timeout=Duration.from_seconds(0)
-    )
-
-    with pytest.raises(
-        ValidationError, match='AgentCore "review": timeout must be at least 1 second'
-    ):
-        _validate_session_config("review", config)
+        _validate_name(1)  # type: ignore[arg-type]
 
 
 OPTIONS = AgentcoreInvokeOptions(timeout=Duration.from_minutes(5))
@@ -425,6 +399,56 @@ def test_two_jobs_use_the_same_session_and_their_own_callbacks(
         "build.callback",
         "build.request",
     ]
+
+
+def test_labels_every_operation_with_its_subtype(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client()
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        session.invoke(ctx, "build", job_input={}, options=OPTIONS)
+        return session.invoke(ctx, "test", job_input={}, options=OPTIONS)
+
+    runner = DurableFunctionTestRunner(
+        handler=session_handler(session_config(client), body), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        for name in ("build.callback", "test.callback"):
+            callback_id = runner.wait_for_callback(arn, name=name, timeout=WAIT)
+            runner.send_callback_success(callback_id, b'"done"')
+        result = runner.wait_for_result(arn, timeout=WAIT)
+        history = runner.get_execution_history(arn)
+    finally:
+        runner.close()
+
+    assert outcome(result) == {"result": "done"}
+    expected = {
+        "review": "AgentcoreSession",
+        "review.session": "AgentcoreSessionId",
+        "build": "AgentcoreSessionJob",
+        "build.callback": "AgentcoreCallback",
+        "build.request": "AgentcoreRequest",
+        "test": "AgentcoreSessionJob",
+        "test.callback": "AgentcoreCallback",
+        "test.request": "AgentcoreRequest",
+        "review.stop": "AgentcoreStop",
+    }
+    context = result.get_context("review")
+    recorded_tree: dict[str | None, str | None] = {"review": context.sub_type}
+    for child in context.child_operations:
+        recorded_tree[child.name] = child.sub_type
+        if child.name in ("build", "test"):
+            job = context.get_context(child.name)
+            for step in job.child_operations:
+                recorded_tree[step.name] = step.sub_type
+    assert recorded_tree == expected
+    # The execution history carries the subtype on every event of each
+    # operation.
+    recorded: dict[str, set[str | None]] = {}
+    for event in history.events:
+        if event.name in expected:
+            recorded.setdefault(event.name, set()).add(event.sub_type)
+    assert recorded == {name: {sub_type} for name, sub_type in expected.items()}
 
 
 @pytest.mark.parametrize(
@@ -589,3 +613,161 @@ def test_a_job_uses_the_session_config_and_the_job_options(
     assert denied["qualifier"] == "DEFAULT"
     assert accepted["qualifier"] == "DEFAULT"
     assert payload(accepted)["heartbeatTimeoutSeconds"] == 60
+
+
+class ReplayedSession:
+    """A session with two jobs and an approval wait between them.
+
+    Each wait ends an invocation, and the next invocation replays the
+    handler. So the handler runs at least once per wait. ``session_ids``
+    holds the session ID that each run of the handler sees.
+    ``at_approval`` holds the calls that the client had received while the
+    execution waited for the approval.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+        self.session_ids: list[str] = []
+        self.at_approval: list[str] = []
+
+    def body(self, session: AgentcoreSession, ctx: DurableContext) -> Any:
+        self.session_ids.append(session.runtime_session_id)
+        build = session.invoke(ctx, "build", job_input={"step": 1}, options=OPTIONS)
+        approval = ctx.create_callback(name="approval").result()
+        return session.invoke(
+            ctx,
+            "test",
+            job_input={"build": build, "approval": approval},
+            options=OPTIONS,
+        )
+
+    def run(self) -> DurableFunctionTestResult:
+        runner = DurableFunctionTestRunner(
+            handler=session_handler(session_config(self.client), self.body),
+            poll_interval=0.05,
+        )
+        try:
+            arn = runner.run_async(input="{}", execution_timeout=WAIT)
+            build = runner.wait_for_callback(arn, name="build.callback", timeout=WAIT)
+            runner.send_callback_success(build, b'{"built": true}')
+            approval = runner.wait_for_callback(arn, name="approval", timeout=WAIT)
+            self.at_approval = [call for call, _ in self.client.calls]
+            runner.send_callback_success(approval, b"yes")
+            test = runner.wait_for_callback(arn, name="test.callback", timeout=WAIT)
+            runner.send_callback_success(test, b'"passed"')
+            return runner.wait_for_result(arn, timeout=WAIT)
+        finally:
+            runner.close()
+
+
+def test_replay_keeps_the_same_session_id(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client()
+    session = ReplayedSession(client)
+
+    result = session.run()
+
+    assert outcome(result) == {"result": "passed"}
+    # The first run, and one replay after each of the three waits.
+    assert len(session.session_ids) >= 4
+    [stop] = client.requests("stop_runtime_session")
+    build, test = client.requests("invoke_agent_runtime")
+    assert set(session.session_ids) == {stop["runtimeSessionId"]}
+    assert build["runtimeSessionId"] == stop["runtimeSessionId"]
+    assert test["runtimeSessionId"] == stop["runtimeSessionId"]
+
+
+def test_replay_sends_no_second_request_for_a_completed_job(
+    fake_agentcore_client: Any,
+) -> None:
+    client = fake_agentcore_client()
+    session = ReplayedSession(client)
+
+    result = session.run()
+
+    assert outcome(result) == {"result": "passed"}
+    assert session.at_approval == ["invoke_agent_runtime"]
+    build, test = client.requests("invoke_agent_runtime")
+    assert payload(build)["input"] == {"step": 1}
+    assert payload(test)["input"] == {"build": {"built": True}, "approval": "yes"}
+
+
+def test_a_wait_between_jobs_records_no_stop(fake_agentcore_client: Any) -> None:
+    client = fake_agentcore_client()
+    session = ReplayedSession(client)
+
+    result = session.run()
+
+    assert outcome(result) == {"result": "passed"}
+    assert "stop_runtime_session" not in session.at_approval
+    assert [call for call, _ in client.calls] == [
+        "invoke_agent_runtime",
+        "invoke_agent_runtime",
+        "stop_runtime_session",
+    ]
+    assert operation_names(result) == [
+        "review.session",
+        "build",
+        "approval",
+        "test",
+        "review.stop",
+    ]
+
+
+def test_replay_reads_job_results_and_errors_from_checkpoints(
+    fake_agentcore_client: Any,
+) -> None:
+    # Each job's callback wait ends an invocation. So the later runs of the
+    # handler read the outcome of each earlier job from its checkpoint.
+    client = fake_agentcore_client()
+    config = session_config(client)
+    seen: list[tuple[str, Any]] = []
+
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        try:
+            session.invoke(ctx, "build", job_input={}, options=OPTIONS)
+        except AgentcoreError as error:
+            seen.append(("build", type(error).__name__))
+        seen.append(
+            ("lint", session.invoke(ctx, "lint", job_input={}, options=OPTIONS))
+        )
+        return session.invoke(ctx, "test", job_input={}, options=OPTIONS)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            agentcore_session(context, "review", config=config, handler=body)
+        except AgentcoreError as error:
+            return {"error": type(error).__name__, "message": error.message}
+        return None
+
+    result = run_jobs(
+        handler,
+        {
+            "build.callback": FAILED,
+            "lint.callback": b'{"ok": true}',
+            "test.callback": FAILED,
+        },
+    )
+
+    assert outcome(result) == {
+        "error": "AgentcoreJobFailedError",
+        "message": 'AgentCore "test": the job failed (RuntimeError): 3 tests failed',
+    }
+    builds = [value for job, value in seen if job == "build"]
+    lints = [value for job, value in seen if job == "lint"]
+    # The build error is read in the run after the build, and in the
+    # replays after the lint and the test.
+    assert len(builds) >= 3
+    assert set(builds) == {"AgentcoreJobFailedError"}
+    assert len(lints) >= 2
+    assert all(lint == {"ok": True} for lint in lints)
+    # The failed test job still stops the session, once.
+    assert len(client.requests("invoke_agent_runtime")) == 3
+    assert len(client.requests("stop_runtime_session")) == 1
+    assert operation_names(result) == [
+        "review.session",
+        "build",
+        "lint",
+        "test",
+        "review.stop",
+    ]

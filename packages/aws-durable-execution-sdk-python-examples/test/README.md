@@ -148,7 +148,9 @@ def test_my_example(durable_runner):
 2. On the agent runtime's execution role: `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the example function.
 3. On the function's role (`LambdaExecutionRoleArn`): `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore:StopRuntimeSession` on the agent runtime ARN and on `<runtime ARN>/runtime-endpoint/*`.
 
-To run it, pass the agent runtime ARN to `sam deploy` as `AgentRuntimeArn`, and generate the function-name map with `--include-agentcore`. Without both, the test is skipped.
+`test/agentcore/test_agentcore_session.py` runs the `AgentCore Session` example. It sends two jobs to one session, with a durable wait between them. It needs the same resources.
+
+To run the tests, pass the agent runtime ARN to `sam deploy` as `AgentRuntimeArn`, and generate the function-name map with `--include-agentcore`. Without both, the tests are skipped.
 
 ### MicroVM Image
 `microvm-image/` holds the app, the Dockerfile, and the dependency pins of the MicroVM image that the MicroVM examples run. `hatch run examples:ensure-microvm-image --output image.json` builds the image or reuses it. It needs `TEST_ACCOUNT_ID`, `AWS_REGION`, and AWS credentials for the test account.

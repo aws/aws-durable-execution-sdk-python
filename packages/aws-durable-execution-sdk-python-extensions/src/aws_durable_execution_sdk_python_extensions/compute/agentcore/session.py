@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     ExecutionError,
@@ -26,10 +27,13 @@ from aws_durable_execution_sdk_python_extensions.compute.agentcore.operation imp
     _create_session_id,
     _run_job,
     _stop_session,
-    _validate_base,
+    _validate_name,
 )
 from aws_durable_execution_sdk_python_extensions.compute.agentcore.retry import (
     default_agentcore_retry_strategy,
+)
+from aws_durable_execution_sdk_python_extensions.compute.agentcore.subtypes import (
+    AgentcoreOperationSubType,
 )
 
 
@@ -156,26 +160,13 @@ class AgentcoreSession:
             return _run_job(job_context, scope, session_id, job_input, lambda: None)
 
         try:
-            return context.run_in_child_context(run, name=name)
+            return context.run_in_child_context(
+                run,
+                name=name,
+                config=ChildConfig(sub_type=AgentcoreOperationSubType.SESSION_JOB),
+            )
         except ChildContextError as error:
             raise AgentcoreError.from_child_context_error(name, error) from error
-
-
-def _validate_session_config(name: str, config: AgentcoreSessionConfig) -> int:
-    """Validate the session config, before any durable operation starts.
-
-    It uses the rules of :func:`agentcore`. ``agent_runtime_arn`` is a
-    required field, and its value is not checked here. The boto3 client and
-    the service reject a value that is not valid.
-
-    Returns:
-        The session timeout in seconds.
-
-    Raises:
-        ValidationError: When ``name`` is empty, or ``timeout`` is less
-            than 1 second.
-    """
-    return _validate_base(name, config.timeout)
 
 
 def agentcore_session(
@@ -200,8 +191,8 @@ def agentcore_session(
        returns or raises an error that ends the session.
 
     A stop failure does not fail the operation. AgentCore ends an idle
-    session at the agent runtime's idle timeout. So the operation logs an
-    error and returns the handler's outcome.
+    session's instance at the agent runtime's idle timeout. So the
+    operation logs an error and returns the handler's outcome.
 
     Some errors do not end the session, and the session is not stopped for
     them:
@@ -215,6 +206,11 @@ def agentcore_session(
 
     A stop for one of them would end a session that the replay still uses,
     or add an operation that the replay does not expect.
+
+    The child context records the subtype ``AgentcoreSession``. Each
+    job's own child context records the subtype ``AgentcoreSessionJob``.
+    The session's steps and each job's callback and request record the
+    subtypes of :func:`agentcore`.
 
     A failed :meth:`AgentcoreSession.invoke` raises inside the handler. The
     handler can catch the error and send the next job to the same session.
@@ -247,7 +243,9 @@ def agentcore_session(
             such as :class:`AgentcoreJobFailedError`, with its own class.
         ChildContextError: Any other error that the handler raised.
     """
-    _validate_session_config(name, config)
+    # The config has no field to check. ``agent_runtime_arn`` is required,
+    # and the boto3 client and the service reject a value that is not valid.
+    _validate_name(name)
     retry_strategy = config.retry_strategy or default_agentcore_retry_strategy
 
     def run(child: DurableContext) -> _T:
@@ -276,7 +274,11 @@ def agentcore_session(
         return result
 
     try:
-        return context.run_in_child_context(run, name=name)
+        return context.run_in_child_context(
+            run,
+            name=name,
+            config=ChildConfig(sub_type=AgentcoreOperationSubType.SESSION),
+        )
     except ChildContextError as error:
         # The handler is caller code. So only an AgentCore error is restored
         # to its class. Every other error keeps the SDK's ChildContextError.
