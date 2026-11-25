@@ -224,3 +224,51 @@ def test_truncate_record_uses_the_given_measure():
     assert sizes and out["truncated"] is True
     # The default measure would keep this small record unchanged.
     assert truncate_record(record, 1000, render=lambda r: r) is record
+
+
+def _named_ops_record(count: int) -> dict[str, Any]:
+    ops = [
+        {
+            "id": f"{i:016x}",
+            "name": f"step-{i:05d}",
+            "type": "STEP",
+            "subType": "Step",
+            "status": "SUCCEEDED",
+            "startTime": (
+                f"2026-01-01T{i // 3600:02d}:{i // 60 % 60:02d}:{i % 60:02d}.000Z"
+            ),
+            "durationMs": 12,
+            "attempt": 1,
+        }
+        for i in range(count)
+    ]
+    return {
+        "recordType": "DurableExecutionTelemetry",
+        "schemaVersion": "1.0",
+        "executionArn": "arn:aws:lambda:us-west-2:123456789012:function:fn:$LATEST/durable-execution/exec/inv",
+        "status": "SUCCEEDED",
+        "startTime": "2026-01-01T00:00:00.000Z",
+        "operations": ops,
+    }
+
+
+def test_truncation_renders_a_logarithmic_number_of_times():
+    from aws_durable_execution_sdk_python_telemetry_exporter.exporters.lambda_log_exporter import (
+        LambdaLogExporter,
+    )
+
+    exporter = LambdaLogExporter()
+    renders = 0
+
+    def render(record: dict[str, Any]) -> Any:
+        nonlocal renders
+        renders += 1
+        return exporter.render(record)
+
+    record = _named_ops_record(2000)
+    out = truncate_record(record, 256_000, render, exporter.measure)
+    size = exporter.measure(exporter.render(out))
+    assert size is not None and size <= 256_000
+    assert out["droppedOperations"] > 0
+    # Two binary searches over 2,001 drop counts need about 2 * 11 renders.
+    assert renders < 40
