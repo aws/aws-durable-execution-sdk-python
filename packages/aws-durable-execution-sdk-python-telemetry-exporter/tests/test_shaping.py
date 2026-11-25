@@ -369,27 +369,33 @@ def test_truncation_never_exceeds_the_limit_and_drops_oldest_first():
         ids = _oldest_first(record)
         kept = {op["id"]: op for op in out["operations"]}
         assert [i for i in ids if i in kept] == ids[len(ids) - len(kept) :]
-        # Results longer than 7 bytes are cleared oldest first. Shorter ones
-        # are kept.
-        had_result = {
+        # Results are cleared oldest first. A result of 7 bytes or shorter is
+        # a candidate only when the render hides the marker. In the array
+        # format it is never cleared, because clearing it adds bytes.
+        large = {
             op["id"]
             for op in record["operations"]
             if (json_byte_size(op.get("result")) or 0) > 7
         }
-        assert all(
-            "result" in kept[op["id"]]
-            for op in record["operations"]
-            if op["id"] in kept and op["id"] not in had_result and "result" in op
-        )
+        small = {op["id"] for op in record["operations"] if "result" in op} - large
+        small_cleared = any("result" not in kept[i] for i in small if i in kept)
+        assert not (fmt == OperationsFormat.ARRAY and small_cleared)
+        had_result = large | small if small_cleared else large
         cleared = [
             "result" not in kept[i] for i in ids if i in kept and i in had_result
         ]
         assert cleared == sorted(cleared, reverse=True)
 
 
-def _one_at_a_time(record: dict[str, Any], limit: int) -> dict[str, Any]:
-    # The truncation before the binary search, for the identity render. A
-    # result whose JSON is 7 bytes or shorter is kept.
+def _one_at_a_time(
+    record: dict[str, Any],
+    limit: int,
+    render: Any = None,
+    max_kept: int = 7,
+) -> dict[str, Any]:
+    # The truncation before the binary search. A result whose JSON is
+    # ``max_kept`` bytes or shorter is kept. Pass -1 to clear every result.
+    render = render or (lambda r: r)
     ids = _oldest_first(record)
     ops = {op["id"]: dict(op) for op in record["operations"]}
     out: dict[str, Any] = {}
@@ -403,14 +409,14 @@ def _one_at_a_time(record: dict[str, Any], limit: int) -> dict[str, Any]:
         ]
         if dropped:
             out["droppedOperations"] = dropped
-        size = json_byte_size(out)
+        size = json_byte_size(render(out))
         return size is not None and size <= limit
 
     for i in ids:
         if fits():
             return out
         result_size = json_byte_size(ops[i].get("result"))
-        if ops[i].get("result") is not None and (result_size or 0) > 7:
+        if ops[i].get("result") is not None and (result_size or 0) > max_kept:
             del ops[i]["result"]
             ops[i]["truncated"] = True
     for i in ids:
@@ -528,3 +534,23 @@ def test_truncation_keeps_results_when_dropping_causes_is_enough():
     assert limit is not None
     out = truncate_record(record, limit)
     assert out == no_causes
+
+
+def test_by_name_truncation_clears_small_results_like_the_base():
+    # The by-name map writes no truncated marker. So clearing a small result
+    # makes the record smaller, and small results stay candidates. The limit
+    # needs the large result and about half of the small results cleared.
+    small = [True, 1, "ok", None, 1]
+    ops = [_op("big", id="0000", startTime="t0000", result="x" * 2000)]
+    ops += [
+        _op(f"s{i}", id=f"{i:04d}", startTime=f"t{i:04d}", result=small[i % 5])
+        for i in range(1, 200)
+    ]
+    record = {"executionArn": "arn", "operations": ops}
+    full = json_byte_size(with_operations_by_name(record))
+    assert full is not None
+    limit = full - 2000 - 800
+    expected = _one_at_a_time(record, limit, with_operations_by_name, max_kept=-1)
+    assert "droppedOperations" not in expected
+    out = truncate_record(record, limit, with_operations_by_name)
+    assert out == expected

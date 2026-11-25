@@ -8,8 +8,8 @@ Direct port of the JS ``truncation.ts``. Drop order:
      SDK never carry a cause, so this step only changes a record whose errors
      were given a ``cause`` by other code;
   1. operation ``result`` fields, oldest operation first (each dropped op marked
-     ``truncated: true``). A result whose JSON is 7 bytes or shorter stays,
-     because clearing it would make the record bigger;
+     ``truncated: true``). A result whose JSON is 7 bytes or shorter stays
+     when clearing it makes the rendered record bigger;
   2. whole operations, oldest first (``droppedOperations`` count);
   3. last resort — execution ``input`` then ``output`` (``droppedInput`` /
      ``droppedOutput``).
@@ -103,25 +103,25 @@ def truncate_record(
     rank = [0] * len(ops)
     for position, idx in enumerate(order):
         rank[idx] = position
-    # Clearing replaces ``"result":<json>`` with ``"truncated":true`` (16
-    # bytes). When the result JSON is 7 bytes or shorter (for example ``1``,
-    # ``true`` or ``"ok"``), clearing makes the record bigger, so it cannot help
-    # the record fit. So only longer results are cleared. result_rank[i] is
-    # the position of operation i among these results, oldest first. A
+    # result_ops lists the operations whose result truncation may clear,
+    # oldest first. result_rank[i] is the position of operation i in it. A
     # candidate clears the results with result_rank below ``cleared_results``.
-    result_ops = [
-        i
-        for i in order
-        if ops[i].get("result") is not None and _shrinks_when_cleared(ops[i]["result"])
-    ]
+    with_result = [i for i in order if ops[i].get("result") is not None]
+    small = [i for i in with_result if not _shrinks_when_cleared(ops[i]["result"])]
+    result_ops = [i for i in with_result if _shrinks_when_cleared(ops[i]["result"])]
     result_rank = [len(ops)] * len(ops)
-    for position, idx in enumerate(result_ops):
-        result_rank[idx] = position
+
+    def rank_results(selected: list[int]) -> None:
+        for i in range(len(ops)):
+            result_rank[i] = len(ops)
+        for position, idx in enumerate(selected):
+            result_rank[idx] = position
+
     cleared = [
         {**{k: v for k, v in op.items() if k != "result"}, "truncated": True}
-        if result_rank[i] < len(ops)
+        if op.get("result") is not None
         else op
-        for i, op in enumerate(ops)
+        for op in ops
     ]
 
     dropped_input = False
@@ -148,17 +148,20 @@ def truncate_record(
             out["droppedOutput"] = True
         return out
 
+    def size_at(cleared_results: int, dropped_ops: int) -> int | None:
+        return measure(render(candidate(cleared_results, dropped_ops)))
+
     def fits(cleared_results: int, dropped_ops: int) -> bool:
-        size = measure(render(candidate(cleared_results, dropped_ops)))
+        size = size_at(cleared_results, dropped_ops)
         return size is not None and size <= max_bytes
 
     def first_fit(low: int, high: int, fits_at: Callable[[int], bool]) -> int | None:
         # Binary search for the smallest count in ``low..high`` that fits. The
         # search assumes that a larger count never makes the record larger.
         # In the array form this holds, because only results that shrink the
-        # record are cleared. So the array form drops the fewest. The by-name
-        # map can break it: when one of two operations with the same name is
-        # dropped, the result and error of the other one appear. Then the
+        # rendered record are cleared. So the array form drops the fewest.
+        # The by-name map can break it: when one of two operations with the
+        # same name is dropped, the result and error of the other one appear. Then the
         # search can return a larger count than the smallest one that fits.
         # So extra drops can happen only in the by-name form (and the by-name
         # part of "both"). The returned count was always measured. So the
@@ -176,8 +179,26 @@ def truncate_record(
     # is measured first, so a record that fits without clearing a result keeps
     # every result.
     count = len(ops)
+    base_size = size_at(0, 0)
+    found = 0 if base_size is not None and base_size <= max_bytes else None
+    # Clearing replaces ``"result":<json>`` with ``"truncated":true``. When
+    # the result JSON is 7 bytes or shorter (for example ``1``, ``true`` or
+    # ``"ok"``), this makes the array form bigger, so it cannot help the
+    # record fit. A render that hides the marker (for example the by-name map)
+    # still gets smaller. So one render clears every small result. If it is
+    # smaller than the record after phase 0, small results stay candidates.
+    # Otherwise only the longer results are cleared, and small results stay.
+    if found is None and small:
+        rank_results(small)
+        small_cleared = size_at(len(small), 0)
+        if small_cleared is not None and (
+            base_size is None or small_cleared < base_size
+        ):
+            result_ops = with_result
+    rank_results(result_ops)
     results = len(result_ops)
-    found = 0 if fits(0, 0) else first_fit(1, results, lambda j: fits(j, 0))
+    if found is None:
+        found = first_fit(1, results, lambda j: fits(j, 0))
     cleared_results = results if found is None else found
     dropped_ops = 0
     any_result = cleared_results > 0

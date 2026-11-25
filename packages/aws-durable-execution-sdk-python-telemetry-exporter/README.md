@@ -327,9 +327,12 @@ real Lambda ARNs) and an error `name` of normal length (a type name such as
 message of 8,192 control characters, each escaped as `\u00XX`) fits any limit
 of 128 KB (131,072 bytes) or more.
 
-Truncation keeps a result whose JSON is 7 bytes or shorter (for example `1`,
-`true` or `"ok"`). Clearing such a result replaces it with `"truncated":true`,
-which is longer, so the record would grow.
+Clearing a result replaces it with `"truncated":true`. When the result JSON is
+7 bytes or shorter (for example `1`, `true` or `"ok"`), this makes the `array`
+format bigger. So truncation first renders the record once with every such
+small result cleared. If that render is smaller, the render hides the marker
+(as `operationsByName` does), and small results are cleared like the others.
+Otherwise truncation keeps small results.
 
 Truncation finds how many results and how many operations to drop with a
 binary search. So it renders the record about `2 * log2(n)` times for `n`
