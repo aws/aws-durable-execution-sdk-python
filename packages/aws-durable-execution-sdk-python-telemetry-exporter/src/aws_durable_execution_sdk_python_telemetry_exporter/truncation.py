@@ -13,6 +13,9 @@ Direct port of the JS ``truncation.ts``. Drop order:
   3. last resort — execution ``input`` then ``output`` (``droppedInput`` /
      ``droppedOutput``).
 
+Steps 1 and 2 find their drop count with a binary search, so a record is
+rendered about ``2 * log2(n)`` times for ``n`` operations.
+
 Identity/timeline fields are never dropped. The input record is never mutated.
 ``render`` maps the record to the exact value the exporter serializes, so the
 size check measures what is actually emitted. By default the byte size is that
@@ -72,7 +75,6 @@ def truncate_record(
         return record
 
     ops: list[dict[str, Any]] = [dict(op) for op in record.get("operations", [])]
-    kept = [True] * len(ops)
     # Oldest-first by the startTime string. Every record timestamp has the same
     # fixed-width UTC format, so text order equals time order. Operations
     # without a startTime sort last.
@@ -85,15 +87,29 @@ def truncate_record(
     dropped_causes = _has_cause(record) or any(_has_cause(op) for op in ops)
     for op in ops:
         _drop_cause(op)
+    # rank[i] is the position of operation i in ``order``. A candidate clears
+    # the results of the operations with rank below ``cleared_results`` and
+    # removes the operations with rank below ``dropped_ops``.
+    rank = [0] * len(ops)
+    for position, idx in enumerate(order):
+        rank[idx] = position
+    cleared = [
+        {**{k: v for k, v in op.items() if k != "result"}, "truncated": True}
+        if op.get("result") is not None
+        else op
+        for op in ops
+    ]
 
-    any_result = False
-    dropped_ops = 0
     dropped_input = False
     dropped_output = False
 
-    def candidate() -> dict[str, Any]:
+    def candidate(cleared_results: int, dropped_ops: int) -> dict[str, Any]:
         out = dict(record)
-        out["operations"] = [op for i, op in enumerate(ops) if kept[i]]
+        out["operations"] = [
+            cleared[i] if rank[i] < cleared_results else op
+            for i, op in enumerate(ops)
+            if rank[i] >= dropped_ops
+        ]
         out["truncated"] = True
         if dropped_causes:
             _drop_cause(out)
@@ -108,33 +124,45 @@ def truncate_record(
             out["droppedOutput"] = True
         return out
 
-    def fits() -> bool:
-        size = measure(render(candidate()))
+    def fits(cleared_results: int, dropped_ops: int) -> bool:
+        size = measure(render(candidate(cleared_results, dropped_ops)))
         return size is not None and size <= max_bytes
 
+    def first_fit(low: int, high: int, fits_at: Callable[[int], bool]) -> int | None:
+        # Binary search for the smallest count in ``low..high`` that fits. The
+        # search assumes that a larger count never makes the record larger.
+        # Some records break this assumption, for example a by-name map with
+        # repeated names, a short result replaced by the truncated marker, or
+        # an escaped string body. Then the search can return a larger count
+        # than the smallest one that fits. So truncation can drop more results
+        # or operations than the one-at-a-time check. The returned count was
+        # always measured. So the output never goes over the limit, as long as
+        # dropping everything droppable makes it fit.
+        found = None
+        while low <= high:
+            middle = (low + high) // 2
+            if fits_at(middle):
+                found, high = middle, middle - 1
+            else:
+                low = middle + 1
+        return found
+
     # Phase 1: drop operation results oldest-first.
-    for idx in order:
-        if fits():
-            break
-        if kept[idx] and ops[idx].get("result") is not None:
-            trimmed = dict(ops[idx])
-            trimmed.pop("result", None)
-            trimmed["truncated"] = True
-            ops[idx] = trimmed
-            any_result = True
+    count = len(ops)
+    found = first_fit(0, count, lambda j: fits(j, 0))
+    cleared_results = count if found is None else found
+    dropped_ops = 0
+    any_result = any(ops[i].get("result") is not None for i in order[:cleared_results])
 
     # Phase 2: drop whole operations oldest-first.
-    for idx in order:
-        if fits():
-            break
-        if kept[idx]:
-            kept[idx] = False
-            dropped_ops += 1
+    if found is None:
+        found = first_fit(1, count, lambda k: fits(count, k))
+        dropped_ops = count if found is None else found
 
     # Phase 3 (last resort): drop input then output.
-    if not fits() and record.get("input") is not None:
+    if not fits(cleared_results, dropped_ops) and record.get("input") is not None:
         dropped_input = True
-    if not fits() and record.get("output") is not None:
+    if not fits(cleared_results, dropped_ops) and record.get("output") is not None:
         dropped_output = True
 
     if (
@@ -146,4 +174,4 @@ def truncate_record(
     ):
         return record
 
-    return candidate()
+    return candidate(cleared_results, dropped_ops)

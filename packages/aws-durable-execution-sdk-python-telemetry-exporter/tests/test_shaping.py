@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 from aws_durable_execution_sdk_python_telemetry_exporter.operations_index import (
@@ -14,6 +15,7 @@ from aws_durable_execution_sdk_python_telemetry_exporter.operations_index import
     with_operations_by_name,
 )
 from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
+    json_byte_size,
     truncate_record,
 )
 
@@ -224,3 +226,245 @@ def test_truncate_record_uses_the_given_measure():
     assert sizes and out["truncated"] is True
     # The default measure would keep this small record unchanged.
     assert truncate_record(record, 1000, render=lambda r: r) is record
+
+
+def _named_ops_record(count: int) -> dict[str, Any]:
+    ops = [
+        {
+            "id": f"{i:016x}",
+            "name": f"step-{i:05d}",
+            "type": "STEP",
+            "subType": "Step",
+            "status": "SUCCEEDED",
+            "startTime": (
+                f"2026-01-01T{i // 3600:02d}:{i // 60 % 60:02d}:{i % 60:02d}.000Z"
+            ),
+            "durationMs": 12,
+            "attempt": 1,
+        }
+        for i in range(count)
+    ]
+    return {
+        "recordType": "DurableExecutionTelemetry",
+        "schemaVersion": "1.0",
+        "executionArn": "arn:aws:lambda:us-west-2:123456789012:function:fn:$LATEST/durable-execution/exec/inv",
+        "status": "SUCCEEDED",
+        "startTime": "2026-01-01T00:00:00.000Z",
+        "operations": ops,
+    }
+
+
+def test_truncation_renders_a_logarithmic_number_of_times():
+    from aws_durable_execution_sdk_python_telemetry_exporter.exporters.lambda_log_exporter import (
+        LambdaLogExporter,
+    )
+
+    exporter = LambdaLogExporter()
+    renders = 0
+
+    def render(record: dict[str, Any]) -> Any:
+        nonlocal renders
+        renders += 1
+        return exporter.render(record)
+
+    record = _named_ops_record(2000)
+    out = truncate_record(record, 256_000, render, exporter.measure)
+    size = exporter.measure(exporter.render(out))
+    assert size is not None and size <= 256_000
+    assert out["droppedOperations"] > 0
+    # Two binary searches over 2,001 drop counts need about 2 * 11 renders.
+    assert renders < 40
+
+
+def test_truncation_renders_a_logarithmic_number_of_times_for_a_custom_render():
+    renders = 0
+
+    def render(record: dict[str, Any]) -> Any:
+        nonlocal renders
+        renders += 1
+        return {"wrapped": [dict(op, extra="e") for op in record["operations"]]}
+
+    out = truncate_record(_named_ops_record(2000), 100_000, render)
+    size = json_byte_size(render(out))
+    assert size is not None and size <= 100_000
+    assert out["droppedOperations"] > 0
+    assert renders < 40
+
+
+_NAMES = ["a", "a", "b", "", 'q"uote', "back\\slash", "ünï", "😀", "\u2028", None]
+
+
+def _random_record(rng: random.Random) -> dict[str, Any]:
+    ops = []
+    for i in range(rng.randint(0, 30)):
+        op: dict[str, Any] = {
+            "id": f"{i:016x}",
+            "type": "STEP",
+            "status": rng.choice(["SUCCEEDED", "FAILED"]),
+            "durationMs": rng.randint(0, 100),
+            "attempt": rng.randint(1, 3),
+        }
+        name = rng.choice(_NAMES)
+        if name is not None:
+            op["name"] = name
+        if rng.random() < 0.9:
+            op["startTime"] = f"2026-01-01T00:00:{rng.randint(0, 59):02d}.000Z"
+        if rng.random() < 0.5:
+            op["result"] = rng.choice(['"x"', "ü" * rng.randint(0, 80), "\\" * 9])
+        if rng.random() < 0.3:
+            op["error"] = {"name": "E", "message": "m" * rng.randint(0, 60)}
+        ops.append(op)
+    record: dict[str, Any] = {"executionArn": "arn", "operations": ops}
+    if rng.random() < 0.7:
+        record["input"] = "i" * rng.randint(0, 200)
+    if rng.random() < 0.7:
+        record["output"] = '"o"' * rng.randint(0, 50)
+    return record
+
+
+def _oldest_first(record: dict[str, Any]) -> list[str]:
+    ops = record["operations"]
+    order = sorted(
+        range(len(ops)), key=lambda i: (ops[i].get("startTime") or "\uffff", i)
+    )
+    return [ops[i]["id"] for i in order]
+
+
+def test_truncation_never_exceeds_the_limit_and_drops_oldest_first():
+    rng = random.Random(908)
+    for _ in range(300):
+        record = _random_record(rng)
+        fmt = rng.choice(list(OperationsFormat))
+
+        def render(r: dict[str, Any], fmt: OperationsFormat = fmt) -> Any:
+            return apply_operations_format(r, fmt)
+
+        full = json_byte_size(render(record))
+        assert full is not None
+        limit = rng.randint(1, full + 10)
+        out = truncate_record(record, limit, render)
+        size = json_byte_size(render(out))
+        assert size is not None
+        # Over the limit only when nothing is left to drop.
+        assert size <= limit or (
+            not out["operations"] and "input" not in out and "output" not in out
+        )
+        # The kept operations are the newest ones.
+        ids = _oldest_first(record)
+        kept = {op["id"]: op for op in out["operations"]}
+        assert [i for i in ids if i in kept] == ids[len(ids) - len(kept) :]
+        # Results are cleared oldest first.
+        had_result = {op["id"] for op in record["operations"] if "result" in op}
+        cleared = [
+            "result" not in kept[i] for i in ids if i in kept and i in had_result
+        ]
+        assert cleared == sorted(cleared, reverse=True)
+
+
+def _one_at_a_time(record: dict[str, Any], limit: int) -> dict[str, Any]:
+    # The truncation before the binary search, for the identity render.
+    ids = _oldest_first(record)
+    ops = {op["id"]: dict(op) for op in record["operations"]}
+    out: dict[str, Any] = {}
+    dropped = 0
+
+    def fits() -> bool:
+        out.clear()
+        out.update(record, truncated=True)
+        out["operations"] = [
+            ops[op["id"]] for op in record["operations"] if op["id"] in ops
+        ]
+        if dropped:
+            out["droppedOperations"] = dropped
+        size = json_byte_size(out)
+        return size is not None and size <= limit
+
+    for i in ids:
+        if fits():
+            return out
+        if ops[i].pop("result", None) is not None:
+            ops[i]["truncated"] = True
+    for i in ids:
+        if fits():
+            return out
+        del ops[i]
+        dropped += 1
+    fits()
+    return out
+
+
+def test_truncation_matches_one_at_a_time_drops_for_the_array_format():
+    rng = random.Random(1174)
+    for _ in range(300):
+        record = _random_record(rng)
+        record.pop("input", None)
+        record.pop("output", None)
+        # Every result is longer than 20 bytes. So each cleared result and each
+        # dropped operation makes the record smaller, and the fewest drops are
+        # well defined.
+        for op in record["operations"]:
+            if "result" in op:
+                op["result"] = "r" * rng.randint(21, 80)
+        full = json_byte_size(record)
+        assert full is not None
+        limit = rng.randint(1, full - 1) if full > 1 else 1
+        expected = _one_at_a_time(record, limit)
+        out = truncate_record(record, limit)
+        if out is record:
+            continue
+        assert out == expected
+
+
+def test_by_name_truncation_can_drop_more_than_the_fewest_but_fits():
+    # Dropping the older "x" makes the error of the newer "x" appear in the
+    # by-name map. So the size does not shrink with every drop. Dropping one
+    # operation fits, but the binary search measures 5 drops first, which do
+    # not fit, and then settles on 6.
+    ops = [_op(f"p{i}", id=f"{i:02d}", startTime=f"t{i:02d}") for i in range(4)]
+    ops.append(_op("x", id="04", startTime="t04"))
+    error = {"name": "E", "message": "m" * 2000}
+    ops.append(_op("x", id="05", startTime="t05", status="FAILED", error=error))
+    ops += [
+        _op(f"q{i}", id=f"{6 + i:02d}", startTime=f"t{6 + i:02d}") for i in range(4)
+    ]
+    record = {"executionArn": "arn", "operations": ops}
+    full = json_byte_size(with_operations_by_name(record))
+    assert full is not None
+    out = truncate_record(record, full - 10, with_operations_by_name)
+    assert out["droppedOperations"] == 6
+    size = json_byte_size(with_operations_by_name(out))
+    assert size is not None and size <= full - 10
+
+
+def test_truncation_clears_every_result_before_it_drops_an_operation():
+    ops = [
+        _op(f"o{i}", id=f"{i}", startTime=f"t{i}", result="r" * 100) for i in range(4)
+    ]
+    record = {"executionArn": "arn", "operations": ops}
+    cleared = {
+        **record,
+        "truncated": True,
+        "operations": [
+            {**{k: v for k, v in op.items() if k != "result"}, "truncated": True}
+            for op in ops
+        ],
+    }
+    limit = json_byte_size(cleared)
+    assert limit is not None
+    out = truncate_record(record, limit)
+    assert out == cleared
+
+
+def test_truncation_drops_every_operation_before_it_drops_the_input():
+    ops = [_op(f"o{i}", id=f"{i}", startTime=f"t{i}") for i in range(4)]
+    record = {"executionArn": "arn", "input": "i" * 50, "operations": ops}
+    dropped = {
+        **record,
+        "truncated": True,
+        "operations": [],
+        "droppedOperations": 4,
+    }
+    limit = json_byte_size(dropped)
+    assert limit is not None
+    out = truncate_record(record, limit)
+    assert out == dropped
