@@ -149,11 +149,9 @@ class StepOperationExecutor(OperationExecutor[T]):
             self.retry_handler(StepInterruptedError(msg), checkpointed_result)
             checkpointed_result.raise_operation_error(StepError)
 
-        # Ready to execute if STARTED + AT_LEAST_ONCE
-        if (
-            checkpointed_result.is_started()
-            and self.config.step_semantics is StepSemantics.AT_LEAST_ONCE_PER_RETRY
-        ):
+        # Ready to execute if STARTED + AT_LEAST_ONCE (with or without ASYNC).
+        # An interrupted AT_MOST_ONCE attempt raised above.
+        if checkpointed_result.is_started():
             return CheckResult.create_is_ready_to_execute(checkpointed_result)
 
         # Create START checkpoint if nonexistent or READY
@@ -258,10 +256,17 @@ class StepOperationExecutor(OperationExecutor[T]):
                 payload=serialized_result,
             )
 
-            # Checkpoint SUCCEED operation with blocking (is_sync=True, default).
-            # Must ensure the success state is persisted before returning the result to the caller.
-            # This guarantees the step result is durable and won't be lost if Lambda terminates.
-            self.state.create_checkpoint(operation_update=success_operation)
+            # Checkpoint SUCCEED with blocking (is_sync=True), so the result is
+            # durable before the step returns. AT_LEAST_ONCE_ASYNC does not wait.
+            # Checkpoints are sent in queue order, and the batcher sends the
+            # queued ones before the invocation returns. A failed batch fails
+            # the invocation, so the step runs again on replay.
+            self.state.create_checkpoint(
+                operation_update=success_operation,
+                is_sync=(
+                    self.config.step_semantics is not StepSemantics.AT_LEAST_ONCE_ASYNC
+                ),
+            )
 
             logger.debug(
                 "✅ Successfully completed step for id: %s, name: %s",

@@ -2942,9 +2942,9 @@ def test_checkpoint_missing_token_on_empty_only_batch_is_revoked():
 def test_collect_checkpoint_batch_shutdown_path():
     """Test _collect_checkpoint_batch during shutdown with operations in queue.
 
-    With the simplified shutdown logic, once stop_checkpointing() is called,
-    _collect_checkpoint_batch() returns empty immediately. Any remaining operations
-    in the queue are non-essential async checkpoints that will be abandoned.
+    After stop_checkpointing(), _collect_checkpoint_batch() still collects the
+    queued async checkpoints, such as the SUCCEED of an AT_LEAST_ONCE_ASYNC
+    step. It returns empty only once the queue is empty.
     """
     mock_lambda_client = Mock(spec=LambdaClient)
 
@@ -2956,7 +2956,7 @@ def test_collect_checkpoint_batch_shutdown_path():
         plugin_executor=PluginExecutor(plugins=None),
     )
 
-    # Add operation to queue (would be a non-essential async checkpoint in practice)
+    # Add an async checkpoint to the queue.
     operation_update = OperationUpdate(
         operation_id="test_op",
         operation_type=OperationType.STEP,
@@ -2967,11 +2967,12 @@ def test_collect_checkpoint_batch_shutdown_path():
     # Signal shutdown
     state.stop_checkpointing()
 
-    # Collect batch during shutdown - returns empty immediately
+    # Collect batch during shutdown - the queued checkpoint is still collected
     batch = state._collect_checkpoint_batch()
+    assert [q.operation_update for q in batch] == [operation_update]
 
-    # Should return empty batch, abandoning the non-essential async checkpoint
-    assert len(batch) == 0
+    # The queue is now empty, so the next collect returns empty
+    assert state._collect_checkpoint_batch() == []
 
 
 def test_collect_checkpoint_batch_shutdown_empty_queue():
@@ -6287,20 +6288,22 @@ def test_stop_settles_every_pending_refresh():
         state.schedule_refresh(time.time() + 60)
 
 
-def test_stop_settles_pending_refresh_and_keeps_queued_items():
-    """At shutdown a pending refresh is settled. Any queued operation stays in
-    the queue."""
-    state = _refresh_state(_refresh_client([]))
+def test_stop_settles_pending_refresh_and_sends_queued_items():
+    """At shutdown a pending refresh is settled. A queued operation is sent
+    first."""
+    calls: list[list] = []
+    state = _refresh_state(_refresh_client(calls))
     refresh = state.schedule_refresh(time.time() + 60)
     async_op = QueuedOperation(_step_update(OperationAction.START), None)
     state._checkpoint_queue.put(async_op)
     state.stop_checkpointing()
 
-    state.checkpoint_batches_forever()  # exits at once, then settles
+    state.checkpoint_batches_forever()  # sends the queued op, then settles
 
     with pytest.raises(OrphanedChildException):
         refresh.wait(timeout=1)
-    assert _queued_operations(state) == [async_op]
+    assert _queued_operations(state) == []
+    assert calls == [[async_op.operation_update]]
 
 
 def test_cancelled_refresh_deferred_then_due_is_dropped():

@@ -477,8 +477,32 @@ class ParallelBranch(Generic[T]):
 
 
 class StepSemantics(Enum):
+    """How often one step attempt may run its function. See StepConfig.
+
+    AT_LEAST_ONCE_ASYNC works like AT_LEAST_ONCE_PER_RETRY, with one change.
+    The step returns its result as soon as the SUCCEED checkpoint is queued.
+    It does not wait for the service to save it. So the step has lower
+    latency.
+
+    The code after the step can run before the result is saved. If the
+    invocation ends before the save, the step runs again on replay.
+    Checkpoints are sent in order, and every invocation sends its queued
+    checkpoints before it returns. So any later checkpoint that the service
+    accepts also saves this result.
+
+    On that replay the step can return a different value. Later steps then
+    run again with the new value, and their earlier side effects used the old
+    one. So do not use this mode for a step whose result becomes an
+    idempotency key or a client token for a later step.
+
+    Only the SUCCEED checkpoint is not awaited. A failed attempt waits for
+    its RETRY or FAIL checkpoint. A plugin receives the step's end hook after
+    the service saves the result, at the latest when the invocation ends.
+    """
+
     AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
     AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
+    AT_LEAST_ONCE_ASYNC = "AT_LEAST_ONCE_ASYNC"
 
 
 _SUB_TYPE_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_")
@@ -520,6 +544,8 @@ class StepConfig:
             invocation. AT_MOST_ONCE_PER_RETRY waits for the START checkpoint
             first, and an interrupted attempt fails with StepInterruptedError
             and goes to the retry strategy instead of running again.
+            AT_LEAST_ONCE_ASYNC also does not wait for the SUCCEED
+            checkpoint; see StepSemantics.
 
         serdes: Custom serialization/deserialization for the step result.
             If None, uses the default JSON serializer.

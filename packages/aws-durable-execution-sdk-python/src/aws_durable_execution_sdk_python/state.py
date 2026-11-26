@@ -746,6 +746,11 @@ class ExecutionState:
         """Return whether the service has withdrawn this invocation's checkpoint token."""
         return self._checkpoint_token_revoked.is_set()
 
+    def raise_if_checkpointing_failed(self) -> None:
+        """Raise the BackgroundThreadError of a failed checkpoint batch, if any."""
+        if self._checkpointing_failed.is_set():
+            self._checkpointing_failed.wait()
+
     def pause_execution(self, request: PauseExecutionRequest) -> bool:
         """Ask the service to pause this durable execution.
 
@@ -1131,14 +1136,16 @@ class ExecutionState:
         Their waiters receive OrphanedChildException on completion,
         SuspendExecution on revocation, or BackgroundThreadError on failure.
 
-        On a plain shutdown signal the queue is not drained: only non-essential
-        asynchronous checkpoints can remain, since the main thread blocks on
-        every synchronous one.
+        On a plain shutdown signal the loop first sends the operations still
+        queued. These are asynchronous checkpoints, since the main thread
+        blocks on every synchronous one. One of them can be the SUCCEED of an
+        AT_LEAST_ONCE_ASYNC step, which must be saved before the invocation
+        returns.
         """
         # Keep checkpoint token as local variable in the loop
         current_checkpoint_token: str = self._current_checkpoint_token
 
-        while not self._checkpointing_stopped.is_set():
+        while not self._is_shut_down():
             # Collect operations into a batch
             batch: list[QueuedOperation] = self._collect_checkpoint_batch()
 
@@ -1387,12 +1394,20 @@ class ExecutionState:
         """Signal background thread to stop checkpointing.
 
         This method sets the checkpointing stopped event, which signals the background
-        thread to exit. Any remaining async checkpoints in the queue are non-essential
-        (observability only) and will be abandoned. All critical synchronous checkpoints
+        thread to exit. The thread first sends the async checkpoints still in the queue,
+        such as the SUCCEED of an AT_LEAST_ONCE_ASYNC step. All synchronous checkpoints
         will have already completed before this is called.
         """
         logger.debug("Signaling background thread to stop checkpointing")
         self._checkpointing_stopped.set()
+
+    def _is_shut_down(self) -> bool:
+        """Return True once shutdown is signaled and no queued operation is left."""
+        return (
+            self._checkpointing_stopped.is_set()
+            and self._checkpoint_queue.empty()
+            and self._overflow_queue.empty()
+        )
 
     def register_branch_pool(self, pool: ThreadPoolExecutor) -> None:
         """Register a branch thread pool for joining at invocation end.
@@ -1446,7 +1461,7 @@ class ExecutionState:
             return []
 
         deadline = time.time() + self._batcher_config.max_batch_time_seconds
-        while not batch.is_full() and not self._checkpointing_stopped.is_set():
+        while not batch.is_full() and not self._is_shut_down():
             now = time.time()
             self._add_due_refreshes(batch, now)
             timeout = self._read_timeout(batch, now, deadline)
@@ -1501,7 +1516,7 @@ class ExecutionState:
 
     def _wait_for_first_operation(self, batch: _BatchAccumulator) -> bool:
         """Block until the batch has an operation. Returns False at shutdown."""
-        while not self._checkpointing_stopped.is_set():
+        while not self._is_shut_down():
             now = time.time()
             timeout = _STOP_SIGNAL_POLL_SECONDS
             until_refresh = self._seconds_until_next_refresh(now)

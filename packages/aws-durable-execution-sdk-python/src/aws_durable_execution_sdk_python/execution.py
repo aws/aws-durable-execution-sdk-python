@@ -567,6 +567,13 @@ def durable_execution(
                         output = (
                             DurableExecutionInvocationOutput.create_pending().to_dict()
                         )
+                    # A batch can fail without the handler seeing it, for
+                    # example the SUCCEED of an AT_LEAST_ONCE_ASYNC step sent
+                    # while the handler returns. That result is not saved. So
+                    # the invocation fails instead of reporting SUCCEEDED, and
+                    # the next invocation runs the step again.
+                    if output.get("Status") == InvocationStatus.SUCCEEDED.value:
+                        execution_state.raise_if_checkpointing_failed()
                     completed = DurableExecutionInvocationOutput.from_dict(output)
                 except BaseException as error:
                     # Every started plugin gets its End hook, including when
