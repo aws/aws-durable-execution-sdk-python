@@ -142,7 +142,7 @@ class StepOperationExecutor(OperationExecutor[T]):
         #     ready_to_execute directly, so process() never calls check_result_status() again
         if (
             checkpointed_result.is_started()
-            and self.config.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY
+            and self.config.step_semantics is StepSemantics.AT_MOST_ONCE
         ):
             # Step was previously interrupted in a prior invocation - handle retry
             msg: str = f"Step operation_id={self.operation_identifier.operation_id} name={self.operation_identifier.name} was previously interrupted"
@@ -160,13 +160,11 @@ class StepOperationExecutor(OperationExecutor[T]):
                 identifier=self.operation_identifier,
             )
             # Checkpoint START operation with appropriate synchronization:
-            # - AtMostOncePerRetry: Use blocking checkpoint (is_sync=True) to prevent duplicate execution.
+            # - AT_MOST_ONCE: Use blocking checkpoint (is_sync=True) to prevent duplicate execution.
             #   The step must not execute until the START checkpoint is persisted, ensuring exactly-once semantics.
-            # - AtLeastOncePerRetry: Use non-blocking checkpoint (is_sync=False) for performance optimization.
+            # - AT_LEAST_ONCE: Use non-blocking checkpoint (is_sync=False) for performance optimization.
             #   The step can execute immediately without waiting for checkpoint persistence, allowing at-least-once semantics.
-            is_sync: bool = (
-                self.config.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY
-            )
+            is_sync: bool = self.config.step_semantics is StepSemantics.AT_MOST_ONCE
             self.state.create_checkpoint(
                 operation_update=start_operation, is_sync=is_sync
             )

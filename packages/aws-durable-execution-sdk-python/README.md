@@ -205,7 +205,7 @@ RETRY_AND_PAUSE = StepConfig(retry_strategy=retry_and_pause)
 
 - `pause` does not change how many attempts run. When the decision has `should_retry=False`, the step fails as usual and does not pause.
 - `context.step` uses `pause`, including the `wait_for_callback` submitter. `with_retry` ignores `pause`.
-- Only an attempt that raised in the current invocation can pause. An `AT_MOST_ONCE_PER_RETRY` attempt that was interrupted retries without a pause.
+- Only an attempt that raised in the current invocation can pause. An `AT_MOST_ONCE` attempt that was interrupted retries without a pause.
 - The pause applies to the whole execution. A step in a `map` or `parallel` branch can still pause the execution after the map or parallel operation has finished. No checkpointed data is lost. Resume the execution to continue.
 - Give the function's execution role `lambda:PauseDurableExecution` on its own durable executions. If the function uses a customer managed AWS KMS key, the role also needs `kms:Decrypt` on that key, as the [Lambda pause and resume prerequisites](https://docs.aws.amazon.com/lambda/latest/dg/durable-pause-resume.html#durable-pause-resume-prerequisites) require. If the pause call fails, the SDK logs a warning with the error and the step retries as usual. A missing permission is one possible cause.
 - This feature is experimental. It may change or be removed in a future release.

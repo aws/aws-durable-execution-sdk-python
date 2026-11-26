@@ -801,7 +801,7 @@ class ExecutionState:
         - Use cases: observability checkpoints, fire-and-forget operations
 
         When to use synchronous checkpoints (is_sync=True, default):
-        1. Step START with AtMostOncePerRetry semantics - prevents duplicate execution
+        1. Step START with AT_MOST_ONCE semantics - prevents duplicate execution
         2. Operation completion (SUCCEED/FAIL) - ensures state persisted before returning
         3. Retry operations - ensures retry state recorded before continuing
         4. Callback START - must wait for API to generate callback ID
@@ -812,7 +812,7 @@ class ExecutionState:
         9. Most operations - safe default
 
         When to use asynchronous checkpoints (is_sync=False, opt-in):
-        1. Step START with AtLeastOncePerRetry semantics - performance optimization
+        1. Step START with AT_LEAST_ONCE semantics - performance optimization
         2. Child context START - fire-and-forget for performance
         3. Wait for condition START - observability only, no blocking needed
         4. Any checkpoint where immediate confirmation is not required AND performance matters

@@ -479,7 +479,7 @@ class ParallelBranch(Generic[T]):
 class StepSemantics(Enum):
     """How often one step attempt may run its function. See StepConfig.
 
-    AT_LEAST_ONCE_ASYNC works like AT_LEAST_ONCE_PER_RETRY, with one change.
+    AT_LEAST_ONCE_ASYNC works like AT_LEAST_ONCE, with one change.
     The step returns its result as soon as the SUCCEED checkpoint is queued.
     It does not wait for the service to save it. So the step has lower
     latency.
@@ -498,11 +498,21 @@ class StepSemantics(Enum):
     Only the SUCCEED checkpoint is not awaited. A failed attempt waits for
     its RETRY or FAIL checkpoint. A plugin receives the step's end hook after
     the service saves the result, at the latest when the invocation ends.
+
+    AT_MOST_ONCE_PER_RETRY and AT_LEAST_ONCE_PER_RETRY are deprecated aliases
+    of AT_MOST_ONCE and AT_LEAST_ONCE. Existing code keeps working.
     """
 
-    AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
-    AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
+    AT_MOST_ONCE = "AT_MOST_ONCE_PER_RETRY"
+    AT_LEAST_ONCE = "AT_LEAST_ONCE_PER_RETRY"
     AT_LEAST_ONCE_ASYNC = "AT_LEAST_ONCE_ASYNC"
+
+    # Deprecated: use AT_MOST_ONCE. It is the same member, with the same value
+    # and behavior.
+    AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
+    # Deprecated: use AT_LEAST_ONCE. It is the same member, with the same value
+    # and behavior.
+    AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
 
 
 _SUB_TYPE_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_")
@@ -539,9 +549,9 @@ class StepConfig:
             If None, the SDK uses its default retry strategy.
 
         step_semantics: How often one attempt may run the function.
-            AT_LEAST_ONCE_PER_RETRY (the default) checkpoints START without
+            AT_LEAST_ONCE (the default) checkpoints START without
             waiting, so an interrupted attempt runs again on the next
-            invocation. AT_MOST_ONCE_PER_RETRY waits for the START checkpoint
+            invocation. AT_MOST_ONCE waits for the START checkpoint
             first, and an interrupted attempt fails with StepInterruptedError
             and goes to the retry strategy instead of running again.
             AT_LEAST_ONCE_ASYNC also does not wait for the SUCCEED
@@ -564,7 +574,7 @@ class StepConfig:
     """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
-    step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE_PER_RETRY
+    step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE
     serdes: SerDes | None = None
     sub_type: str | None = field(default=None, kw_only=True)
 

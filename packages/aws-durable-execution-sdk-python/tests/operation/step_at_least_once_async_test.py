@@ -171,7 +171,7 @@ def test_async_step_returns_before_succeed_is_answered():
 
 @pytest.mark.parametrize(
     "config",
-    [None, StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY)],
+    [None, StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE)],
 )
 def test_at_least_once_step_still_waits_for_succeed(config):
     client = _SlowClient({OperationAction.SUCCEED: 0.1})

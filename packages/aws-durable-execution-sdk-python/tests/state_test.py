@@ -1468,7 +1468,7 @@ def test_collect_checkpoint_batch_sends_oversized_operation_from_overflow() -> N
     """An operation above max_batch_size_bytes that reached the overflow queue is
     still sent, alone, in the next batch (issue #871).
 
-    This is the default AT_LEAST_ONCE_PER_RETRY step shape: a small START is
+    This is the default AT_LEAST_ONCE step shape: a small START is
     already in the batch when the large SUCCEED arrives, so SUCCEED does not fit
     and moves to the overflow queue. The next batch must send it rather than
     return it to the queue forever.
