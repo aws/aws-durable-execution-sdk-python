@@ -8,9 +8,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from typing import Any
+from unittest.mock import patch
 
 import pytest
-from aws_durable_execution_sdk_python.config import Duration, StepConfig
+from aws_durable_execution_sdk_python.config import (
+    Duration,
+    StepConfig,
+    StepSemantics,
+)
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
@@ -771,3 +776,22 @@ def test_replay_reads_job_results_and_errors_from_checkpoints(
         "test",
         "review.stop",
     ]
+
+
+def test_session_id_step_waits_for_its_save(fake_agentcore_client: Any) -> None:
+    """The session ID becomes the runtime session of later steps. So its step
+    sets AT_LEAST_ONCE itself, and default_step_semantics cannot make it async."""
+    client = fake_agentcore_client()
+    original_step = DurableContext.step
+
+    with patch.object(
+        DurableContext, "step", autospec=True, side_effect=original_step
+    ) as step:
+        outcome(run(session_handler(session_config(client), lambda s, ctx: None)))
+
+    [config] = [
+        call.kwargs["config"]
+        for call in step.call_args_list
+        if call.kwargs.get("name") == "review.session"
+    ]
+    assert config.step_semantics is StepSemantics.AT_LEAST_ONCE

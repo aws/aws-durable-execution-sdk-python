@@ -21,6 +21,7 @@ from aws_durable_execution_sdk_python.config import (
     ChildConfig,
     Duration,
     StepConfig,
+    StepSemantics,
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
@@ -344,7 +345,13 @@ def _create_session_id(child: DurableContext, name: str) -> str:
         # Plain JSON, so a reader of the execution history finds the
         # session ID.
         config=StepConfig(
-            serdes=JsonSerDes(), sub_type=AgentcoreOperationSubType.SESSION_ID
+            serdes=JsonSerDes(),
+            sub_type=AgentcoreOperationSubType.SESSION_ID,
+            # Later steps use the ID as the runtime session. So it must be
+            # saved before they run, even when default_step_semantics is
+            # AT_LEAST_ONCE_ASYNC. The deprecated name keeps the core
+            # requirement >=3.0.0, which has no AT_LEAST_ONCE.
+            step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
         ),
     )
     return session_id

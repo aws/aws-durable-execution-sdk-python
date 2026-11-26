@@ -14,10 +14,15 @@ import time
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import boto3
 import pytest
-from aws_durable_execution_sdk_python.config import Duration, StepConfig
+from aws_durable_execution_sdk_python.config import (
+    Duration,
+    StepConfig,
+    StepSemantics,
+)
 from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
@@ -2453,3 +2458,24 @@ def test_fails_with_not_running_when_the_check_finds_the_microvm_terminated(
     assert error["error"] == "MicrovmNotRunningError"
     assert "MicroVM mvm-1 is TERMINATED." in error["message"]
     assert len(endpoint.requests) == 1
+
+
+def test_session_id_step_waits_for_its_save(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    """The session ID becomes the launch's client token. So its step sets
+    AT_LEAST_ONCE itself, and default_step_semantics cannot make it async."""
+    client = fake_client(endpoint=fake_endpoint().url)
+    original_step = DurableContext.step
+
+    with patch.object(
+        DurableContext, "step", autospec=True, side_effect=original_step
+    ) as step:
+        outcome(run(session_handler(session_config(client), lambda vm, ctx, e: None)))
+
+    [config] = [
+        call.kwargs["config"]
+        for call in step.call_args_list
+        if call.kwargs.get("name") == "pipeline.session"
+    ]
+    assert config.step_semantics is StepSemantics.AT_LEAST_ONCE

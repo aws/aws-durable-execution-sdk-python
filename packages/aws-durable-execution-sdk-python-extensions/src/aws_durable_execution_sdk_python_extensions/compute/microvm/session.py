@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     ExecutionError,
@@ -383,7 +384,13 @@ class _SessionScope(_MicrovmScope):
     ) -> _T:
         """Run the session's durable operations in its child context."""
         session_id: str = child.step(
-            lambda _: str(uuid.uuid4()), name=f"{self.name}.session"
+            lambda _: str(uuid.uuid4()),
+            name=f"{self.name}.session",
+            # The launch uses the ID as its client token. So it must be saved
+            # before the launch runs, even when default_step_semantics is
+            # AT_LEAST_ONCE_ASYNC. The deprecated name keeps the core
+            # requirement >=3.0.0, which has no AT_LEAST_ONCE.
+            config=StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY),
         )
         launched = self.launch(
             child,
