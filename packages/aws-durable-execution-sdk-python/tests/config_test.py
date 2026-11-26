@@ -118,7 +118,7 @@ def test_step_config_defaults():
     """Test StepConfig default values."""
     config = StepConfig()
     assert config.retry_strategy is None
-    assert config.step_semantics == StepSemantics.AT_LEAST_ONCE
+    assert config.step_semantics is None
     assert config.serdes is None
 
 

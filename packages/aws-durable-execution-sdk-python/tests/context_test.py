@@ -20,6 +20,7 @@ from aws_durable_execution_sdk_python.config import (
     ParallelBranch,
     ParallelConfig,
     StepConfig,
+    StepSemantics,
 )
 from aws_durable_execution_sdk_python.context import (
     Callback,
@@ -519,7 +520,7 @@ def test_step_with_name_and_config(mock_executor_class):
     del (
         mock_callable._original_name  # noqa: SLF001
     )  # Ensure Mock doesn't have _original_name
-    config = StepConfig()
+    config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE)
 
     context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
@@ -546,6 +547,38 @@ def test_step_with_name_and_config(mock_executor_class):
         context_logger=ANY,
     )
     mock_executor.process.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (None, StepSemantics.AT_LEAST_ONCE_ASYNC),
+        (StepConfig(), StepSemantics.AT_LEAST_ONCE_ASYNC),
+        (StepConfig(sub_type="Custom"), StepSemantics.AT_LEAST_ONCE_ASYNC),
+        (
+            StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE),
+            StepSemantics.AT_MOST_ONCE,
+        ),
+        (
+            StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE),
+            StepSemantics.AT_LEAST_ONCE,
+        ),
+    ],
+)
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_uses_default_semantics_unless_set(mock_executor_class, config, expected):
+    """A step without step_semantics gets the execution default; its own wins."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:test"
+    mock_state.default_step_semantics = StepSemantics.AT_LEAST_ONCE_ASYNC
+    context = create_test_context(state=mock_state)
+
+    context.step(lambda _: None, name="s", config=config)
+
+    passed: StepConfig = mock_executor_class.call_args.kwargs["config"]
+    assert passed.step_semantics is expected
+    if config is not None:
+        assert passed.sub_type == config.sub_type
 
 
 @patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")

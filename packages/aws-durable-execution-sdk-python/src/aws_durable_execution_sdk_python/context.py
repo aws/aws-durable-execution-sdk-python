@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Lock
 from typing import (
     TYPE_CHECKING,
@@ -899,6 +899,8 @@ class DurableContext(DurableContextProtocol):
         logger.debug("Step name: %s", step_name)
         if not config:
             config = StepConfig()
+        if config.step_semantics is None:
+            config = replace(config, step_semantics=self.state.default_step_semantics)
         sub_type = config.sub_type or OperationSubType.STEP.value
         with self._operation_replay_aware(
             sub_type, step_name, operation_type=OperationType.STEP

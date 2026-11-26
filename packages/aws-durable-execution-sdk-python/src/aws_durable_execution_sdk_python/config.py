@@ -549,7 +549,9 @@ class StepConfig:
             If None, the SDK uses its default retry strategy.
 
         step_semantics: How often one attempt may run the function.
-            AT_LEAST_ONCE (the default) checkpoints START without
+            None (the default) uses the default_step_semantics of
+            durable_execution, which is AT_LEAST_ONCE unless set.
+            AT_LEAST_ONCE checkpoints START without
             waiting, so an interrupted attempt runs again on the next
             invocation. AT_MOST_ONCE waits for the START checkpoint
             first, and an interrupted attempt fails with StepInterruptedError
@@ -574,7 +576,7 @@ class StepConfig:
     """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
-    step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE
+    step_semantics: StepSemantics | None = None
     serdes: SerDes | None = None
     sub_type: str | None = field(default=None, kw_only=True)
 

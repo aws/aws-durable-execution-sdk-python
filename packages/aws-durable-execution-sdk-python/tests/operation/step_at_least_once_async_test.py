@@ -73,6 +73,7 @@ class _SlowClient:
         self.delays = delays or {}
         self.fail_on = fail_on
         self.answered: list[OperationAction] = []
+        self.answered_names: set[tuple[OperationAction, str | None]] = set()
         self.lock = threading.Lock()
         self.mock = Mock(spec=DurableServiceClient)
         self.mock.checkpoint.side_effect = self._checkpoint
@@ -92,6 +93,7 @@ class _SlowClient:
             raise RuntimeError(msg)
         with self.lock:
             self.answered.extend(actions)
+            self.answered_names.update((u.action, u.name) for u in updates)
         return CheckpointOutput(
             checkpoint_token=f"{checkpoint_token}-next",
             new_execution_state=CheckpointUpdatedExecutionState(
@@ -109,8 +111,10 @@ class _SlowClient:
             ),
         )
 
-    def was_answered(self, action: OperationAction) -> bool:
+    def was_answered(self, action: OperationAction, name: str | None = None) -> bool:
         with self.lock:
+            if name is not None:
+                return (action, name) in self.answered_names
             return action in self.answered
 
 
@@ -325,3 +329,54 @@ def test_plugin_sees_async_step_end_before_invocation_end():
     assert step_end.status is OperationStatus.SUCCEEDED
     assert step_end.result == '"value"'
     assert last == "invocation_end"
+
+
+def test_default_step_semantics_reaches_every_context():
+    """default_step_semantics applies at the root, in child contexts and in map
+    items. A step's own step_semantics wins."""
+    client = _SlowClient({OperationAction.SUCCEED: 0.2})
+    saved_at_return: dict[str, bool] = {}
+
+    def run_step(context: DurableContext, name: str, config=None) -> str:
+        result = context.step(lambda _: name, name=name, config=config)
+        saved_at_return[name] = client.was_answered(OperationAction.SUCCEED, name)
+        return result
+
+    @durable_execution(default_step_semantics=StepSemantics.AT_LEAST_ONCE_ASYNC)
+    def handler(_event: Any, context: DurableContext) -> list[str]:
+        results = [run_step(context, "root")]
+        results.append(
+            context.run_in_child_context(
+                lambda child: run_step(child, "child"), name="group"
+            )
+        )
+        results.extend(
+            context.map(
+                ["a", "b"],
+                lambda item_context, item, _i, _items: run_step(
+                    item_context, f"item-{item}"
+                ),
+                name="items",
+            ).get_results()
+        )
+        results.append(
+            run_step(
+                context,
+                "own",
+                StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE),
+            )
+        )
+        return results
+
+    output = _invoke(handler, client)
+
+    assert output["Status"] == InvocationStatus.SUCCEEDED.value
+    assert saved_at_return == {
+        "root": False,
+        "child": False,
+        "item-a": False,
+        "item-b": False,
+        "own": True,
+    }
+    for name in saved_at_return:
+        assert client.was_answered(OperationAction.SUCCEED, name)

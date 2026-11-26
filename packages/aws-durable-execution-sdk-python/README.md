@@ -170,6 +170,33 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 `RetryPresets` in `aws_durable_execution_sdk_python.retries` holds ready-made strategies.
 
+### Step semantics
+
+`StepConfig(step_semantics=...)` sets how often one attempt may run the step function:
+
+- `StepSemantics.AT_LEAST_ONCE` (default): the attempt runs again on replay if it was interrupted before its result was saved. The step waits for its result to be saved before it returns.
+- `StepSemantics.AT_MOST_ONCE`: the step saves its start before it runs. An interrupted attempt does not run again. It fails with `StepInterruptedError` and goes to the retry strategy.
+- `StepSemantics.AT_LEAST_ONCE_ASYNC`: like `AT_LEAST_ONCE`, but the step returns its result without waiting for the save. So the step has lower latency. Each invocation saves the result before it returns. If the invocation ends before the save, the step runs again on replay. On that replay the step can return a different value, and later steps run again with it. So do not use this mode for a step whose result becomes an idempotency key or a client token for a later step. A failed attempt still waits for its retry or failure to be saved.
+
+`AT_MOST_ONCE_PER_RETRY` and `AT_LEAST_ONCE_PER_RETRY` are deprecated aliases of `AT_MOST_ONCE` and `AT_LEAST_ONCE`.
+
+`@durable_execution(default_step_semantics=...)` sets the semantics of every step that does not set its own. It applies in child contexts, `map` items, `parallel` branches, and the steps that SDK extensions create, unless the extension sets its own. A step's own `step_semantics` wins.
+
+```python
+from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
+
+
+@durable_execution(default_step_semantics=StepSemantics.AT_LEAST_ONCE_ASYNC)
+def handler(event: dict, context: DurableContext) -> dict:
+    # create_order_id and charge are @durable_step functions.
+    # The order ID becomes an idempotency key, so its step waits for the save.
+    order_id = context.step(
+        create_order_id(),
+        config=StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE),
+    )
+    return context.step(charge(order_id, event["amount"]))
+```
+
 ### Pause after repeated failures (experimental)
 
 A retry decision can pause the durable execution. When the retry strategy returns `RetryDecision.retry(delay, pause=True)` for a failed attempt, the step saves its normal retry, then the SDK asks Lambda to pause, and the invocation ends. An operator resumes the execution with the Lambda `ResumeDurableExecution` API, and the next attempt runs.

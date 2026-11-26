@@ -16,6 +16,7 @@ from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Callable, NoReturn
 
+from aws_durable_execution_sdk_python.config import StepSemantics
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     DurableExecutionsError,
@@ -372,6 +373,9 @@ class ExecutionState:
     Internal to the SDK. Not part of the public API.
     """
 
+    # The semantics of every step whose StepConfig sets none.
+    default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE
+
     def __init__(
         self,
         durable_execution_arn: str,
@@ -381,8 +385,10 @@ class ExecutionState:
         plugin_executor: PluginExecutor,
         batcher_config: CheckpointBatcherConfig | None = None,
         updated_operation_ids: list[str] | None = None,
+        default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE,
     ):
         self.durable_execution_arn: str = durable_execution_arn
+        self.default_step_semantics = default_step_semantics
         self._current_checkpoint_token: str = initial_checkpoint_token
         self._operations: dict[str, Operation] = dict(operations)
         self._service_client: DurableServiceClient = service_client
