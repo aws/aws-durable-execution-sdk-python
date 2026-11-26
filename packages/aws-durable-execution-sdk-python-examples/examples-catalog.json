@@ -47,7 +47,7 @@
     },
     {
       "name": "Step Semantics Async Default",
-      "description": "Make every step AT_LEAST_ONCE_ASYNC with default_step_semantics, and keep AT_LEAST_ONCE on the step that makes an idempotency key",
+      "description": "Experimental: make every step AT_LEAST_ONCE_ASYNC with default_step_semantics, and keep AT_LEAST_ONCE on the step that makes an idempotency key",
       "handler": "step_semantics_async_default.handler",
       "integration": true,
       "durableConfig": {

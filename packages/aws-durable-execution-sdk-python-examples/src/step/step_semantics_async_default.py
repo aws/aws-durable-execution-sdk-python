@@ -1,5 +1,8 @@
 """Make every step AT_LEAST_ONCE_ASYNC, except the one that makes a key.
 
+Experimental: StepSemantics.AT_LEAST_ONCE_ASYNC may change or be removed in a
+future release.
+
 An AT_LEAST_ONCE_ASYNC step returns its result before the result is saved.
 Each invocation saves the result before it returns. If an invocation ends
 first, the step runs again on replay and can return a different value.

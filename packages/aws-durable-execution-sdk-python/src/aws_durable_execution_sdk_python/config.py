@@ -479,7 +479,8 @@ class ParallelBranch(Generic[T]):
 class StepSemantics(Enum):
     """How often one step attempt may run its function. See StepConfig.
 
-    AT_LEAST_ONCE_ASYNC works like AT_LEAST_ONCE, with one change.
+    AT_LEAST_ONCE_ASYNC is experimental; it may change or be removed in a
+    future release. It works like AT_LEAST_ONCE, with one change.
     The step returns its result as soon as the SUCCEED checkpoint is queued.
     It does not wait for the service to save it. So the step has lower
     latency.
@@ -556,8 +557,8 @@ class StepConfig:
             invocation. AT_MOST_ONCE waits for the START checkpoint
             first, and an interrupted attempt fails with StepInterruptedError
             and goes to the retry strategy instead of running again.
-            AT_LEAST_ONCE_ASYNC also does not wait for the SUCCEED
-            checkpoint; see StepSemantics.
+            AT_LEAST_ONCE_ASYNC (experimental) also does not wait for the
+            SUCCEED checkpoint; see StepSemantics.
 
         serdes: Custom serialization/deserialization for the step result.
             If None, uses the default JSON serializer.

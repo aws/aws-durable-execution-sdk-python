@@ -176,7 +176,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 - `StepSemantics.AT_LEAST_ONCE` (default): the attempt runs again on replay if it was interrupted before its result was saved. The step waits for its result to be saved before it returns.
 - `StepSemantics.AT_MOST_ONCE`: the step saves its start before it runs. An interrupted attempt does not run again. It fails with `StepInterruptedError` and goes to the retry strategy.
-- `StepSemantics.AT_LEAST_ONCE_ASYNC`: like `AT_LEAST_ONCE`, but the step returns its result without waiting for the save. So the step has lower latency. Each invocation saves the result before it returns. If the invocation ends before the save, the step runs again on replay. On that replay the step can return a different value, and later steps run again with it. So do not use this mode for a step whose result becomes an idempotency key or a client token for a later step. A failed attempt still waits for its retry or failure to be saved.
+- `StepSemantics.AT_LEAST_ONCE_ASYNC` (experimental): like `AT_LEAST_ONCE`, but the step returns its result without waiting for the save. So the step has lower latency. Each invocation saves the result before it returns. If the invocation ends before the save, the step runs again on replay. On that replay the step can return a different value, and later steps run again with it. So do not use this mode for a step whose result becomes an idempotency key or a client token for a later step. A failed attempt still waits for its retry or failure to be saved. This value is experimental. It may change or be removed in a future release.
 
 `AT_MOST_ONCE_PER_RETRY` and `AT_LEAST_ONCE_PER_RETRY` are deprecated aliases of `AT_MOST_ONCE` and `AT_LEAST_ONCE`.
 
