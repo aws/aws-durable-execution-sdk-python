@@ -8,8 +8,9 @@ Direct port of the JS ``truncation.ts``. Drop order:
      SDK never carry a cause, so this step only changes a record whose errors
      were given a ``cause`` by other code;
   1. operation ``result`` fields, oldest operation first (each dropped op marked
-     ``truncated: true``). A result whose JSON is 7 bytes or shorter stays
-     when clearing it makes the rendered record bigger;
+     ``truncated: true``). A result whose JSON is 7 bytes or shorter is a
+     small result. One probe render decides for all small results at once:
+     either all of them can be cleared, or all of them stay;
   2. whole operations, oldest first (``droppedOperations`` count);
   3. last resort — execution ``input`` then ``output`` (``droppedInput`` /
      ``droppedOutput``).
@@ -158,14 +159,13 @@ def truncate_record(
     def first_fit(low: int, high: int, fits_at: Callable[[int], bool]) -> int | None:
         # Binary search for the smallest count in ``low..high`` that fits. The
         # search assumes that a larger count never makes the record larger.
-        # In the array form this holds, because only results that shrink the
-        # rendered record are cleared. So the array form drops the fewest.
-        # The by-name map can break it: when one of two operations with the
-        # same name is dropped, the result and error of the other one appear. Then the
-        # search can return a larger count than the smallest one that fits.
-        # So extra drops can happen only in the by-name form (and the by-name
-        # part of "both"). The returned count was always measured. So the
-        # output never goes over the limit.
+        # Some renders break this assumption, for example an escaped string
+        # body or a by-name map with repeated names. Then the search can
+        # return a larger count than the smallest one that fits. So
+        # truncation can drop more results or operations than the
+        # one-at-a-time check. The returned count was always measured. So the
+        # output never goes over the limit, as long as dropping everything
+        # droppable makes it fit.
         found = None
         while low <= high:
             middle = (low + high) // 2

@@ -337,13 +337,14 @@ Otherwise truncation keeps small results.
 Truncation finds how many results and how many operations to drop with a
 binary search. So it renders the record about `2 * log2(n)` times for `n`
 operations, with any `render`. The search assumes that each drop makes the
-rendered record smaller. In the `array` format this holds, so truncation drops
-the fewest results and operations that fit. The `operationsByName` map can
-break it: when one of two operations with the same name is dropped, the result
-and error of the other one appear. So in the `by-name` format, and in the
-by-name part of `both`, truncation can drop a few more old operations than the
-fewest that fit. The emitted record is always measured, so it never goes over
-the limit.
+rendered record smaller. Some renders break this assumption. For example,
+`OTelExporter` escapes the record into one string body. In the
+`operationsByName` map, the result and error of a repeated name appear when the
+other operation with that name is dropped. So truncation can drop more results
+or operations than the fewest that fit. The emitted record is always measured.
+So the output never goes over the limit, as long as dropping everything
+droppable makes it fit. If even that does not fit, the output is over the
+limit, as before.
 
 Names are each language's own and differ across SDKs. For example, a step that
 throws `PaymentError` can be reported as `StepError` in JS,
