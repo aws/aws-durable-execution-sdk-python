@@ -583,13 +583,7 @@ def durable_execution(
                         output = (
                             DurableExecutionInvocationOutput.create_pending().to_dict()
                         )
-                    # A batch can fail without the handler seeing it, for
-                    # example the SUCCEED of an AT_LEAST_ONCE_ASYNC step sent
-                    # while the handler returns. That result is not saved. So
-                    # the invocation fails instead of reporting SUCCEEDED, and
-                    # the next invocation runs the step again.
-                    if output.get("Status") == InvocationStatus.SUCCEEDED.value:
-                        execution_state.raise_if_checkpointing_failed()
+                    output = _apply_late_checkpoint_failure(output, execution_state)
                     completed = DurableExecutionInvocationOutput.from_dict(output)
                 except BaseException as error:
                     # Every started plugin gets its End hook, including when
@@ -624,6 +618,37 @@ def durable_execution(
             return invocation_future.result()
 
     return wrapper
+
+
+def _apply_late_checkpoint_failure(
+    output: MutableMapping[str, Any], execution_state: ExecutionState
+) -> MutableMapping[str, Any]:
+    """Classify a checkpoint batch that failed without the handler seeing it.
+
+    An example is the SUCCEED of an AT_LEAST_ONCE_ASYNC step, sent after the
+    handler returned or raised. That result is not saved. An invocation-scope
+    failure raises, so Lambda retries the invocation and the step runs again.
+    An execution-scope failure answers FAILED, as it does when the handler
+    sees it. A handler error keeps its own FAILED answer then.
+    """
+    if output.get("Status") not in {
+        InvocationStatus.SUCCEEDED.value,
+        InvocationStatus.FAILED.value,
+    }:
+        return output
+    try:
+        execution_state.raise_if_checkpointing_failed()
+    except BackgroundThreadError as bg_error:
+        source = bg_error.source_exception
+        if isinstance(source, BotoClientError) and not source.is_retryable():
+            if output.get("Status") == InvocationStatus.FAILED.value:
+                return output
+            return DurableExecutionInvocationOutput(
+                status=InvocationStatus.FAILED,
+                error=ErrorObject.from_exception(source),
+            ).to_dict()
+        raise source from bg_error
+    return output
 
 
 def handle_checkpoint_error(error: CheckpointError) -> DurableExecutionInvocationOutput:

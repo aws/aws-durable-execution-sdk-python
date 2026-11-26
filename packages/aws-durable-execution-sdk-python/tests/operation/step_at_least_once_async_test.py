@@ -16,7 +16,8 @@ import pytest
 from aws_durable_execution_sdk_python.config import Duration, StepConfig, StepSemantics
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
-    BackgroundThreadError,
+    CheckpointError,
+    DurableApiErrorCategory,
     StepError,
     SuspendExecution,
 )
@@ -69,9 +70,11 @@ class _SlowClient:
         self,
         delays: dict[OperationAction, float] | None = None,
         fail_on: OperationAction | None = None,
+        error: Exception | None = None,
     ) -> None:
         self.delays = delays or {}
         self.fail_on = fail_on
+        self.error = error or RuntimeError("checkpoint failed")
         self.answered: list[OperationAction] = []
         self.answered_names: set[tuple[OperationAction, str | None]] = set()
         self.lock = threading.Lock()
@@ -89,8 +92,7 @@ class _SlowClient:
         delay = max((self.delays.get(action, 0.0) for action in actions), default=0)
         time.sleep(delay)
         if self.fail_on in actions:
-            msg = "checkpoint failed"
-            raise RuntimeError(msg)
+            raise self.error
         with self.lock:
             self.answered.extend(actions)
             self.answered_names.update((u.action, u.name) for u in updates)
@@ -298,9 +300,58 @@ def test_failed_succeed_batch_does_not_report_succeeded():
     def handler(_event: Any, context: DurableContext) -> str:
         return context.step(lambda _: "value", name="s", config=ASYNC)
 
-    with pytest.raises(BackgroundThreadError) as raised:
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
         _invoke(handler, client)
-    assert str(raised.value.source_exception) == "checkpoint failed"
+
+
+def _failing_succeed(category: DurableApiErrorCategory) -> _SlowClient:
+    return _SlowClient(
+        {OperationAction.SUCCEED: 0.1},
+        fail_on=OperationAction.SUCCEED,
+        error=CheckpointError("checkpoint failed", error_category=category),
+    )
+
+
+def _step_then_raise(_event: Any, context: DurableContext) -> None:
+    context.step(lambda _: "value", name="s", config=ASYNC)
+    msg = "handler failed"
+    raise ValueError(msg)
+
+
+def test_handler_error_after_unsaved_succeed_retries_the_invocation():
+    """The handler raises while the SUCCEED is queued, and the SUCCEED then
+    fails with an invocation-scope error. The invocation raises, so Lambda
+    retries it, instead of answering FAILED without the step's result."""
+    client = _failing_succeed(DurableApiErrorCategory.INVOCATION)
+
+    with pytest.raises(CheckpointError, match="checkpoint failed"):
+        _invoke(durable_execution(_step_then_raise), client)
+
+
+def test_handler_error_after_execution_scope_failure_answers_failed():
+    """An execution-scope checkpoint failure, such as a validation error,
+    still answers FAILED with the handler's error."""
+    client = _failing_succeed(DurableApiErrorCategory.EXECUTION)
+
+    output = _invoke(durable_execution(_step_then_raise), client)
+
+    assert output["Status"] == InvocationStatus.FAILED.value
+    assert output["Error"]["ErrorMessage"] == "handler failed"
+
+
+def test_result_after_execution_scope_failure_answers_failed():
+    """A handler that returns after an execution-scope SUCCEED failure answers
+    FAILED with the checkpoint error, as when the handler sees the failure."""
+    client = _failing_succeed(DurableApiErrorCategory.EXECUTION)
+
+    @durable_execution
+    def handler(_event: Any, context: DurableContext) -> str:
+        return context.step(lambda _: "value", name="s", config=ASYNC)
+
+    output = _invoke(handler, client)
+
+    assert output["Status"] == InvocationStatus.FAILED.value
+    assert output["Error"]["ErrorMessage"] == "checkpoint failed"
 
 
 def test_plugin_sees_async_step_end_before_invocation_end():
