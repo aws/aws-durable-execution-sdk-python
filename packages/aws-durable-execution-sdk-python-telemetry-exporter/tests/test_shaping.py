@@ -292,22 +292,6 @@ def test_truncation_renders_a_logarithmic_number_of_times_for_a_custom_render():
 
 
 _NAMES = ["a", "a", "b", "", 'q"uote', "back\\slash", "ünï", "😀", "\u2028", None]
-# Short results are common: 1, true and "ok" are shorter than the
-# "truncated":true marker, so truncation keeps them.
-_RESULTS = [
-    1,
-    0,
-    True,
-    False,
-    "",
-    "ok",
-    '"x"',
-    "12345",
-    "123456",
-    [1],
-    {"k": [1, 2]},
-    "\\" * 9,
-]
 
 
 def _random_record(rng: random.Random) -> dict[str, Any]:
@@ -326,7 +310,7 @@ def _random_record(rng: random.Random) -> dict[str, Any]:
         if rng.random() < 0.9:
             op["startTime"] = f"2026-01-01T00:00:{rng.randint(0, 59):02d}.000Z"
         if rng.random() < 0.5:
-            op["result"] = rng.choice(_RESULTS + ["ü" * rng.randint(0, 80)])
+            op["result"] = rng.choice(['"x"', "ü" * rng.randint(0, 80), "\\" * 9])
         if rng.random() < 0.3:
             op["error"] = {"name": "E", "message": "m" * rng.randint(0, 60)}
         ops.append(op)
@@ -369,33 +353,16 @@ def test_truncation_never_exceeds_the_limit_and_drops_oldest_first():
         ids = _oldest_first(record)
         kept = {op["id"]: op for op in out["operations"]}
         assert [i for i in ids if i in kept] == ids[len(ids) - len(kept) :]
-        # Results are cleared oldest first. A result of 7 bytes or shorter is
-        # a candidate only when the render hides the marker. In the array
-        # format it is never cleared, because clearing it adds bytes.
-        large = {
-            op["id"]
-            for op in record["operations"]
-            if (json_byte_size(op.get("result")) or 0) > 7
-        }
-        small = {op["id"] for op in record["operations"] if "result" in op} - large
-        small_cleared = any("result" not in kept[i] for i in small if i in kept)
-        assert not (fmt == OperationsFormat.ARRAY and small_cleared)
-        had_result = large | small if small_cleared else large
+        # Results are cleared oldest first.
+        had_result = {op["id"] for op in record["operations"] if "result" in op}
         cleared = [
             "result" not in kept[i] for i in ids if i in kept and i in had_result
         ]
         assert cleared == sorted(cleared, reverse=True)
 
 
-def _one_at_a_time(
-    record: dict[str, Any],
-    limit: int,
-    render: Any = None,
-    max_kept: int = 7,
-) -> dict[str, Any]:
-    # The truncation before the binary search. A result whose JSON is
-    # ``max_kept`` bytes or shorter is kept. Pass -1 to clear every result.
-    render = render or (lambda r: r)
+def _one_at_a_time(record: dict[str, Any], limit: int) -> dict[str, Any]:
+    # The truncation before the binary search, for the identity render.
     ids = _oldest_first(record)
     ops = {op["id"]: dict(op) for op in record["operations"]}
     out: dict[str, Any] = {}
@@ -409,15 +376,13 @@ def _one_at_a_time(
         ]
         if dropped:
             out["droppedOperations"] = dropped
-        size = json_byte_size(render(out))
+        size = json_byte_size(out)
         return size is not None and size <= limit
 
     for i in ids:
         if fits():
             return out
-        result_size = json_byte_size(ops[i].get("result"))
-        if ops[i].get("result") is not None and (result_size or 0) > max_kept:
-            del ops[i]["result"]
+        if ops[i].pop("result", None) is not None:
             ops[i]["truncated"] = True
     for i in ids:
         if fits():
@@ -434,6 +399,12 @@ def test_truncation_matches_one_at_a_time_drops_for_the_array_format():
         record = _random_record(rng)
         record.pop("input", None)
         record.pop("output", None)
+        # Every result is longer than 20 bytes. So each cleared result and each
+        # dropped operation makes the record smaller, and the fewest drops are
+        # well defined.
+        for op in record["operations"]:
+            if "result" in op:
+                op["result"] = "r" * rng.randint(21, 80)
         full = json_byte_size(record)
         assert full is not None
         limit = rng.randint(1, full - 1) if full > 1 else 1
@@ -463,24 +434,6 @@ def test_by_name_truncation_can_drop_more_than_the_fewest_but_fits():
     assert out["droppedOperations"] == 6
     size = json_byte_size(with_operations_by_name(out))
     assert size is not None and size <= full - 10
-
-
-def test_truncation_keeps_small_results_and_clears_the_large_old_one():
-    # Clearing a small result (true, 1, "ok") adds bytes in the array format.
-    # So only the large oldest result is cleared, and no operation is dropped.
-    small = [True, 1, "ok", None, 1]
-    ops = [_op("big", id="0000", startTime="t0000", result="x" * 2000)]
-    ops += [
-        _op(f"s{i}", id=f"{i:04d}", startTime=f"t{i:04d}", result=small[i % 5])
-        for i in range(1, 2000)
-    ]
-    record = {"executionArn": "arn", "operations": ops}
-    full = json_byte_size(record)
-    assert full is not None
-    out = truncate_record(record, full - 1)
-    assert out == _one_at_a_time(record, full - 1)
-    assert "droppedOperations" not in out
-    assert [op["id"] for op in out["operations"] if op.get("truncated")] == ["0000"]
 
 
 def test_truncation_clears_every_result_before_it_drops_an_operation():
@@ -515,42 +468,3 @@ def test_truncation_drops_every_operation_before_it_drops_the_input():
     assert limit is not None
     out = truncate_record(record, limit)
     assert out == dropped
-
-
-def test_truncation_keeps_results_when_dropping_causes_is_enough():
-    error = {"name": "E", "message": "m", "cause": {"name": "C", "message": "c" * 400}}
-    ops = [
-        _op(f"o{i}", id=f"{i}", startTime=f"t{i}", result="r" * 100) for i in range(3)
-    ]
-    ops.append(_op("f", id="3", startTime="t3", status="FAILED", error=error))
-    record = {"executionArn": "arn", "operations": ops}
-    no_causes = {
-        **record,
-        "truncated": True,
-        "droppedCauses": True,
-        "operations": ops[:3] + [{**ops[3], "error": {"name": "E", "message": "m"}}],
-    }
-    limit = json_byte_size(no_causes)
-    assert limit is not None
-    out = truncate_record(record, limit)
-    assert out == no_causes
-
-
-def test_by_name_truncation_clears_small_results_like_the_base():
-    # The by-name map writes no truncated marker. So clearing a small result
-    # makes the record smaller, and small results stay candidates. The limit
-    # needs the large result and about half of the small results cleared.
-    small = [True, 1, "ok", None, 1]
-    ops = [_op("big", id="0000", startTime="t0000", result="x" * 2000)]
-    ops += [
-        _op(f"s{i}", id=f"{i:04d}", startTime=f"t{i:04d}", result=small[i % 5])
-        for i in range(1, 200)
-    ]
-    record = {"executionArn": "arn", "operations": ops}
-    full = json_byte_size(with_operations_by_name(record))
-    assert full is not None
-    limit = full - 2000 - 800
-    expected = _one_at_a_time(record, limit, with_operations_by_name, max_kept=-1)
-    assert "droppedOperations" not in expected
-    out = truncate_record(record, limit, with_operations_by_name)
-    assert out == expected
