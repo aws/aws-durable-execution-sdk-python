@@ -630,11 +630,19 @@ def _apply_late_checkpoint_failure(
     failure raises, so Lambda retries the invocation and the step runs again.
     An execution-scope failure answers FAILED, as it does when the handler
     sees it. A handler error keeps its own FAILED answer then.
+
+    A PENDING answer is checked too: a handler can suspend while the SUCCEED
+    is still queued, for example on a replayed wait. A withdrawn token is the
+    exception, because then the service records nothing from this invocation
+    and PENDING is the only true answer.
     """
     if output.get("Status") not in {
         InvocationStatus.SUCCEEDED.value,
         InvocationStatus.FAILED.value,
+        InvocationStatus.PENDING.value,
     }:
+        return output
+    if execution_state.is_checkpoint_token_revoked:
         return output
     try:
         execution_state.raise_if_checkpointing_failed()

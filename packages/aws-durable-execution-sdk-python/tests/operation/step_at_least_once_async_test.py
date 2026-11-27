@@ -6,6 +6,7 @@ real checkpoint batcher thread sends every checkpoint.
 
 from __future__ import annotations
 
+import datetime
 import threading
 import time
 from typing import Any
@@ -40,6 +41,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
     StepDetails,
+    WaitDetails,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -431,3 +433,47 @@ def test_default_step_semantics_reaches_every_context():
     }
     for name in saved_at_return:
         assert client.was_answered(OperationAction.SUCCEED, name)
+
+
+def _pending_wait_operation() -> Operation:
+    """A wait that started in an earlier invocation and ends in an hour."""
+    return Operation(
+        operation_id=OperationIdNamespace().create_id_for_step(2),
+        operation_type=OperationType.WAIT,
+        status=OperationStatus.STARTED,
+        name="w",
+        sub_type="Wait",
+        wait_details=WaitDetails(
+            scheduled_end_timestamp=datetime.datetime.now(datetime.UTC)
+            + datetime.timedelta(hours=1)
+        ),
+    )
+
+
+def _step_then_pending_wait(_event: Any, context: DurableContext) -> str:
+    context.step(lambda _: "v", name="s", config=ASYNC)
+    context.wait(Duration.from_seconds(3600), name="w")
+    return "done"
+
+
+def test_suspend_after_execution_scope_failure_answers_failed():
+    """The handler suspends while the async SUCCEED is queued, and it fails for good."""
+    client = _failing_succeed(DurableApiErrorCategory.EXECUTION)
+
+    out = _invoke(
+        durable_execution(_step_then_pending_wait), client, [_pending_wait_operation()]
+    )
+
+    assert out["Status"] == InvocationStatus.FAILED.value
+
+
+def test_suspend_after_invocation_scope_failure_retries_the_invocation():
+    """The handler suspends while the async SUCCEED is queued, and it fails for now."""
+    client = _failing_succeed(DurableApiErrorCategory.INVOCATION)
+
+    with pytest.raises(CheckpointError):
+        _invoke(
+            durable_execution(_step_then_pending_wait),
+            client,
+            [_pending_wait_operation()],
+        )
