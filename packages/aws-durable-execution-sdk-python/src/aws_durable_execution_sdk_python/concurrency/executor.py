@@ -45,7 +45,11 @@ from aws_durable_execution_sdk_python.identifier import (
     OperationIdentifier,
     OperationIdNamespace,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationType
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationStatus,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.operation.child import child_handler
 
 
@@ -276,6 +280,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             branch.index: branch for branch in self.branches
         }
 
+        # A resumed batch can hold child contexts that already recorded a
+        # terminal outcome. Their replays reach the coordinator in thread
+        # completion order, so the batch decides completion only after every
+        # one has settled, and starts no item past the last recorded one.
+        recorded_unsettled: set[int] = self._recorded_terminal_indexes(execution_state)
+        last_recorded: int = max(recorded_unsettled, default=-1)
+
         in_flight: int = 0
         running: int = 0
         succeeded: int = 0
@@ -330,10 +341,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     )
                     decision = self.policy.evaluate(succeeded, failed, items_snapshot)
                     needs_snapshot_rebuild = False
-                if self.policy.is_complete(succeeded, failed, items_snapshot, decision):
-                    break
-                if not self.policy.should_continue(failed):
-                    break
+                if not recorded_unsettled:
+                    if self.policy.is_complete(
+                        succeeded, failed, items_snapshot, decision
+                    ):
+                        break
+                    if not self.policy.should_continue(failed):
+                        break
 
                 # Start branches in index order up to the in-flight limit.
                 # Suspended branches keep their slot: in_flight only
@@ -342,6 +356,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     pending
                     and in_flight < max_in_flight
                     and self.policy.should_continue(failed)
+                    and (not recorded_unsettled or pending[0].index <= last_recorded)
                 ):
                     submit(pending.popleft())
                     in_flight += 1
@@ -394,12 +409,14 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 match event.kind:
                     case BranchEventKind.COMPLETED:
                         applied.complete(event.result)
+                        recorded_unsettled.discard(event.index)
                         succeeded += 1
                         running -= 1
                         in_flight -= 1
                         needs_snapshot_rebuild = True
                     case BranchEventKind.FAILED if event.error is not None:
                         applied.fail(event.error)
+                        recorded_unsettled.discard(event.index)
                         failed += 1
                         running -= 1
                         in_flight -= 1
@@ -495,6 +512,22 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             raise retryable_error
 
         return self._create_result(completion_reason)
+
+    def _recorded_terminal_indexes(self, execution_state: ExecutionState) -> set[int]:
+        """Return the indexes whose NESTED child context is already terminal.
+
+        FLAT branches never checkpoint themselves, so they have no record.
+        """
+        if self.nesting_type is NestingType.FLAT:
+            return set()
+        return {
+            executable.index
+            for executable in self.executables
+            if execution_state.get_checkpoint_result(
+                self.operation_id_namespace.create_id_for_step(executable.index)
+            ).status
+            in (OperationStatus.SUCCEEDED, OperationStatus.FAILED)
+        }
 
     def _create_result(
         self, completion_reason: CompletionReason | None = None
