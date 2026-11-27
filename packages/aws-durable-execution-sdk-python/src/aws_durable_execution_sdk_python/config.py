@@ -569,10 +569,8 @@ class StepConfig:
             and goes to the retry strategy instead of running again.
             AT_LEAST_ONCE_ASYNC (experimental) also does not wait for the
             SUCCEED checkpoint; see StepSemantics.
-            dataclasses.replace cannot tell an explicit AT_LEAST_ONCE from
-            the default. So to pin AT_LEAST_ONCE under an async execution
-            default, build the config with
-            StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE, ...).
+            A config made with dataclasses.replace counts the field as set,
+            so it keeps its value and does not take the execution default.
 
         serdes: Custom serialization/deserialization for the step result.
             If None, uses the default JSON serializer.
@@ -594,28 +592,19 @@ class StepConfig:
     step_semantics: StepSemantics = _STEP_SEMANTICS_UNSET
     serdes: SerDes | None = None
     sub_type: str | None = field(default=None, kw_only=True)
-    # Private. True when the caller set step_semantics. It is an init field,
-    # so dataclasses.replace passes it on to the copy.
-    _step_semantics_set: bool | None = field(
-        default=None, kw_only=True, repr=False, compare=False
+    # Private. True when the caller set step_semantics. It is not an init
+    # field, so dataclasses.replace, which passes the stored value, sets it.
+    # A replaced config can then only lose the execution default, never
+    # take AT_LEAST_ONCE_ASYNC when the caller pinned AT_LEAST_ONCE.
+    _step_semantics_set: bool = field(
+        default=False, init=False, repr=False, compare=False
     )
 
     def __post_init__(self) -> None:
         _validate_sub_type(self.sub_type)
-        if self.step_semantics is _STEP_SEMANTICS_UNSET:
+        is_set = self.step_semantics is not _STEP_SEMANTICS_UNSET
+        if not is_set:
             object.__setattr__(self, "step_semantics", StepSemantics.AT_LEAST_ONCE)
-            is_set = False
-        elif self._step_semantics_set is None:
-            is_set = True
-        else:
-            # dataclasses.replace copies the stored value and the flag. So a
-            # replace that changes the value to another member sets the field.
-            # A replace to AT_LEAST_ONCE on an unset config stays unset,
-            # because the copy cannot tell it from the stored default.
-            is_set = (
-                self._step_semantics_set
-                or self.step_semantics is not StepSemantics.AT_LEAST_ONCE
-            )
         object.__setattr__(self, "_step_semantics_set", is_set)
 
 

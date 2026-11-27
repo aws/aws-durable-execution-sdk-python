@@ -565,7 +565,12 @@ def test_step_with_name_and_config(mock_executor_class):
             StepSemantics.AT_LEAST_ONCE,
         ),
         (StepConfig(None, StepSemantics.AT_LEAST_ONCE), StepSemantics.AT_LEAST_ONCE),
-        (replace(StepConfig(), serdes=None), StepSemantics.AT_LEAST_ONCE_ASYNC),
+        # A replaced config counts the field as set, so it keeps AT_LEAST_ONCE.
+        (replace(StepConfig(), serdes=None), StepSemantics.AT_LEAST_ONCE),
+        (
+            replace(StepConfig(), step_semantics=StepSemantics.AT_LEAST_ONCE),
+            StepSemantics.AT_LEAST_ONCE,
+        ),
         (
             replace(
                 StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE), serdes=None
