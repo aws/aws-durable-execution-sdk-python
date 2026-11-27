@@ -3303,6 +3303,48 @@ def test_virtual_child_checkpoint_is_rejected_before_replay_hooks(
     assert child_body_calls == []
 
 
+def test_virtual_child_keeps_replay_status_while_inner_history_exists():
+    """A virtual child has no checkpoint of its own; its inner history keeps REPLAY."""
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    container_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    probe = ctx.create_child_context(container_id, is_virtual=True)
+    inner_id = probe._create_step_id()  # noqa: SLF001
+    ctx.state._operations[inner_id] = _wait_op(  # noqa: SLF001
+        inner_id, OperationStatus.SUCCEEDED
+    )
+
+    seen: list[bool] = []
+    ctx.run_in_child_context(
+        lambda child: seen.append(child.is_replaying()),
+        name="virtual",
+        config=ChildConfig(is_virtual=True),
+    )
+
+    assert seen == [True]
+
+
+def test_virtual_child_without_inner_history_starts_new():
+    """A virtual child with no history for its first inner operation is new work."""
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+
+    seen: list[bool] = []
+    ctx.run_in_child_context(
+        lambda child: seen.append(child.is_replaying()),
+        name="virtual",
+        config=ChildConfig(is_virtual=True),
+    )
+
+    assert seen == [False]
+
+
 def test_replay_aware_emits_update_hook_for_operation_updated_since_last_invocation():
     """Updated terminal operations emit operation_end, not replay start+end."""
     captured: list[tuple[str, str, bool, OperationStatus]] = []

@@ -609,7 +609,20 @@ class DurableContext(DurableContextProtocol):
         # - brand-new next op (no checkpoint): always flip to NEW.
         # - non-terminal STEP-type op (brand-new or retrying): the user function
         #   is about to run real work, so flip to NEW before it.
-        if was_replaying and (not next_exists or (next_is_step and not next_terminal)):
+        # A virtual child never checkpoints itself, so its own checkpoint being
+        # absent says nothing: it is new only when its first inner operation
+        # has no history either.
+        brand_new: bool = not next_exists and not (
+            is_virtual
+            and operation_identifier is not None
+            and self.state.get_checkpoint_result(
+                OperationIdNamespace(
+                    operation_identifier.operation_id
+                ).create_id_for_step(1),
+                claim_end_hook=False,
+            ).is_existent()
+        )
+        if was_replaying and (brand_new or (next_is_step and not next_terminal)):
             self._set_replay_status_new()
         try:
             yield
