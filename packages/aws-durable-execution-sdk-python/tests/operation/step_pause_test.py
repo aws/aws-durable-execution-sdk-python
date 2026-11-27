@@ -356,7 +356,7 @@ def test_no_pause_on_interrupted_at_most_once_replay():
             state,
             StepConfig(
                 retry_strategy=strategy,
-                step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY,
+                step_semantics=StepSemantics.AT_MOST_ONCE,
             ),
         )
 

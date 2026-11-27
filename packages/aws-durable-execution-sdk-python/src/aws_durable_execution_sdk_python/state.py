@@ -16,6 +16,7 @@ from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Callable, NoReturn
 
+from aws_durable_execution_sdk_python.config import StepSemantics
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     DurableExecutionsError,
@@ -130,6 +131,15 @@ class ScheduledRefresh:
 
     def cancel(self) -> None:
         self.cancelled.set()
+
+
+class _BatchCollectionError(Exception):
+    """Collecting a batch failed after operations were taken off the queues."""
+
+    def __init__(self, error: Exception, operations: list[QueuedOperation]) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.operations = operations
 
 
 class _BatchAccumulator:
@@ -372,6 +382,9 @@ class ExecutionState:
     Internal to the SDK. Not part of the public API.
     """
 
+    # The semantics of every step whose StepConfig sets none.
+    default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE
+
     def __init__(
         self,
         durable_execution_arn: str,
@@ -381,8 +394,10 @@ class ExecutionState:
         plugin_executor: PluginExecutor,
         batcher_config: CheckpointBatcherConfig | None = None,
         updated_operation_ids: list[str] | None = None,
+        default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE,
     ):
         self.durable_execution_arn: str = durable_execution_arn
+        self.default_step_semantics = default_step_semantics
         self._current_checkpoint_token: str = initial_checkpoint_token
         self._operations: dict[str, Operation] = dict(operations)
         self._service_client: DurableServiceClient = service_client
@@ -746,6 +761,11 @@ class ExecutionState:
         """Return whether the service has withdrawn this invocation's checkpoint token."""
         return self._checkpoint_token_revoked.is_set()
 
+    def raise_if_checkpointing_failed(self) -> None:
+        """Raise the BackgroundThreadError of a failed checkpoint batch, if any."""
+        if self._checkpointing_failed.is_set():
+            self._checkpointing_failed.wait()
+
     def pause_execution(self, request: PauseExecutionRequest) -> bool:
         """Ask the service to pause this durable execution.
 
@@ -796,7 +816,7 @@ class ExecutionState:
         - Use cases: observability checkpoints, fire-and-forget operations
 
         When to use synchronous checkpoints (is_sync=True, default):
-        1. Step START with AtMostOncePerRetry semantics - prevents duplicate execution
+        1. Step START with AT_MOST_ONCE semantics - prevents duplicate execution
         2. Operation completion (SUCCEED/FAIL) - ensures state persisted before returning
         3. Retry operations - ensures retry state recorded before continuing
         4. Callback START - must wait for API to generate callback ID
@@ -807,7 +827,7 @@ class ExecutionState:
         9. Most operations - safe default
 
         When to use asynchronous checkpoints (is_sync=False, opt-in):
-        1. Step START with AtLeastOncePerRetry semantics - performance optimization
+        1. Step START with AT_LEAST_ONCE semantics - performance optimization
         2. Child context START - fire-and-forget for performance
         3. Wait for condition START - observability only, no blocking needed
         4. Any checkpoint where immediate confirmation is not required AND performance matters
@@ -1131,16 +1151,23 @@ class ExecutionState:
         Their waiters receive OrphanedChildException on completion,
         SuspendExecution on revocation, or BackgroundThreadError on failure.
 
-        On a plain shutdown signal the queue is not drained: only non-essential
-        asynchronous checkpoints can remain, since the main thread blocks on
-        every synchronous one.
+        On a plain shutdown signal the loop first sends the operations still
+        queued. These are asynchronous checkpoints, since the main thread
+        blocks on every synchronous one. One of them can be the SUCCEED of an
+        AT_LEAST_ONCE_ASYNC step, which must be saved before the invocation
+        returns.
         """
         # Keep checkpoint token as local variable in the loop
         current_checkpoint_token: str = self._current_checkpoint_token
 
-        while not self._checkpointing_stopped.is_set():
+        while not self._is_shut_down():
             # Collect operations into a batch
-            batch: list[QueuedOperation] = self._collect_checkpoint_batch()
+            try:
+                batch: list[QueuedOperation] = self._collect_checkpoint_batch()
+            except _BatchCollectionError as e:
+                logger.exception("Checkpoint batch collection failed")
+                self._fail_checkpointing(e.error, e.operations)
+                break
 
             if batch:
                 # Extract OperationUpdates, excluding empty checkpoints from API call
@@ -1258,34 +1285,8 @@ class ExecutionState:
                         self._settle_after_execution_completed()
                         break
                 except Exception as e:
-                    # Checkpoint failed - wake all blocked threads so they can raise error
-                    # Drain both queues and signal all completion events
                     logger.exception("Checkpoint batch processing failed")
-                    bg_error: BackgroundThreadError = BackgroundThreadError(
-                        "Checkpoint creation failed", e
-                    )
-
-                    # Signal completion events for the failed batch (already dequeued,
-                    # so no producer can race these).
-                    for queued_op in batch:
-                        if queued_op.completion_event is not None:
-                            queued_op.completion_event.set(bg_error)
-
-                    # Drain the queues and set the failure flag under the completion
-                    # lock so a concurrent create_checkpoint either observes the
-                    # failure and raises, or has its operation drained here - never
-                    # enqueued after the drain and left blocked.
-                    with self._completion_lock:
-                        for queued_op in self._drain_unsent_operations():
-                            if queued_op.completion_event is not None:
-                                queued_op.completion_event.set(bg_error)
-
-                        for refresh in self._drain_pending_refreshes():
-                            refresh.completion_event.set(bg_error)
-
-                        # Future checkpoint attempts fail immediately.
-                        self._checkpointing_failed.set(bg_error)
-
+                    self._fail_checkpointing(e, batch)
                     # Exit the loop - error has been signaled to main thread via completion events
                     break
 
@@ -1303,6 +1304,35 @@ class ExecutionState:
             )
 
         logger.debug("Background checkpoint processing stopped")
+
+    def _fail_checkpointing(
+        self, error: Exception, batch: list[QueuedOperation]
+    ) -> None:
+        """Wake all blocked threads with the error and stop future checkpoints.
+
+        The batch is already dequeued, so no producer can race its events.
+        """
+        bg_error: BackgroundThreadError = BackgroundThreadError(
+            "Checkpoint creation failed", error
+        )
+        for queued_op in batch:
+            if queued_op.completion_event is not None:
+                queued_op.completion_event.set(bg_error)
+
+        # Drain the queues and set the failure flag under the completion
+        # lock so a concurrent create_checkpoint either observes the
+        # failure and raises, or has its operation drained here - never
+        # enqueued after the drain and left blocked.
+        with self._completion_lock:
+            for queued_op in self._drain_unsent_operations():
+                if queued_op.completion_event is not None:
+                    queued_op.completion_event.set(bg_error)
+
+            for refresh in self._drain_pending_refreshes():
+                refresh.completion_event.set(bg_error)
+
+            # Future checkpoint attempts fail immediately.
+            self._checkpointing_failed.set(bg_error)
 
     def _drain_unsent_operations(self) -> list[QueuedOperation]:
         """Take queued operations, overflow first. The caller holds _completion_lock."""
@@ -1387,12 +1417,20 @@ class ExecutionState:
         """Signal background thread to stop checkpointing.
 
         This method sets the checkpointing stopped event, which signals the background
-        thread to exit. Any remaining async checkpoints in the queue are non-essential
-        (observability only) and will be abandoned. All critical synchronous checkpoints
+        thread to exit. The thread first sends the async checkpoints still in the queue,
+        such as the SUCCEED of an AT_LEAST_ONCE_ASYNC step. All synchronous checkpoints
         will have already completed before this is called.
         """
         logger.debug("Signaling background thread to stop checkpointing")
         self._checkpointing_stopped.set()
+
+    def _is_shut_down(self) -> bool:
+        """Return True once shutdown is signaled and no queued operation is left."""
+        return (
+            self._checkpointing_stopped.is_set()
+            and self._checkpoint_queue.empty()
+            and self._overflow_queue.empty()
+        )
 
     def register_branch_pool(self, pool: ThreadPoolExecutor) -> None:
         """Register a branch thread pool for joining at invocation end.
@@ -1446,7 +1484,7 @@ class ExecutionState:
             return []
 
         deadline = time.time() + self._batcher_config.max_batch_time_seconds
-        while not batch.is_full() and not self._checkpointing_stopped.is_set():
+        while not batch.is_full() and not self._is_shut_down():
             now = time.time()
             self._add_due_refreshes(batch, now)
             timeout = self._read_timeout(batch, now, deadline)
@@ -1464,7 +1502,7 @@ class ExecutionState:
             if isinstance(item, _Signal):
                 self._consume_refresh_wake()
                 continue
-            size = self._calculate_operation_size(item)
+            size = self._operation_size(item, batch)
             if not batch.fits(size):
                 self._overflow_queue.put(item)
                 logger.debug(
@@ -1491,7 +1529,7 @@ class ExecutionState:
         try:
             while not batch.is_full():
                 op = self._overflow_queue.get_nowait()
-                size = self._calculate_operation_size(op)
+                size = self._operation_size(op, batch)
                 if not batch.fits(size):
                     self._overflow_queue.put(op)
                     break
@@ -1501,7 +1539,7 @@ class ExecutionState:
 
     def _wait_for_first_operation(self, batch: _BatchAccumulator) -> bool:
         """Block until the batch has an operation. Returns False at shutdown."""
-        while not self._checkpointing_stopped.is_set():
+        while not self._is_shut_down():
             now = time.time()
             timeout = _STOP_SIGNAL_POLL_SECONDS
             until_refresh = self._seconds_until_next_refresh(now)
@@ -1518,7 +1556,7 @@ class ExecutionState:
                 self._consume_refresh_wake()
                 continue
             # The first operation is never refused for size; see fits().
-            batch.add(item, self._calculate_operation_size(item))
+            batch.add(item, self._operation_size(item, batch))
             return True
         return False
 
@@ -1532,6 +1570,17 @@ class ExecutionState:
         if batch.has_blocked_caller:
             timeout = min(timeout, _BLOCKED_CALLER_WAIT_SECONDS)
         return timeout
+
+    def _operation_size(self, item: QueuedOperation, batch: _BatchAccumulator) -> int:
+        """Size an operation taken off a queue for the batch.
+
+        A sizing error is raised as _BatchCollectionError with the item and the
+        batch so far. These are already dequeued, so the caller must fail them.
+        """
+        try:
+            return self._calculate_operation_size(item)
+        except Exception as e:
+            raise _BatchCollectionError(e, [*batch.operations, item]) from e
 
     @staticmethod
     def _calculate_operation_size(queued_op: QueuedOperation) -> int:

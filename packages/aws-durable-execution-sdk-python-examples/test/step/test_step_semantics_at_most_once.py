@@ -20,8 +20,7 @@ def test_step_semantics_at_most_once(durable_runner):
 
     assert result.status is InvocationStatus.SUCCEEDED
     assert (
-        deserialize_operation_payload(result.result)
-        == "Result: AT_MOST_ONCE_PER_RETRY semantics"
+        deserialize_operation_payload(result.result) == "Result: AT_MOST_ONCE semantics"
     )
 
     # Verify step operation exists with correct name

@@ -2,7 +2,7 @@
 
 The step result is 800 KB. That is above ``max_batch_size_bytes`` (750 KB) and
 below the service's 1 MB per-operation limit. With the default
-``AT_LEAST_ONCE_PER_RETRY`` semantics the START checkpoint is async, so the
+``AT_LEAST_ONCE`` semantics the START checkpoint is async, so the
 batcher still holds it when the sync SUCCEED arrives, and SUCCEED takes the
 overflow path. Before the fix the SUCCEED operation was never sent and the
 handler thread blocked forever, so ``run()`` raised ``TimeoutError``.

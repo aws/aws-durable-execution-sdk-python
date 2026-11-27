@@ -7,7 +7,7 @@ import random
 import string
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 from aws_durable_execution_sdk_python.exceptions import ValidationError
 
@@ -477,8 +477,47 @@ class ParallelBranch(Generic[T]):
 
 
 class StepSemantics(Enum):
+    """How often one step attempt may run its function. See StepConfig.
+
+    AT_LEAST_ONCE_ASYNC is experimental; it may change or be removed in a
+    future release. It works like AT_LEAST_ONCE, with one change.
+    The step returns its result as soon as the SUCCEED checkpoint is queued.
+    It does not wait for the service to save it. So the step has lower
+    latency.
+
+    The code after the step can run before the result is saved. If the
+    invocation ends before the save, the step runs again on replay.
+    Checkpoints are sent in order, and every invocation sends its queued
+    checkpoints before it returns. So any later checkpoint that the service
+    accepts also saves this result.
+
+    On that replay the step can return a different value. Later steps then
+    run again with the new value, and their earlier side effects used the old
+    one. So do not use this mode for a step whose result becomes an
+    idempotency key or a client token for a later step.
+
+    Only the SUCCEED checkpoint is not awaited. A failed attempt waits for
+    its RETRY or FAIL checkpoint. A plugin receives the step's end hook after
+    the service saves the result, at the latest when the invocation ends.
+
+    AT_MOST_ONCE and AT_LEAST_ONCE are aliases of AT_MOST_ONCE_PER_RETRY and
+    AT_LEAST_ONCE_PER_RETRY. They are the same members. The PerRetry names
+    are deprecated, so use AT_MOST_ONCE and AT_LEAST_ONCE in new code. The
+    PerRetry names stay the canonical members, so ``.name`` and iteration
+    match earlier releases.
+    """
+
+    # Deprecated: use AT_MOST_ONCE. It stays the canonical member, so .name
+    # and iteration match earlier releases.
     AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
+    # Deprecated: use AT_LEAST_ONCE. It stays the canonical member, so .name
+    # and iteration match earlier releases.
     AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
+    AT_LEAST_ONCE_ASYNC = "AT_LEAST_ONCE_ASYNC"
+
+    # Aliases of the members above, with the same value and behavior.
+    AT_MOST_ONCE = "AT_MOST_ONCE_PER_RETRY"
+    AT_LEAST_ONCE = "AT_LEAST_ONCE_PER_RETRY"
 
 
 _SUB_TYPE_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_")
@@ -506,6 +545,11 @@ def _validate_sub_type(sub_type: str | None) -> None:
         raise ValidationError(msg)
 
 
+# Default of StepConfig.step_semantics. StepConfig stores AT_LEAST_ONCE in its
+# place and records that the caller did not set the field.
+_STEP_SEMANTICS_UNSET: StepSemantics = cast("StepSemantics", object())
+
+
 @dataclass(frozen=True)
 class StepConfig:
     """Configuration for a step.
@@ -515,11 +559,18 @@ class StepConfig:
             If None, the SDK uses its default retry strategy.
 
         step_semantics: How often one attempt may run the function.
-            AT_LEAST_ONCE_PER_RETRY (the default) checkpoints START without
+            The default is AT_LEAST_ONCE. A step that does not set this
+            field uses the default_step_semantics of durable_execution,
+            which is AT_LEAST_ONCE unless set. A value set here wins, even
+            AT_LEAST_ONCE. AT_LEAST_ONCE checkpoints START without
             waiting, so an interrupted attempt runs again on the next
-            invocation. AT_MOST_ONCE_PER_RETRY waits for the START checkpoint
+            invocation. AT_MOST_ONCE waits for the START checkpoint
             first, and an interrupted attempt fails with StepInterruptedError
             and goes to the retry strategy instead of running again.
+            AT_LEAST_ONCE_ASYNC (experimental) also does not wait for the
+            SUCCEED checkpoint; see StepSemantics.
+            A config made with dataclasses.replace counts the field as set,
+            so it keeps its value and does not take the execution default.
 
         serdes: Custom serialization/deserialization for the step result.
             If None, uses the default JSON serializer.
@@ -538,12 +589,23 @@ class StepConfig:
     """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
-    step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE_PER_RETRY
+    step_semantics: StepSemantics = _STEP_SEMANTICS_UNSET
     serdes: SerDes | None = None
     sub_type: str | None = field(default=None, kw_only=True)
+    # Private. True when the caller set step_semantics. It is not an init
+    # field, so dataclasses.replace, which passes the stored value, sets it.
+    # A replaced config can then only lose the execution default, never
+    # take AT_LEAST_ONCE_ASYNC when the caller pinned AT_LEAST_ONCE.
+    _step_semantics_set: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         _validate_sub_type(self.sub_type)
+        is_set = self.step_semantics is not _STEP_SEMANTICS_UNSET
+        if not is_set:
+            object.__setattr__(self, "step_semantics", StepSemantics.AT_LEAST_ONCE)
+        object.__setattr__(self, "_step_semantics_set", is_set)
 
 
 @dataclass(frozen=True)

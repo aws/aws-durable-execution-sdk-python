@@ -9,6 +9,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, overload
 
+from aws_durable_execution_sdk_python.config import StepSemantics
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -172,6 +173,7 @@ def durable_execution(
     *,
     boto3_client: Boto3LambdaClient | None = None,
     plugins: list[DurableInstrumentationPluginFactory] | None = None,
+    default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE,
 ) -> Callable[[Any, LambdaContext], Any]: ...
 
 
@@ -181,6 +183,7 @@ def durable_execution(
     *,
     boto3_client: Boto3LambdaClient | None = None,
     plugins: list[DurableInstrumentationPluginFactory] | None = None,
+    default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE,
 ) -> Callable[
     [Callable[[Any, DurableContext], Any]],
     Callable[[Any, LambdaContext], Any],
@@ -192,6 +195,7 @@ def durable_execution(
     *,
     boto3_client: Boto3LambdaClient | None = None,
     plugins: list[DurableInstrumentationPluginFactory] | None = None,
+    default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE,
 ) -> (
     Callable[[Any, LambdaContext], Any]
     | Callable[
@@ -209,12 +213,23 @@ def durable_execution(
             factory's ``create_plugin`` is called once per invocation with that
             invocation's ``InvocationStartInfo``, and the instance it returns
             serves only that invocation.
+        default_step_semantics: The semantics of every step whose StepConfig
+            sets none. It applies to the steps of every context in the
+            execution, including child contexts, map items and parallel
+            branches. It also applies to the steps that SDK extensions create,
+            unless the extension sets step_semantics itself. A step's own
+            step_semantics wins. Before you set AT_LEAST_ONCE_ASYNC here, read
+            StepSemantics: a step whose result becomes an idempotency key for
+            a later step needs its own AT_LEAST_ONCE.
     """
     # Decorator called with parameters
     if func is None:
         logger.debug("Decorator called with parameters")
         return functools.partial(
-            durable_execution, boto3_client=boto3_client, plugins=plugins
+            durable_execution,
+            boto3_client=boto3_client,
+            plugins=plugins,
+            default_step_semantics=default_step_semantics,
         )
 
     logger.debug("Starting durable execution handler...")
@@ -261,6 +276,7 @@ def durable_execution(
             service_client=service_client,
             plugin_executor=plugin_executor,
             updated_operation_ids=invocation_input.updated_operation_ids,
+            default_step_semantics=default_step_semantics,
         )
 
         try:
@@ -567,6 +583,7 @@ def durable_execution(
                         output = (
                             DurableExecutionInvocationOutput.create_pending().to_dict()
                         )
+                    output = _apply_late_checkpoint_failure(output, execution_state)
                     completed = DurableExecutionInvocationOutput.from_dict(output)
                 except BaseException as error:
                     # Every started plugin gets its End hook, including when
@@ -601,6 +618,35 @@ def durable_execution(
             return invocation_future.result()
 
     return wrapper
+
+
+def _apply_late_checkpoint_failure(
+    output: MutableMapping[str, Any], execution_state: ExecutionState
+) -> MutableMapping[str, Any]:
+    """Classify a checkpoint batch that failed without the handler seeing it.
+
+    An example is the SUCCEED of an AT_LEAST_ONCE_ASYNC step, sent after the
+    handler returned or raised. That result is not saved. An invocation-scope
+    failure raises, so Lambda retries the invocation and the step runs again.
+    An execution-scope failure answers FAILED, as it does when the handler
+    sees it. A handler error keeps its own FAILED answer then.
+
+    A PENDING answer is checked too: a handler can suspend while the SUCCEED
+    is still queued, for example on a replayed wait.
+    """
+    try:
+        execution_state.raise_if_checkpointing_failed()
+    except BackgroundThreadError as bg_error:
+        source = bg_error.source_exception
+        if isinstance(source, BotoClientError) and not source.is_retryable():
+            if output.get("Status") == InvocationStatus.FAILED.value:
+                return output
+            return DurableExecutionInvocationOutput(
+                status=InvocationStatus.FAILED,
+                error=ErrorObject.from_exception(source),
+            ).to_dict()
+        raise source from bg_error
+    return output
 
 
 def handle_checkpoint_error(error: CheckpointError) -> DurableExecutionInvocationOutput:

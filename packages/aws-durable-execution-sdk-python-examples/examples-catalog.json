@@ -46,6 +46,17 @@
       "path": "./src/step/step_with_retry.py"
     },
     {
+      "name": "Step Semantics Async Default",
+      "description": "Experimental: make every step AT_LEAST_ONCE_ASYNC with default_step_semantics, and keep AT_LEAST_ONCE on the step that makes an idempotency key",
+      "handler": "step_semantics_async_default.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/step/step_semantics_async_default.py"
+    },
+    {
       "name": "Step with Pause Every",
       "description": "Experimental: pause the execution after every third failed attempt of a step, until an operator resumes it",
       "handler": "step_with_pause_every.handler",

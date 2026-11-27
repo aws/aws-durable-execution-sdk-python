@@ -1915,9 +1915,9 @@ def test_durable_handler_background_thread_failure_on_start_checkpoint():
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
-        # First step with AT_MOST_ONCE_PER_RETRY (synchronous START checkpoint)
+        # First step with AT_MOST_ONCE (synchronous START checkpoint)
         # This should fail on START checkpoint and prevent execution
-        step_config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
+        step_config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE)
         context.step(lambda ctx: "first_step_result", config=step_config)
 
         # Second step should never be reached if first step's START checkpoint fails
@@ -1955,7 +1955,7 @@ def test_durable_handler_background_thread_failure_on_start_checkpoint():
         test_handler(invocation_input, lambda_context)
 
     # Verify that checkpoint was called exactly once with only the START update:
-    # With AT_MOST_ONCE_PER_RETRY, START checkpoint is synchronous and blocks execution
+    # With AT_MOST_ONCE, START checkpoint is synchronous and blocks execution
     assert mock_client.checkpoint.call_count == 1
 
     # Verify the checkpoint call contained only the first step's START update

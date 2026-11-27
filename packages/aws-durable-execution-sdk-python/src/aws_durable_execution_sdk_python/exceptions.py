@@ -445,7 +445,7 @@ class RetryableSerDesError(InvocationError):
     In a map or parallel branch it escapes the batch rather than becoming a
     failed item, so the invocation still fails and retries.
 
-    A step configured AT_MOST_ONCE_PER_RETRY has already persisted its START
+    A step configured AT_MOST_ONCE has already persisted its START
     checkpoint, so the retried invocation treats the step as interrupted and
     applies the step retry strategy. A strategy that declines or exhausts its
     retries fails the step and surfaces :class:`StepError` to the caller.

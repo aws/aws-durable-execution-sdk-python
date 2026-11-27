@@ -101,16 +101,46 @@ def test_wait_for_condition_config():
 
 def test_step_semantics_enum():
     """Test StepSemantics enum."""
-    assert StepSemantics.AT_MOST_ONCE_PER_RETRY.value == "AT_MOST_ONCE_PER_RETRY"
-    assert StepSemantics.AT_LEAST_ONCE_PER_RETRY.value == "AT_LEAST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_MOST_ONCE.value == "AT_MOST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_LEAST_ONCE.value == "AT_LEAST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_LEAST_ONCE_ASYNC.value == "AT_LEAST_ONCE_ASYNC"
+
+
+def test_new_step_semantics_names_are_aliases():
+    """The new names are aliases, so `is` checks match either name."""
+    assert StepSemantics.AT_MOST_ONCE_PER_RETRY is StepSemantics.AT_MOST_ONCE
+    assert StepSemantics.AT_LEAST_ONCE_PER_RETRY is StepSemantics.AT_LEAST_ONCE
+    assert StepSemantics("AT_MOST_ONCE_PER_RETRY") is StepSemantics.AT_MOST_ONCE
+    assert StepSemantics("AT_LEAST_ONCE_PER_RETRY") is StepSemantics.AT_LEAST_ONCE
+
+
+def test_step_semantics_names_and_order_match_earlier_releases():
+    """The PerRetry members stay canonical, and the async member is added last."""
+    assert StepSemantics.AT_MOST_ONCE_PER_RETRY.name == "AT_MOST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_LEAST_ONCE_PER_RETRY.name == "AT_LEAST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_MOST_ONCE.name == "AT_MOST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_LEAST_ONCE.name == "AT_LEAST_ONCE_PER_RETRY"
+    assert list(StepSemantics) == [
+        StepSemantics.AT_MOST_ONCE_PER_RETRY,
+        StepSemantics.AT_LEAST_ONCE_PER_RETRY,
+        StepSemantics.AT_LEAST_ONCE_ASYNC,
+    ]
 
 
 def test_step_config_defaults():
     """Test StepConfig default values."""
     config = StepConfig()
     assert config.retry_strategy is None
-    assert config.step_semantics == StepSemantics.AT_LEAST_ONCE_PER_RETRY
+    assert config.step_semantics == StepSemantics.AT_LEAST_ONCE
+    assert config.step_semantics.value == "AT_LEAST_ONCE_PER_RETRY"
     assert config.serdes is None
+
+
+def test_step_config_default_semantics_equals_explicit_default():
+    """An unset step_semantics compares equal to an explicit AT_LEAST_ONCE."""
+    explicit = StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE)
+    assert StepConfig() == explicit
+    assert repr(StepConfig()) == repr(explicit)
 
 
 def test_step_config_with_values():
@@ -120,12 +150,12 @@ def test_step_config_with_values():
 
     config = StepConfig(
         retry_strategy=retry_strategy,
-        step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY,
+        step_semantics=StepSemantics.AT_MOST_ONCE,
         serdes=serdes,
     )
 
     assert config.retry_strategy is retry_strategy
-    assert config.step_semantics == StepSemantics.AT_MOST_ONCE_PER_RETRY
+    assert config.step_semantics == StepSemantics.AT_MOST_ONCE
     assert config.serdes is serdes
 
 
@@ -172,13 +202,11 @@ def test_sub_type_is_keyword_only_so_positional_order_is_unchanged():
     )
     assert config.retry_strategy is retry
     assert config.sub_type is None
-    assert (
-        StepConfig(retry, StepSemantics.AT_MOST_ONCE_PER_RETRY, serdes).serdes is serdes
-    )
+    assert StepConfig(retry, StepSemantics.AT_MOST_ONCE, serdes).serdes is serdes
     # ChildConfig.sub_type keeps its 2.x positional slot; only its type changed.
     assert ChildConfig(serdes, "OrderSaga").sub_type == "OrderSaga"
     with pytest.raises(TypeError):
-        StepConfig(retry, StepSemantics.AT_LEAST_ONCE_PER_RETRY, serdes, "OrderCharge")  # type: ignore[misc]
+        StepConfig(retry, StepSemantics.AT_LEAST_ONCE, serdes, "OrderCharge")  # type: ignore[misc]
 
 
 def test_child_config_with_summary_generator():

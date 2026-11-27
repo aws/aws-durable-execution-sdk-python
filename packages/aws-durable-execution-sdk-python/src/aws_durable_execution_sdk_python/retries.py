@@ -42,7 +42,7 @@ class RetryDecision:
             invocation with PENDING. The step resumes with its next attempt
             after an operator calls ResumeDurableExecution.
             Only an attempt that raised in the current invocation can pause.
-            An AT_MOST_ONCE_PER_RETRY attempt that was interrupted does not
+            An AT_MOST_ONCE attempt that was interrupted does not
             pause.
             The pause applies to the whole durable execution. A step in a map
             or parallel branch can still pause the execution after the map or

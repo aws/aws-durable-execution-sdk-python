@@ -170,6 +170,33 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 `RetryPresets` in `aws_durable_execution_sdk_python.retries` holds ready-made strategies.
 
+### Step semantics
+
+`StepConfig(step_semantics=...)` sets how often one attempt may run the step function:
+
+- `StepSemantics.AT_LEAST_ONCE` (default): the attempt runs again on replay if it was interrupted before its result was saved. The step waits for its result to be saved before it returns.
+- `StepSemantics.AT_MOST_ONCE`: the step saves its start before it runs. An interrupted attempt does not run again. It fails with `StepInterruptedError` and goes to the retry strategy.
+- `StepSemantics.AT_LEAST_ONCE_ASYNC` (experimental): like `AT_LEAST_ONCE`, but the step returns its result without waiting for the save. So the step has lower latency. Each invocation saves the result before it returns. If the invocation ends before the save, the step runs again on replay. On that replay the step can return a different value, and later steps run again with it. So do not use this mode for a step whose result becomes an idempotency key or a client token for a later step. A failed attempt still waits for its retry or failure to be saved. This value is experimental. It may change or be removed in a future release.
+
+`AT_MOST_ONCE` and `AT_LEAST_ONCE` are aliases of `AT_MOST_ONCE_PER_RETRY` and `AT_LEAST_ONCE_PER_RETRY`, so they are the same members. The `PerRetry` names are deprecated. They stay the canonical members, so `.name` and iteration do not change.
+
+`@durable_execution(default_step_semantics=...)` sets the semantics of every step that does not set its own. It applies in child contexts, `map` items, `parallel` branches, and the steps that SDK extensions create, unless the extension sets its own. A step's own `step_semantics` wins. A config made with `dataclasses.replace` counts `step_semantics` as set, so it keeps its value and does not take the execution default.
+
+```python
+from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
+
+
+@durable_execution(default_step_semantics=StepSemantics.AT_LEAST_ONCE_ASYNC)
+def handler(event: dict, context: DurableContext) -> dict:
+    # create_order_id and charge are @durable_step functions.
+    # The order ID becomes an idempotency key, so its step waits for the save.
+    order_id = context.step(
+        create_order_id(),
+        config=StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE),
+    )
+    return context.step(charge(order_id, event["amount"]))
+```
+
 ### Pause after repeated failures (experimental)
 
 A retry decision can pause the durable execution. When the retry strategy returns `RetryDecision.retry(delay, pause=True)` for a failed attempt, the step saves its normal retry, then the SDK asks Lambda to pause, and the invocation ends. An operator resumes the execution with the Lambda `ResumeDurableExecution` API, and the next attempt runs.
@@ -205,7 +232,7 @@ RETRY_AND_PAUSE = StepConfig(retry_strategy=retry_and_pause)
 
 - `pause` does not change how many attempts run. When the decision has `should_retry=False`, the step fails as usual and does not pause.
 - `context.step` uses `pause`, including the `wait_for_callback` submitter. `with_retry` ignores `pause`.
-- Only an attempt that raised in the current invocation can pause. An `AT_MOST_ONCE_PER_RETRY` attempt that was interrupted retries without a pause.
+- Only an attempt that raised in the current invocation can pause. An `AT_MOST_ONCE` attempt that was interrupted retries without a pause.
 - The pause applies to the whole execution. A step in a `map` or `parallel` branch can still pause the execution after the map or parallel operation has finished. No checkpointed data is lost. Resume the execution to continue.
 - Give the function's execution role `lambda:PauseDurableExecution` on its own durable executions. If the function uses a customer managed AWS KMS key, the role also needs `kms:Decrypt` on that key, as the [Lambda pause and resume prerequisites](https://docs.aws.amazon.com/lambda/latest/dg/durable-pause-resume.html#durable-pause-resume-prerequisites) require. If the pause call fails, the SDK logs a warning with the error and the step retries as usual. A missing permission is one possible cause.
 - This feature is experimental. It may change or be removed in a future release.
