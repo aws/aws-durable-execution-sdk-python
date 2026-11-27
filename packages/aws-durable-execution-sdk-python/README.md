@@ -178,7 +178,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 - `StepSemantics.AT_MOST_ONCE`: the step saves its start before it runs. An interrupted attempt does not run again. It fails with `StepInterruptedError` and goes to the retry strategy.
 - `StepSemantics.AT_LEAST_ONCE_ASYNC` (experimental): like `AT_LEAST_ONCE`, but the step returns its result without waiting for the save. So the step has lower latency. Each invocation saves the result before it returns. If the invocation ends before the save, the step runs again on replay. On that replay the step can return a different value, and later steps run again with it. So do not use this mode for a step whose result becomes an idempotency key or a client token for a later step. A failed attempt still waits for its retry or failure to be saved. This value is experimental. It may change or be removed in a future release.
 
-`AT_MOST_ONCE_PER_RETRY` and `AT_LEAST_ONCE_PER_RETRY` are deprecated aliases of `AT_MOST_ONCE` and `AT_LEAST_ONCE`.
+`AT_MOST_ONCE` and `AT_LEAST_ONCE` are aliases of `AT_MOST_ONCE_PER_RETRY` and `AT_LEAST_ONCE_PER_RETRY`, so they are the same members. The `PerRetry` names are deprecated. They stay the canonical members, so `.name` and iteration do not change.
 
 `@durable_execution(default_step_semantics=...)` sets the semantics of every step that does not set its own. It applies in child contexts, `map` items, `parallel` branches, and the steps that SDK extensions create, unless the extension sets its own. A step's own `step_semantics` wins. `dataclasses.replace` cannot tell an explicit `AT_LEAST_ONCE` from the default. So to pin `AT_LEAST_ONCE` under an async default, build the config with `StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE, ...)`.
 

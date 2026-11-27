@@ -106,12 +106,25 @@ def test_step_semantics_enum():
     assert StepSemantics.AT_LEAST_ONCE_ASYNC.value == "AT_LEAST_ONCE_ASYNC"
 
 
-def test_deprecated_step_semantics_are_the_new_members():
-    """The PerRetry names are aliases, so `is` checks match either name."""
+def test_new_step_semantics_names_are_aliases():
+    """The new names are aliases, so `is` checks match either name."""
     assert StepSemantics.AT_MOST_ONCE_PER_RETRY is StepSemantics.AT_MOST_ONCE
     assert StepSemantics.AT_LEAST_ONCE_PER_RETRY is StepSemantics.AT_LEAST_ONCE
     assert StepSemantics("AT_MOST_ONCE_PER_RETRY") is StepSemantics.AT_MOST_ONCE
     assert StepSemantics("AT_LEAST_ONCE_PER_RETRY") is StepSemantics.AT_LEAST_ONCE
+
+
+def test_step_semantics_names_and_order_match_earlier_releases():
+    """The PerRetry members stay canonical, and the async member is added last."""
+    assert StepSemantics.AT_MOST_ONCE_PER_RETRY.name == "AT_MOST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_LEAST_ONCE_PER_RETRY.name == "AT_LEAST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_MOST_ONCE.name == "AT_MOST_ONCE_PER_RETRY"
+    assert StepSemantics.AT_LEAST_ONCE.name == "AT_LEAST_ONCE_PER_RETRY"
+    assert list(StepSemantics) == [
+        StepSemantics.AT_MOST_ONCE_PER_RETRY,
+        StepSemantics.AT_LEAST_ONCE_PER_RETRY,
+        StepSemantics.AT_LEAST_ONCE_ASYNC,
+    ]
 
 
 def test_step_config_defaults():

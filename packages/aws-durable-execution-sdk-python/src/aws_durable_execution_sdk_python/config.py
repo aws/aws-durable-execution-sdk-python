@@ -500,20 +500,24 @@ class StepSemantics(Enum):
     its RETRY or FAIL checkpoint. A plugin receives the step's end hook after
     the service saves the result, at the latest when the invocation ends.
 
-    AT_MOST_ONCE_PER_RETRY and AT_LEAST_ONCE_PER_RETRY are deprecated aliases
-    of AT_MOST_ONCE and AT_LEAST_ONCE. Existing code keeps working.
+    AT_MOST_ONCE and AT_LEAST_ONCE are aliases of AT_MOST_ONCE_PER_RETRY and
+    AT_LEAST_ONCE_PER_RETRY. They are the same members. The PerRetry names
+    are deprecated, so use AT_MOST_ONCE and AT_LEAST_ONCE in new code. The
+    PerRetry names stay the canonical members, so ``.name`` and iteration
+    match earlier releases.
     """
 
-    AT_MOST_ONCE = "AT_MOST_ONCE_PER_RETRY"
-    AT_LEAST_ONCE = "AT_LEAST_ONCE_PER_RETRY"
+    # Deprecated: use AT_MOST_ONCE. It stays the canonical member, so .name
+    # and iteration match earlier releases.
+    AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
+    # Deprecated: use AT_LEAST_ONCE. It stays the canonical member, so .name
+    # and iteration match earlier releases.
+    AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
     AT_LEAST_ONCE_ASYNC = "AT_LEAST_ONCE_ASYNC"
 
-    # Deprecated: use AT_MOST_ONCE. It is the same member, with the same value
-    # and behavior.
-    AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
-    # Deprecated: use AT_LEAST_ONCE. It is the same member, with the same value
-    # and behavior.
-    AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
+    # Aliases of the members above, with the same value and behavior.
+    AT_MOST_ONCE = "AT_MOST_ONCE_PER_RETRY"
+    AT_LEAST_ONCE = "AT_LEAST_ONCE_PER_RETRY"
 
 
 _SUB_TYPE_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_")
