@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import patch
@@ -28,9 +29,14 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationAction,
+    OperationUpdate,
+)
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import SerDes
+from aws_durable_execution_sdk_python_testing.client import InMemoryServiceClient
 from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
@@ -66,11 +72,15 @@ def session_config(client: Any, **fields: Any) -> AgentcoreSessionConfig:
     return AgentcoreSessionConfig(**values)
 
 
-def session_handler(config: AgentcoreSessionConfig, body: Body) -> Callable[..., Any]:
+def session_handler(
+    config: AgentcoreSessionConfig,
+    body: Body,
+    default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE,
+) -> Callable[..., Any]:
     """A durable handler that runs ``body`` in a session named ``review``,
     and returns the message of an error that leaves it."""
 
-    @durable_execution
+    @durable_execution(default_step_semantics=default_step_semantics)
     def handler(event: Any, context: DurableContext) -> Any:
         try:
             return {
@@ -780,18 +790,52 @@ def test_replay_reads_job_results_and_errors_from_checkpoints(
 
 def test_session_id_step_waits_for_its_save(fake_agentcore_client: Any) -> None:
     """The session ID becomes the runtime session of later steps. So its step
-    sets AT_LEAST_ONCE itself, and default_step_semantics cannot make it async."""
+    waits for its SUCCEED checkpoint, even when default_step_semantics is
+    AT_LEAST_ONCE_ASYNC."""
     client = fake_agentcore_client()
-    original_step = DurableContext.step
+    original_checkpoint = InMemoryServiceClient.checkpoint
+    events: list[str] = []
 
-    with patch.object(
-        DurableContext, "step", autospec=True, side_effect=original_step
-    ) as step:
-        outcome(run(session_handler(session_config(client), lambda s, ctx: None)))
+    def checkpoint(
+        self: InMemoryServiceClient,
+        durable_execution_arn: str,
+        checkpoint_token: str,
+        updates: list[OperationUpdate],
+        client_token: str | None,
+    ) -> Any:
+        saves_id = any(
+            update.name == "review.session" and update.action is OperationAction.SUCCEED
+            for update in updates
+        )
+        if saves_id:
+            # A step that does not wait for this save lets the handler run now.
+            time.sleep(0.5)
+        output = original_checkpoint(
+            self, durable_execution_arn, checkpoint_token, updates, client_token
+        )
+        if saves_id:
+            events.append("session ID saved")
+        return output
 
-    [config] = [
-        call.kwargs["config"]
-        for call in step.call_args_list
-        if call.kwargs.get("name") == "review.session"
-    ]
-    assert config.step_semantics is StepSemantics.AT_LEAST_ONCE
+    def body(session: AgentcoreSession, ctx: DurableContext) -> Any:
+        events.append("handler started")
+        return session.invoke(ctx, "build", job_input=1, options=OPTIONS)
+
+    with patch.object(InMemoryServiceClient, "checkpoint", checkpoint):
+        result = run_jobs(
+            session_handler(
+                session_config(client),
+                body,
+                default_step_semantics=StepSemantics.AT_LEAST_ONCE_ASYNC,
+            ),
+            {"build.callback": b'"built"'},
+        )
+
+    assert outcome(result) == {"result": "built"}
+    # The service answered the save before the handler first started. The
+    # handler starts again in the replay after the callback.
+    assert events[:2] == ["session ID saved", "handler started"]
+    session = result.get_context("review").get_step("review.session")
+    assert session.result is not None
+    [request] = client.requests("invoke_agent_runtime")
+    assert request["runtimeSessionId"] == json.loads(session.result)

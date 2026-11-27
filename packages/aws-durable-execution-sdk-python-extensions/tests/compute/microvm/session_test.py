@@ -35,9 +35,14 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationAction,
+    OperationUpdate,
+)
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import SerDes
+from aws_durable_execution_sdk_python_testing.client import InMemoryServiceClient
 from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
@@ -147,11 +152,12 @@ def run() -> Iterator[Callable[..., DurableFunctionTestResult]]:
 def session_handler(
     config: MicrovmSessionConfig,
     body: Callable[[MicrovmSession, DurableContext, Any], Any],
+    default_step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE,
 ) -> Callable[..., Any]:
     """A durable handler that runs ``body`` in a session named ``pipeline``,
     and returns the class and message of an error that leaves it."""
 
-    @durable_execution
+    @durable_execution(default_step_semantics=default_step_semantics)
     def handler(event: Any, context: DurableContext) -> Any:
         try:
             return {
@@ -2463,19 +2469,45 @@ def test_fails_with_not_running_when_the_check_finds_the_microvm_terminated(
 def test_session_id_step_waits_for_its_save(
     run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
-    """The session ID becomes the launch's client token. So its step sets
-    AT_LEAST_ONCE itself, and default_step_semantics cannot make it async."""
+    """The session ID becomes the launch's client token. So its step waits for
+    its SUCCEED checkpoint, even when default_step_semantics is
+    AT_LEAST_ONCE_ASYNC."""
     client = fake_client(endpoint=fake_endpoint().url)
-    original_step = DurableContext.step
+    original_checkpoint = InMemoryServiceClient.checkpoint
+    launches_at_save: list[int] = []
 
-    with patch.object(
-        DurableContext, "step", autospec=True, side_effect=original_step
-    ) as step:
-        outcome(run(session_handler(session_config(client), lambda vm, ctx, e: None)))
+    def checkpoint(
+        self: InMemoryServiceClient,
+        durable_execution_arn: str,
+        checkpoint_token: str,
+        updates: list[OperationUpdate],
+        client_token: str | None,
+    ) -> Any:
+        saves_id = any(
+            update.name == "pipeline.session"
+            and update.action is OperationAction.SUCCEED
+            for update in updates
+        )
+        if saves_id:
+            # A step that does not wait for this save lets the launch run now.
+            time.sleep(0.5)
+        output = original_checkpoint(
+            self, durable_execution_arn, checkpoint_token, updates, client_token
+        )
+        if saves_id:
+            launches_at_save.append(len(client.requests("run_microvm")))
+        return output
 
-    [config] = [
-        call.kwargs["config"]
-        for call in step.call_args_list
-        if call.kwargs.get("name") == "pipeline.session"
-    ]
-    assert config.step_semantics is StepSemantics.AT_LEAST_ONCE
+    with patch.object(InMemoryServiceClient, "checkpoint", checkpoint):
+        result = run(
+            session_handler(
+                session_config(client),
+                lambda vm, ctx, e: None,
+                default_step_semantics=StepSemantics.AT_LEAST_ONCE_ASYNC,
+            )
+        )
+
+    assert outcome(result) == {"result": None}
+    # The service answered the save before the launch step started.
+    assert launches_at_save == [0]
+    assert len(client.requests("run_microvm")) == 1
