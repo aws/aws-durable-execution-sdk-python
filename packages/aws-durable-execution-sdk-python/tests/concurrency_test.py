@@ -5493,3 +5493,66 @@ def test_instrumented_executor_isolates_bindings_on_a_reused_worker() -> None:
             call.args[0].shutdown(wait=True)
         binding.reset(token)
     assert binding.get() == "empty"
+
+
+def test_resumed_batch_settles_recorded_terminal_items_before_completing():
+    """Recorded terminal items settle before the batch decides completion.
+
+    Items 0 and 1 are recorded SUCCEEDED, item 2 FAILED and item 3 STARTED. The
+    recorded outcomes replay on worker threads in thread-completion order, so
+    item 2's recorded failure can arrive after the second success has already
+    met min_successful. The result must still carry the recorded failure, and
+    item 3 (not a terminal outcome) must not be started.
+    """
+    recorded = {
+        "op_0": OperationStatus.SUCCEEDED,
+        "op_1": OperationStatus.SUCCEEDED,
+        "op_2": OperationStatus.FAILED,
+        "op_3": OperationStatus.STARTED,
+    }
+    started: list[int] = []
+
+    class RecordedExecutor(ConcurrentExecutor):
+        def _execute_item_in_child_context(self, executor_context, executable):
+            started.append(executable.index)
+            if executable.index == 2:
+                time.sleep(0.2)  # replays its recorded failure after items 0, 1
+                msg = "recorded failure"
+                raise ValueError(msg)
+            return f"result_{executable.index}"
+
+    executor = RecordedExecutor(
+        executables=[Executable(i, lambda: None) for i in range(4)],
+        max_concurrency=2,
+        completion_config=CompletionConfig(min_successful=2),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = Mock()
+    execution_state.get_checkpoint_result.side_effect = lambda operation_id: (
+        CheckpointedResult.create_from_operation(
+            Operation(
+                operation_id=operation_id,
+                operation_type=OperationType.CONTEXT,
+                status=recorded[operation_id],
+            )
+        )
+    )
+    executor_context = Mock()
+    executor_context._parent_id = "batch"  # noqa: SLF001
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert [item.status for item in result.all] == [
+        BatchItemStatus.SUCCEEDED,
+        BatchItemStatus.SUCCEEDED,
+        BatchItemStatus.FAILED,
+    ]
+    assert result.success_count == 2
+    assert result.failure_count == 1
+    assert result.completion_reason is CompletionReason.MIN_SUCCESSFUL_REACHED
+    assert 3 not in started
