@@ -632,12 +632,8 @@ def _apply_late_checkpoint_failure(
     sees it. A handler error keeps its own FAILED answer then.
 
     A PENDING answer is checked too: a handler can suspend while the SUCCEED
-    is still queued, for example on a replayed wait. A withdrawn token is the
-    exception, because then the service records nothing from this invocation
-    and PENDING is the only true answer.
+    is still queued, for example on a replayed wait.
     """
-    if execution_state.is_checkpoint_token_revoked:
-        return output
     try:
         execution_state.raise_if_checkpointing_failed()
     except BackgroundThreadError as bg_error:
