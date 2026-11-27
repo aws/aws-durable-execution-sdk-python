@@ -636,12 +636,6 @@ def _apply_late_checkpoint_failure(
     exception, because then the service records nothing from this invocation
     and PENDING is the only true answer.
     """
-    if output.get("Status") not in {
-        InvocationStatus.SUCCEEDED.value,
-        InvocationStatus.FAILED.value,
-        InvocationStatus.PENDING.value,
-    }:
-        return output
     if execution_state.is_checkpoint_token_revoked:
         return output
     try:
