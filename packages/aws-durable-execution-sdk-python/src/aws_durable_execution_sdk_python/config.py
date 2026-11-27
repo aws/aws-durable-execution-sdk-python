@@ -565,6 +565,10 @@ class StepConfig:
             and goes to the retry strategy instead of running again.
             AT_LEAST_ONCE_ASYNC (experimental) also does not wait for the
             SUCCEED checkpoint; see StepSemantics.
+            dataclasses.replace cannot tell an explicit AT_LEAST_ONCE from
+            the default. So to pin AT_LEAST_ONCE under an async execution
+            default, build the config with
+            StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE, ...).
 
         serdes: Custom serialization/deserialization for the step result.
             If None, uses the default JSON serializer.

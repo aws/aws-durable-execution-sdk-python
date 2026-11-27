@@ -180,7 +180,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 `AT_MOST_ONCE_PER_RETRY` and `AT_LEAST_ONCE_PER_RETRY` are deprecated aliases of `AT_MOST_ONCE` and `AT_LEAST_ONCE`.
 
-`@durable_execution(default_step_semantics=...)` sets the semantics of every step that does not set its own. It applies in child contexts, `map` items, `parallel` branches, and the steps that SDK extensions create, unless the extension sets its own. A step's own `step_semantics` wins.
+`@durable_execution(default_step_semantics=...)` sets the semantics of every step that does not set its own. It applies in child contexts, `map` items, `parallel` branches, and the steps that SDK extensions create, unless the extension sets its own. A step's own `step_semantics` wins. `dataclasses.replace` cannot tell an explicit `AT_LEAST_ONCE` from the default. So to pin `AT_LEAST_ONCE` under an async default, build the config with `StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE, ...)`.
 
 ```python
 from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
