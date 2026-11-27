@@ -1339,12 +1339,16 @@ class EventCreationContext:
         if not self.operation.step_details or not self.operation_update:
             return None
 
-        delay = 0
+        delay = None
         if (
             self.operation_update.operation_type == OperationType.STEP
-            and self.operation_update.step_options
+            and self.operation_update.action != OperationAction.FAIL
         ):
-            delay = self.operation_update.step_options.next_attempt_delay_seconds
+            options = self.operation_update.step_options
+            if options is not None:
+                delay = options.next_attempt_delay_seconds
+            elif self.operation_update.action == OperationAction.RETRY:
+                delay = 0
 
         return RetryDetails(
             current_attempt=self.operation.step_details.attempt,
@@ -2354,38 +2358,7 @@ class Event:
     @classmethod
     def from_event_with_id(cls, event: Event, event_id: int) -> Event:
         """Create a new Event from an existing event with updated event_id."""
-        return cls(
-            event_type=event.event_type,
-            event_timestamp=event.event_timestamp,
-            sub_type=event.sub_type,
-            event_id=event_id,
-            operation_id=event.operation_id,
-            name=event.name,
-            parent_id=event.parent_id,
-            execution_started_details=event.execution_started_details,
-            execution_succeeded_details=event.execution_succeeded_details,
-            execution_failed_details=event.execution_failed_details,
-            execution_timed_out_details=event.execution_timed_out_details,
-            execution_stopped_details=event.execution_stopped_details,
-            context_started_details=event.context_started_details,
-            context_succeeded_details=event.context_succeeded_details,
-            context_failed_details=event.context_failed_details,
-            wait_started_details=event.wait_started_details,
-            wait_succeeded_details=event.wait_succeeded_details,
-            wait_cancelled_details=event.wait_cancelled_details,
-            step_started_details=event.step_started_details,
-            step_succeeded_details=event.step_succeeded_details,
-            step_failed_details=event.step_failed_details,
-            chained_invoke_started_details=event.chained_invoke_started_details,
-            chained_invoke_succeeded_details=event.chained_invoke_succeeded_details,
-            chained_invoke_failed_details=event.chained_invoke_failed_details,
-            chained_invoke_timed_out_details=event.chained_invoke_timed_out_details,
-            chained_invoke_stopped_details=event.chained_invoke_stopped_details,
-            callback_started_details=event.callback_started_details,
-            callback_succeeded_details=event.callback_succeeded_details,
-            callback_failed_details=event.callback_failed_details,
-            callback_timed_out_details=event.callback_timed_out_details,
-        )
+        return replace(event, event_id=event_id)
 
     @classmethod
     def create_event_terminated(cls, context: EventCreationContext) -> Event:
@@ -2763,9 +2736,7 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
                 existing_step.error if existing_step else None
             )
             attempt: int = existing_step.attempt if existing_step else 0
-            next_attempt_ts: datetime.datetime | None = (
-                existing_step.next_attempt_timestamp if existing_step else None
-            )
+            next_attempt_ts: datetime.datetime | None = None
 
             # StepSucceeded provides result
             if event.step_succeeded_details:

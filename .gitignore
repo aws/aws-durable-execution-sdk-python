@@ -38,3 +38,5 @@ dist/
 **/template.generated.json
 
 .env
+
+/.conformance/

@@ -1,0 +1,46 @@
+name: LMI e2e tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - '.github/workflows/lmi-e2e-tests.yml'
+      - '.github/scripts/lmi-ci.sh'
+      - 'lmi_tests/**'
+      - '!lmi_tests/**/*.md'
+      - 'packages/aws-durable-execution-sdk-python/src/**'
+      - 'packages/aws-durable-execution-sdk-python/pyproject.toml'
+      - 'packages/aws-durable-execution-sdk-python-testing/src/**'
+      - 'packages/aws-durable-execution-sdk-python-testing/pyproject.toml'
+      - 'pyproject.toml'
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Region containing the test LMI capacity provider
+        default: us-west-2
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    permissions:
+      contents: read
+      id-token: write
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/lmi-lifecycle.yml@41878367192be996cb3414939e15270febedb210
+    with:
+      conformance-ref: 41878367192be996cb3414939e15270febedb210
+      sdk-script: .github/scripts/lmi-ci.sh
+      runtime-label: Python 3.14
+      lambda-runtime: python3.14
+      stack-name: python-lmi-e2e
+      region: ${{ inputs.region || 'us-west-2' }}
+    secrets:
+      TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
+      TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
+      CAPACITY_PROVIDER_ARN: ${{ secrets.CAPACITY_PROVIDER_ARN }}

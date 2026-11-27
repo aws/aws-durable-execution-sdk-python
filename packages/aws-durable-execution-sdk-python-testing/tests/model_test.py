@@ -7,9 +7,14 @@ import json
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    Operation,
+    OperationAction,
     OperationStatus,
     OperationSubType,
     OperationType,
+    OperationUpdate,
+    StepDetails,
+    StepOptions,
 )
 
 from aws_durable_execution_sdk_python_testing.exceptions import (
@@ -33,6 +38,7 @@ from aws_durable_execution_sdk_python_testing.model import (
     ContextSucceededDetails,
     ErrorResponse,
     Event,
+    EventCreationContext,
     EventError,
     EventInput,
     EventResult,
@@ -1522,6 +1528,62 @@ def test_retry_details_with_current_attempt_only():
 
     result_data = retry_details.to_dict()
     assert result_data == {"CurrentAttempt": 2}
+
+
+@pytest.mark.parametrize(
+    ("action", "step_options", "expected"),
+    [
+        (OperationAction.FAIL, None, {"CurrentAttempt": 1}),
+        (
+            OperationAction.FAIL,
+            StepOptions(next_attempt_delay_seconds=30),
+            {"CurrentAttempt": 1},
+        ),
+        (OperationAction.SUCCEED, None, {"CurrentAttempt": 1}),
+        (
+            OperationAction.RETRY,
+            None,
+            {"CurrentAttempt": 1, "NextAttemptDelaySeconds": 0},
+        ),
+        (
+            OperationAction.RETRY,
+            StepOptions(next_attempt_delay_seconds=0),
+            {"CurrentAttempt": 1, "NextAttemptDelaySeconds": 0},
+        ),
+    ],
+)
+def test_retry_delay_is_published_only_when_another_attempt_is_scheduled(
+    action: OperationAction, step_options: StepOptions | None, expected: dict[str, int]
+) -> None:
+    context = EventCreationContext(
+        operation=Operation(
+            operation_id="step",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.FAILED,
+            step_details=StepDetails(attempt=1),
+        ),
+        operation_update=OperationUpdate(
+            operation_id="step",
+            operation_type=OperationType.STEP,
+            action=action,
+            step_options=step_options,
+        ),
+        event_id=1,
+        durable_execution_arn="execution",
+        start_durable_execution_input=StartDurableExecutionInput(
+            account_id="123456789012",
+            function_name="fixture",
+            function_qualifier="$LATEST",
+            execution_name="case",
+            execution_timeout_seconds=30,
+            execution_retention_period_days=1,
+        ),
+    )
+
+    details = context.get_retry_details()
+
+    assert details is not None
+    assert details.to_dict() == expected
 
 
 # Tests for ExecutionStartedDetails
@@ -3599,6 +3661,22 @@ def test_events_to_operations_treats_empty_sub_type_as_none():
         sub_type="",
     )
     assert events_to_operations([event])[0].sub_type is None
+
+
+def test_reassigning_invocation_event_id_preserves_completion_details() -> None:
+    start = datetime.datetime(2023, 1, 1, tzinfo=datetime.UTC)
+    end = start + datetime.timedelta(seconds=1)
+    event = Event.create_invocation_completed(
+        event_id=0,
+        event_timestamp=end,
+        start_timestamp=start,
+        end_timestamp=end,
+        request_id="req-123",
+    )
+
+    actual = Event.from_event_with_id(event, 42)
+
+    assert actual.to_dict() == {**event.to_dict(), "EventId": 42}
 
 
 def test_invocation_completed_details_to_json_dict():
