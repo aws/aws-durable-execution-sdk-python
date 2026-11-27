@@ -6306,6 +6306,58 @@ def test_stop_settles_pending_refresh_and_sends_queued_items():
     assert calls == [[async_op.operation_update]]
 
 
+def test_stop_sends_async_succeed_left_in_overflow_queue():
+    """At stop, an operation that is only in the overflow queue is still sent.
+
+    The async SUCCEED does not fit next to the START, so the batcher moves it
+    to the overflow queue. The stop signal comes while the START is in flight,
+    so at stop the main queue is empty and only the overflow queue has work.
+    """
+    calls: list[list] = []
+    in_flight = threading.Event()
+    release = threading.Event()
+    recording_client = _refresh_client(calls)
+    record = recording_client.checkpoint
+
+    def _checkpoint(**kwargs):
+        if not calls:
+            in_flight.set()
+            assert release.wait(timeout=5)
+        return record(**kwargs)
+
+    recording_client.checkpoint = _checkpoint
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=recording_client,
+        plugin_executor=PluginExecutor(plugins=None),
+        batcher_config=CheckpointBatcherConfig(max_batch_size_bytes=200),
+    )
+    start = _step_update(OperationAction.START, "a")
+    succeed = OperationUpdate(
+        operation_id="b",
+        operation_type=OperationType.STEP,
+        action=OperationAction.SUCCEED,
+        payload="x" * 300,
+    )
+    state.create_checkpoint(start, is_sync=False)
+    state.create_checkpoint(succeed, is_sync=False)
+
+    thread = threading.Thread(target=state.checkpoint_batches_forever, daemon=True)
+    thread.start()
+    assert in_flight.wait(timeout=5)
+    assert state._checkpoint_queue.empty()
+    assert list(state._overflow_queue.queue)[0].operation_update is succeed
+
+    state.stop_checkpointing()
+    release.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert calls == [[start], [succeed]]
+
+
 def test_cancelled_refresh_deferred_then_due_is_dropped():
     """A refresh cancelled while pending is dropped when its time comes, and
     the batch goes on without it."""
