@@ -118,8 +118,16 @@ def test_step_config_defaults():
     """Test StepConfig default values."""
     config = StepConfig()
     assert config.retry_strategy is None
-    assert config.step_semantics is None
+    assert config.step_semantics == StepSemantics.AT_LEAST_ONCE
+    assert config.step_semantics.value == "AT_LEAST_ONCE_PER_RETRY"
     assert config.serdes is None
+
+
+def test_step_config_default_semantics_equals_explicit_default():
+    """An unset step_semantics compares equal to an explicit AT_LEAST_ONCE."""
+    explicit = StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE)
+    assert StepConfig() == explicit
+    assert repr(StepConfig()) == repr(explicit)
 
 
 def test_step_config_with_values():

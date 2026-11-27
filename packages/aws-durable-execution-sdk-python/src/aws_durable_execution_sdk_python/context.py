@@ -899,7 +899,7 @@ class DurableContext(DurableContextProtocol):
         logger.debug("Step name: %s", step_name)
         if not config:
             config = StepConfig()
-        if config.step_semantics is None:
+        if not config._step_semantics_set:  # noqa: SLF001
             config = replace(config, step_semantics=self.state.default_step_semantics)
         sub_type = config.sub_type or OperationSubType.STEP.value
         with self._operation_replay_aware(

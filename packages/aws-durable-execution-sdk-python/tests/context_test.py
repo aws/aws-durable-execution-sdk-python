@@ -5,6 +5,7 @@ import json
 import random
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from itertools import islice
 from unittest.mock import ANY, MagicMock, Mock, patch
 
@@ -562,6 +563,18 @@ def test_step_with_name_and_config(mock_executor_class):
         (
             StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE),
             StepSemantics.AT_LEAST_ONCE,
+        ),
+        (StepConfig(None, StepSemantics.AT_LEAST_ONCE), StepSemantics.AT_LEAST_ONCE),
+        (replace(StepConfig(), serdes=None), StepSemantics.AT_LEAST_ONCE_ASYNC),
+        (
+            replace(
+                StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE), serdes=None
+            ),
+            StepSemantics.AT_LEAST_ONCE,
+        ),
+        (
+            replace(StepConfig(), step_semantics=StepSemantics.AT_MOST_ONCE),
+            StepSemantics.AT_MOST_ONCE,
         ),
     ],
 )

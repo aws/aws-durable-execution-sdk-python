@@ -7,7 +7,7 @@ import random
 import string
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 from aws_durable_execution_sdk_python.exceptions import ValidationError
 
@@ -541,6 +541,11 @@ def _validate_sub_type(sub_type: str | None) -> None:
         raise ValidationError(msg)
 
 
+# Default of StepConfig.step_semantics. StepConfig stores AT_LEAST_ONCE in its
+# place and records that the caller did not set the field.
+_STEP_SEMANTICS_UNSET: StepSemantics = cast("StepSemantics", object())
+
+
 @dataclass(frozen=True)
 class StepConfig:
     """Configuration for a step.
@@ -550,9 +555,10 @@ class StepConfig:
             If None, the SDK uses its default retry strategy.
 
         step_semantics: How often one attempt may run the function.
-            None (the default) uses the default_step_semantics of
-            durable_execution, which is AT_LEAST_ONCE unless set.
-            AT_LEAST_ONCE checkpoints START without
+            The default is AT_LEAST_ONCE. A step that does not set this
+            field uses the default_step_semantics of durable_execution,
+            which is AT_LEAST_ONCE unless set. A value set here wins, even
+            AT_LEAST_ONCE. AT_LEAST_ONCE checkpoints START without
             waiting, so an interrupted attempt runs again on the next
             invocation. AT_MOST_ONCE waits for the START checkpoint
             first, and an interrupted attempt fails with StepInterruptedError
@@ -577,12 +583,32 @@ class StepConfig:
     """
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
-    step_semantics: StepSemantics | None = None
+    step_semantics: StepSemantics = _STEP_SEMANTICS_UNSET
     serdes: SerDes | None = None
     sub_type: str | None = field(default=None, kw_only=True)
+    # Private. True when the caller set step_semantics. It is an init field,
+    # so dataclasses.replace passes it on to the copy.
+    _step_semantics_set: bool | None = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         _validate_sub_type(self.sub_type)
+        if self.step_semantics is _STEP_SEMANTICS_UNSET:
+            object.__setattr__(self, "step_semantics", StepSemantics.AT_LEAST_ONCE)
+            is_set = False
+        elif self._step_semantics_set is None:
+            is_set = True
+        else:
+            # dataclasses.replace copies the stored value and the flag. So a
+            # replace that changes the value to another member sets the field.
+            # A replace to AT_LEAST_ONCE on an unset config stays unset,
+            # because the copy cannot tell it from the stored default.
+            is_set = (
+                self._step_semantics_set
+                or self.step_semantics is not StepSemantics.AT_LEAST_ONCE
+            )
+        object.__setattr__(self, "_step_semantics_set", is_set)
 
 
 @dataclass(frozen=True)
