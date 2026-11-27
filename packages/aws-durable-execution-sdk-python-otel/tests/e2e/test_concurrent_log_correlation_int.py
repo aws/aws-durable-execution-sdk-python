@@ -269,12 +269,13 @@ def test_overlapping_invocations_stamp_top_level_logs_with_their_own_span(
         for owner in OWNERS:
             assert results[owner]["Status"] == InvocationStatus.SUCCEEDED.value
 
-        # Each invocation's Invocation span identifies its execution by ARN, so
-        # the expected identifiers are read back from the exported spans rather
-        # than recomputed.
+        # Each parent span identifies its execution by ARN, so the expected
+        # identifiers are read back from the exported spans rather than
+        # recomputed. A top-level record names the Workflow span in the
+        # Execution view and the Invocation span in the Invocation view.
         expected: dict[str, tuple[str, str]] = {}
         for span in exporter.get_finished_spans():
-            if span.name != "Invocation":
+            if span.name != parent_name:
                 continue
             assert span.attributes is not None
             arn = span.attributes["durable.execution.arn"]
@@ -296,8 +297,7 @@ def test_overlapping_invocations_stamp_top_level_logs_with_their_own_span(
         assert stamped == {
             owner: expected[_execution_arn(owner)] for owner in OWNERS
         }, f"records carried {stamped}"
-        # Log correlation keeps its existing Invocation fallback in both views;
-        # durable operation parenting distinguishes the selected view.
+        # Durable operation parenting distinguishes the selected view.
         parents = {
             str(span.attributes["durable.execution.arn"]): span.context
             for span in exporter.get_finished_spans()

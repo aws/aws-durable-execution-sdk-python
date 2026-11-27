@@ -613,12 +613,17 @@ def test_rejected_configuration_leaves_no_stale_log_filter(
     with DurableFunctionTestRunner(handler=wrapped) as runner:
         assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
     record = next(r for r in handler.records if r.name == "recovery")
-    attempt = next(
-        s for s in exporter.get_finished_spans() if s.name == "logged-step attempt 1"
+    # The Execution view names the Step operation span; the Invocation view
+    # names the attempt span.
+    span_name = (
+        "logged-step"
+        if classes[0] is ExecutionOtelPluginFactory
+        else "logged-step attempt 1"
     )
-    assert attempt.context is not None
-    assert getattr(record, "traceId", None) == f"{attempt.context.trace_id:032x}"
-    assert getattr(record, "spanId", None) == f"{attempt.context.span_id:016x}"
+    logged = next(s for s in exporter.get_finished_spans() if s.name == span_name)
+    assert logged.context is not None
+    assert getattr(record, "traceId", None) == f"{logged.context.trace_id:032x}"
+    assert getattr(record, "spanId", None) == f"{logged.context.span_id:016x}"
     assert len(handler.filters) == 1
 
 

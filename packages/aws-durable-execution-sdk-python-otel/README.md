@@ -498,13 +498,20 @@ active for the emitting invocation onto log records, using these attributes:
 - `spanId`: 16-char hex span identifier
 - `otelTraceSampled`: boolean indicating if the trace is sampled
 
-Which span a record carries follows the emitting thread: the operation attempt
-span inside a step, the context span inside a child context, and the Invocation
-span for top-level handler code. A span you start yourself on the execution
-trace is used for records emitted inside it. A span the runtime already had
-active when the invocation started — the Lambda invocation span the ADOT layer
-creates under X-Ray active tracing — is the parent of the Invocation span rather
-than a substitute for it, so a top-level record still names the Invocation span.
+Which span a record carries follows the emitting thread. With
+`ExecutionOtelPlugin`, a record carries the logical span: the Workflow span for
+top-level handler code (the same span ID before a durable wait and after resume),
+the Step operation span inside a step body (the same span ID for every retry
+attempt, and a step nested in a child context uses its own span), and the Child
+operation span inside a child context. Attempt spans stay current in the OTel
+context, so tracing topology is unchanged. `InvocationOtelPlugin` keeps its
+previous mapping: the operation attempt span inside a step, the context span
+inside a child context, and the Invocation span for top-level handler code. A
+span you start yourself on the execution trace is used for records emitted
+inside it. A span the runtime already had active when the invocation started
+(the Lambda invocation span the ADOT layer creates under X-Ray active tracing)
+does not replace these spans, so a top-level record still names the Workflow
+span (Execution view) or the Invocation span (Invocation view).
 Correlation holds from the first statement of the handler, before any durable
 operation, and holds when several invocations run concurrently in one
 environment (Lambda Managed Instances): the plugin claims the invocation thread

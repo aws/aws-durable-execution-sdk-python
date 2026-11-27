@@ -187,6 +187,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # recorded by _record_enclosing_span. Used only to resolve log
         # correlation; see get_current_span_context.
         self._enclosing_span_context: SpanContext | None = None
+        # Attempt span ID -> its Step operation span context, so a record
+        # emitted in a step body carries the Step operation span ID.
+        self._attempt_operation_contexts: dict[int, SpanContext] = {}
         self._operation_spans: dict[str, Span] = {}
         # CONTEXT operations that emitted a durable START hook this invocation.
         # A context absent from this set is checkpointless (for example, a FLAT
@@ -324,26 +327,38 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def get_current_span_context(self) -> SpanContext | None:
         """Return the active span context for log correlation (see log_filter).
 
-        A span that became current *inside* this invocation wins: the attempt
-        span inside a step, the context span inside a child context, or a span
-        the handler body starts itself. The span that enclosed this invocation is
-        excluded, so top-level handler records resolve to the Invocation span
-        rather than to the Workflow span this plugin makes current at invocation
-        start, which the SDK carries into the thread running the handler body.
+        Records resolve to the logical Workflow or operation span: the Workflow
+        span for top-level handler code, the Step operation span inside a step
+        body (the same span for every retry attempt), and the Child operation
+        span inside a child context. A span the handler body starts itself is
+        used as is. The attempt span stays current in the OTel context so
+        tracing topology is unchanged; only the span ID stamped on the record
+        maps from the attempt to its Step operation.
         """
         span_context = trace.get_current_span().get_span_context()
-        if (
-            span_context
-            and span_context.is_valid
-            and not self._is_enclosing_span(span_context)
-        ):
-            return span_context
-        for candidate in (self._invocation_span, self._workflow_span):
-            if candidate is not None:
-                ctx = candidate.get_span_context()
-                if ctx and ctx.is_valid:
-                    return ctx
+        if span_context and span_context.is_valid:
+            if self._is_enclosing_span(span_context):
+                workflow = self._valid_context(self._workflow_span)
+                if workflow is not None:
+                    return workflow
+            else:
+                with self._lock:
+                    operation = self._attempt_operation_contexts.get(
+                        span_context.span_id
+                    )
+                return operation or span_context
+        for candidate in (self._workflow_span, self._invocation_span):
+            ctx = self._valid_context(candidate)
+            if ctx is not None:
+                return ctx
         return None
+
+    @staticmethod
+    def _valid_context(span: Span | None) -> SpanContext | None:
+        if span is None:
+            return None
+        ctx = span.get_span_context()
+        return ctx if ctx and ctx.is_valid else None
 
     def _record_enclosing_span(self) -> None:
         """Record the span that is current now, as this invocation's body begins.
@@ -993,6 +1008,12 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 deterministic=False,
             )
             self._note_parent_start(info.operation_id, info.start_time)
+            operation_context = self._operation_span_context(info.operation_id)
+            if operation_context is not None:
+                with self._lock:
+                    self._attempt_operation_contexts[
+                        span.get_span_context().span_id
+                    ] = operation_context
         else:  # CONTEXT
             # A child context can suspend before completing, so hold a
             # non-recording placeholder while it runs; on_operation_end
@@ -1046,6 +1067,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
             popped = self._pop_span(key)
             if popped is not None:
+                with self._lock:
+                    self._attempt_operation_contexts.pop(
+                        popped.get_span_context().span_id, None
+                    )
                 popped.end(end_time=end_timestamp)
 
         # Restore the enclosing context by releasing the scope this user

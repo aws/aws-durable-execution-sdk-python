@@ -204,9 +204,10 @@ class OtelContextLogFilter(logging.Filter):
     time, on the thread that emits the record, so one installed filter serves
     any number of concurrent invocations. Resolution is described in the module
     docstring; the span itself comes from that invocation's
-    ``get_current_span_context()``, which returns the active operation span
-    inside steps and child contexts and falls back to the invocation span for
-    top-level handler code.
+    ``get_current_span_context()``, which returns the span the plugin
+    names for the record: for the Execution view the Step operation, Child
+    operation or Workflow span, for the Invocation view the active operation
+    span inside steps and child contexts and the invocation span at top level.
 
     The filter never caches identifiers and always returns ``True`` so it never
     drops a record.

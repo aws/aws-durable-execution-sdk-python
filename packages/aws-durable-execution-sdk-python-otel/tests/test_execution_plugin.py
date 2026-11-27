@@ -1709,14 +1709,13 @@ def _span_id_hex(span: Span) -> str:
     return format(span.get_span_context().span_id, "016x")
 
 
-def test_top_level_log_names_invocation_span_not_the_attached_workflow_span():
-    """A top-level handler record names the Invocation span, not the Workflow span.
+def test_top_level_log_names_the_workflow_span():
+    """A top-level handler record names the Workflow span.
 
-    This plugin makes the Workflow span current at invocation start so
-    auto-instrumented spans join the execution trace, and the SDK carries the
-    invocation thread's context into the thread that runs the handler body. The
-    Workflow span spans the whole execution, so it is less specific than the
-    Invocation span for a record emitted by one invocation's top-level code.
+    This plugin makes the Workflow span current at invocation start, and the SDK
+    carries the invocation thread's context into the thread that runs the
+    handler body. The Workflow span has a stable identity across invocations,
+    so top-level records before a wait and after resume carry the same span ID.
     """
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
@@ -1728,30 +1727,59 @@ def test_top_level_log_names_invocation_span_not_the_attached_workflow_span():
 
         stamped = _stamped_span_id()
 
-        assert stamped == _span_id_hex(plugin._invocation_span)
-        assert stamped != _span_id_hex(plugin._workflow_span)
+        assert stamped == _span_id_hex(plugin._workflow_span)
+        assert stamped != _span_id_hex(plugin._invocation_span)
     finally:
         plugin.on_invocation_end(_invocation_end_info())
 
 
-def test_step_attempt_log_names_the_attempt_span():
-    """A record inside a step names the attempt span, not the Invocation span.
+def test_step_log_names_the_step_operation_span_across_attempts():
+    """A record inside a step names the Step operation span, not the attempt span.
 
-    Excluding the Workflow span from log correlation must not also exclude spans
-    that become current inside the invocation.
+    The attempt span stays current so tracing topology is unchanged; only the
+    stamped span ID maps to the Step operation, which is the same for every
+    attempt. Leaving the step restores the Workflow span.
     """
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     try:
-        plugin.on_user_function_start(_step_start_info("step-1"))
-        attempt_span = plugin._get_span("step-1:attempt:1")
-        assert attempt_span is not None
-        assert plugin._invocation_span is not None
+        assert plugin._workflow_span is not None
+        operation_span_id = format(
+            operation_id_to_span_id(EXECUTION_ARN, "step-1"), "016x"
+        )
+        stamped_by_attempt = []
+        for attempt in (1, 2):
+            plugin.on_user_function_start(_step_start_info("step-1", attempt=attempt))
+            attempt_span = plugin._get_span(f"step-1:attempt:{attempt}")
+            assert attempt_span is not None
+            assert trace.get_current_span() is attempt_span
+            stamped_by_attempt.append(_stamped_span_id())
+            assert stamped_by_attempt[-1] != _span_id_hex(attempt_span)
+            plugin.on_user_function_end(_step_end_info("step-1", attempt=attempt))
+            assert _stamped_span_id() == _span_id_hex(plugin._workflow_span)
 
-        stamped = _stamped_span_id()
+        assert stamped_by_attempt == [operation_span_id, operation_span_id]
+    finally:
+        plugin.on_invocation_end(_invocation_end_info())
 
-        assert stamped == _span_id_hex(attempt_span)
-        assert stamped != _span_id_hex(plugin._invocation_span)
+
+def test_nested_step_log_names_its_own_operation_span_and_restores_child():
+    """A step inside a child context logs its own operation span; leaving it
+    restores the Child operation span."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    try:
+        plugin.on_user_function_start(_context_start_info("ctx-1"))
+        child_span_id = _stamped_span_id()
+        child_span = plugin._get_span("ctx-1")
+        assert child_span is not None
+        assert child_span_id == _span_id_hex(child_span)
+        plugin.on_user_function_start(_step_start_info("step-1", parent_id="ctx-1"))
+        assert _stamped_span_id() == format(
+            operation_id_to_span_id(EXECUTION_ARN, "step-1"), "016x"
+        )
+        plugin.on_user_function_end(_step_end_info("step-1"))
+        assert _stamped_span_id() == child_span_id
     finally:
         plugin.on_invocation_end(_invocation_end_info())
 
