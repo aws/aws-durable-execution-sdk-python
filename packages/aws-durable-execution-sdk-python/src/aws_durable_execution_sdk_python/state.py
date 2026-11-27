@@ -133,6 +133,15 @@ class ScheduledRefresh:
         self.cancelled.set()
 
 
+class _BatchCollectionError(Exception):
+    """Collecting a batch failed after operations were taken off the queues."""
+
+    def __init__(self, error: Exception, operations: list[QueuedOperation]) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.operations = operations
+
+
 class _BatchAccumulator:
     """The operations of one checkpoint request, with the limit accounting.
 
@@ -1153,7 +1162,12 @@ class ExecutionState:
 
         while not self._is_shut_down():
             # Collect operations into a batch
-            batch: list[QueuedOperation] = self._collect_checkpoint_batch()
+            try:
+                batch: list[QueuedOperation] = self._collect_checkpoint_batch()
+            except _BatchCollectionError as e:
+                logger.exception("Checkpoint batch collection failed")
+                self._fail_checkpointing(e.error, e.operations)
+                break
 
             if batch:
                 # Extract OperationUpdates, excluding empty checkpoints from API call
@@ -1271,34 +1285,8 @@ class ExecutionState:
                         self._settle_after_execution_completed()
                         break
                 except Exception as e:
-                    # Checkpoint failed - wake all blocked threads so they can raise error
-                    # Drain both queues and signal all completion events
                     logger.exception("Checkpoint batch processing failed")
-                    bg_error: BackgroundThreadError = BackgroundThreadError(
-                        "Checkpoint creation failed", e
-                    )
-
-                    # Signal completion events for the failed batch (already dequeued,
-                    # so no producer can race these).
-                    for queued_op in batch:
-                        if queued_op.completion_event is not None:
-                            queued_op.completion_event.set(bg_error)
-
-                    # Drain the queues and set the failure flag under the completion
-                    # lock so a concurrent create_checkpoint either observes the
-                    # failure and raises, or has its operation drained here - never
-                    # enqueued after the drain and left blocked.
-                    with self._completion_lock:
-                        for queued_op in self._drain_unsent_operations():
-                            if queued_op.completion_event is not None:
-                                queued_op.completion_event.set(bg_error)
-
-                        for refresh in self._drain_pending_refreshes():
-                            refresh.completion_event.set(bg_error)
-
-                        # Future checkpoint attempts fail immediately.
-                        self._checkpointing_failed.set(bg_error)
-
+                    self._fail_checkpointing(e, batch)
                     # Exit the loop - error has been signaled to main thread via completion events
                     break
 
@@ -1316,6 +1304,35 @@ class ExecutionState:
             )
 
         logger.debug("Background checkpoint processing stopped")
+
+    def _fail_checkpointing(
+        self, error: Exception, batch: list[QueuedOperation]
+    ) -> None:
+        """Wake all blocked threads with the error and stop future checkpoints.
+
+        The batch is already dequeued, so no producer can race its events.
+        """
+        bg_error: BackgroundThreadError = BackgroundThreadError(
+            "Checkpoint creation failed", error
+        )
+        for queued_op in batch:
+            if queued_op.completion_event is not None:
+                queued_op.completion_event.set(bg_error)
+
+        # Drain the queues and set the failure flag under the completion
+        # lock so a concurrent create_checkpoint either observes the
+        # failure and raises, or has its operation drained here - never
+        # enqueued after the drain and left blocked.
+        with self._completion_lock:
+            for queued_op in self._drain_unsent_operations():
+                if queued_op.completion_event is not None:
+                    queued_op.completion_event.set(bg_error)
+
+            for refresh in self._drain_pending_refreshes():
+                refresh.completion_event.set(bg_error)
+
+            # Future checkpoint attempts fail immediately.
+            self._checkpointing_failed.set(bg_error)
 
     def _drain_unsent_operations(self) -> list[QueuedOperation]:
         """Take queued operations, overflow first. The caller holds _completion_lock."""
@@ -1485,7 +1502,7 @@ class ExecutionState:
             if isinstance(item, _Signal):
                 self._consume_refresh_wake()
                 continue
-            size = self._calculate_operation_size(item)
+            size = self._operation_size(item, batch)
             if not batch.fits(size):
                 self._overflow_queue.put(item)
                 logger.debug(
@@ -1512,7 +1529,7 @@ class ExecutionState:
         try:
             while not batch.is_full():
                 op = self._overflow_queue.get_nowait()
-                size = self._calculate_operation_size(op)
+                size = self._operation_size(op, batch)
                 if not batch.fits(size):
                     self._overflow_queue.put(op)
                     break
@@ -1539,7 +1556,7 @@ class ExecutionState:
                 self._consume_refresh_wake()
                 continue
             # The first operation is never refused for size; see fits().
-            batch.add(item, self._calculate_operation_size(item))
+            batch.add(item, self._operation_size(item, batch))
             return True
         return False
 
@@ -1553,6 +1570,17 @@ class ExecutionState:
         if batch.has_blocked_caller:
             timeout = min(timeout, _BLOCKED_CALLER_WAIT_SECONDS)
         return timeout
+
+    def _operation_size(self, item: QueuedOperation, batch: _BatchAccumulator) -> int:
+        """Size an operation taken off a queue for the batch.
+
+        A sizing error is raised as _BatchCollectionError with the item and the
+        batch so far. These are already dequeued, so the caller must fail them.
+        """
+        try:
+            return self._calculate_operation_size(item)
+        except Exception as e:
+            raise _BatchCollectionError(e, [*batch.operations, item]) from e
 
     @staticmethod
     def _calculate_operation_size(queued_op: QueuedOperation) -> int:

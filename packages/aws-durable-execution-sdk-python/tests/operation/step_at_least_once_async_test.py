@@ -49,6 +49,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationEndInfo,
 )
 from aws_durable_execution_sdk_python.retries import RetryDecision
+from aws_durable_execution_sdk_python.serdes import PassThroughSerDes
 from tests.test_helpers import plugin_factory
 
 ASYNC = StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_ASYNC)
@@ -304,6 +305,57 @@ def test_failed_succeed_batch_does_not_report_succeeded():
 
     with pytest.raises(RuntimeError, match="checkpoint failed"):
         _invoke(handler, client)
+
+
+def _bytes_step_config(semantics: StepSemantics) -> StepConfig:
+    # PassThroughSerDes keeps the bytes in the update, so sizing the update for
+    # the batch fails in json.dumps.
+    return StepConfig(serdes=PassThroughSerDes(), step_semantics=semantics)
+
+
+def test_unsizable_async_succeed_does_not_report_succeeded():
+    """The batcher cannot size the SUCCEED, so it is never saved. The handler
+    ignores the step result and returns. The invocation raises the error, so
+    Lambda retries it, instead of answering SUCCEEDED."""
+    client = _SlowClient()
+    config = _bytes_step_config(StepSemantics.AT_LEAST_ONCE_ASYNC)
+
+    @durable_execution
+    def handler(_event: Any, context: DurableContext) -> str:
+        context.step(lambda _: b"value", name="s", config=config)
+        return "done"
+
+    with pytest.raises(TypeError, match="bytes"):
+        _invoke(handler, client)
+    assert not client.was_answered(OperationAction.SUCCEED)
+
+
+def test_unsizable_sync_succeed_raises_instead_of_hanging():
+    """A sync SUCCEED that the batcher cannot size wakes its waiter with the
+    error."""
+    client = _SlowClient()
+    config = _bytes_step_config(StepSemantics.AT_LEAST_ONCE)
+
+    @durable_execution
+    def handler(_event: Any, context: DurableContext) -> str:
+        context.step(lambda _: b"value", name="s", config=config)
+        return "done"
+
+    outcome: dict[str, BaseException] = {}
+
+    def run() -> None:
+        try:
+            _invoke(handler, client)
+        except BaseException as e:  # noqa: BLE001
+            outcome["error"] = e
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive(), "sync step waiter hung"
+    assert isinstance(outcome.get("error"), TypeError)
+    assert not client.was_answered(OperationAction.SUCCEED)
 
 
 def _failing_succeed(category: DurableApiErrorCategory) -> _SlowClient:
