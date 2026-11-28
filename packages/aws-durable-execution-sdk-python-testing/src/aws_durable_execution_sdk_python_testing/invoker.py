@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python_testing.execution import OperationPaginato
 from aws_durable_execution_sdk_python_testing.model import (
     LambdaContext,
     executed_version,
+    project_operation_dict,
 )
 
 
@@ -38,6 +39,16 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python_testing.client import InMemoryServiceClient
     from aws_durable_execution_sdk_python_testing.execution import Execution
+
+
+def _invocation_input_payload(input: DurableExecutionInvocationInput) -> dict[str, Any]:
+    """Serialize the invocation input with the ReplayChildren projection applied."""
+    payload: dict[str, Any] = dict(input.to_json_dict())
+    state = input.initial_execution_state
+    operations = payload["InitialExecutionState"]["Operations"]
+    for operation, data in zip(state.operations, operations, strict=True):
+        project_operation_dict(operation, data)
+    return payload
 
 
 # Every Invoke the runner sends is one Lambda invocation: a handler
@@ -514,7 +525,7 @@ class LambdaInvoker(Invoker):
         invoke_kwargs: dict[str, Any] = {
             "FunctionName": function_name,
             "InvocationType": "RequestResponse",  # Synchronous invocation
-            "Payload": json.dumps(input.to_json_dict()),
+            "Payload": json.dumps(_invocation_input_payload(input)),
         }
         if tenant_id is not None:
             invoke_kwargs["TenantId"] = tenant_id

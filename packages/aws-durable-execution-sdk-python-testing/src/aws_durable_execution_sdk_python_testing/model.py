@@ -6,6 +6,7 @@ import datetime
 
 from aws_durable_execution_sdk_python_testing.clock import real_now
 import json
+from collections.abc import MutableMapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
@@ -548,6 +549,28 @@ class GetDurableExecutionStateRequest:
         return result
 
 
+def project_operation_dict(
+    operation: Operation, data: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Apply the local service's ReplayChildren wire projection to one operation.
+
+    Core serialization omits a false ``ReplayChildren``. The service omits the
+    field from a STARTED context and sends an explicit boolean once the context
+    is completed. ``data`` is the serialized form of ``operation``; the
+    operation itself is not changed.
+    """
+    if operation.operation_type is not OperationType.CONTEXT:
+        return data
+    context = data.get("ContextDetails")
+    if context is None or operation.context_details is None:
+        return data
+    if operation.status is OperationStatus.STARTED:
+        context.pop("ReplayChildren", None)
+    else:
+        context["ReplayChildren"] = operation.context_details.replay_children is True
+    return data
+
+
 @dataclass(frozen=True)
 class GetDurableExecutionStateResponse:
     """Response containing durable execution state operations."""
@@ -567,7 +590,9 @@ class GetDurableExecutionStateResponse:
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "Operations": [op.to_dict() for op in self.operations]
+            "Operations": [
+                project_operation_dict(op, op.to_dict()) for op in self.operations
+            ]
         }
         if self.next_marker is not None:
             result["NextMarker"] = self.next_marker
@@ -3146,7 +3171,9 @@ class CheckpointUpdatedExecutionState:
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "Operations": [op.to_dict() for op in self.operations]
+            "Operations": [
+                project_operation_dict(op, op.to_dict()) for op in self.operations
+            ]
         }
         if self.next_marker is not None:
             result["NextMarker"] = self.next_marker

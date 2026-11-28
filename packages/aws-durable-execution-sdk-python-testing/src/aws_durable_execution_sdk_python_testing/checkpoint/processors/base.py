@@ -95,14 +95,21 @@ class OperationProcessor:
         )
 
     def _create_context_details(self, update: OperationUpdate) -> ContextDetails | None:
-        """Create ContextDetails from OperationUpdate."""
+        """Create ContextDetails from OperationUpdate.
+
+        ReplayChildren is the closing choice: it is recorded as true only when a
+        SUCCEED or FAIL update explicitly asks for it. START never retains it.
+        """
+        closing = update.action in (OperationAction.SUCCEED, OperationAction.FAIL)
         return (
             ContextDetails(
                 result=update.payload,
                 error=update.error,
-                replay_children=update.context_options.replay_children
-                if update.context_options
-                else False,
+                replay_children=bool(
+                    closing
+                    and update.context_options
+                    and update.context_options.replay_children is True
+                ),
             )
             if update.operation_type == OperationType.CONTEXT
             else None
