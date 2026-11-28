@@ -26,6 +26,7 @@ from botocore.exceptions import (
 )
 from botocore.retries.standard import ExponentialBackoff
 
+from aws_durable_execution_sdk_python_compute_worker.__about__ import __version__
 from aws_durable_execution_sdk_python_compute_worker.microvm.self_suspend import (
     SUSPEND_CALL_TIMEOUT_SECONDS,
     SuspendDeadlineError,
@@ -180,6 +181,16 @@ def test_the_default_client_ends_a_read_at_the_call_timeout() -> None:
         # One attempt: a retry after a lost answer can run after the MicroVM
         # resumed, and suspend it with the next job inside.
         assert config.retries == {"mode": "standard", "total_max_attempts": 1}
+    finally:
+        client.close()
+
+
+def test_default_client_sets_user_agent() -> None:
+    client: Any = create_microvms_client("us-west-2")
+    try:
+        assert client.meta.config.user_agent_extra == (
+            f"aws-durable-execution-sdk-python-compute-worker/{__version__} md/microvm"
+        )
     finally:
         client.close()
 

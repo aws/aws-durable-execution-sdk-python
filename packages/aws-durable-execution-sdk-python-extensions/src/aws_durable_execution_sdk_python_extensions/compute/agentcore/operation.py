@@ -37,6 +37,7 @@ from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from aws_durable_execution_sdk_python_extensions.__about__ import __version__
 from aws_durable_execution_sdk_python_extensions.compute.agentcore.config import (
     AgentcoreConfig,
     AgentcoreSessionConfig,
@@ -728,6 +729,10 @@ class _DefaultClients:
                             "mode": "standard",
                             "total_max_attempts": _CLIENT_ATTEMPTS,
                         },
+                        user_agent_extra=(
+                            f"aws-durable-execution-sdk-python-extensions/{__version__} "
+                            "md/agentcore"
+                        ),
                     ),
                 )
                 self._clients[region] = client

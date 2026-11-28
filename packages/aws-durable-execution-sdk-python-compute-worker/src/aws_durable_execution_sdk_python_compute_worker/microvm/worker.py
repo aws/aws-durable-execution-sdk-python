@@ -554,17 +554,18 @@ class MicrovmWorkerListener:
             create_client: Creates the Lambda client for a Region. The
                 listener calls it for each job, after the job arrives, and to
                 fail the callback of an invalid request. It never closes a
-                client that this function returns. Defaults to a client of
-                its own per job, from the default credential chain. The
-                listener closes that client when the job ends.
+                client that this function returns, and uses it as it is with
+                its own user agent. Defaults to a client of its own per job,
+                from the default credential chain. The listener closes that
+                client when the job ends.
             create_microvms_client: Creates the ``lambda-microvms`` client
                 that suspends this MicroVM. The listener calls it only when
                 a session asks the worker to suspend when idle, once per
                 suspend. It never closes a client that this function
-                returns. Defaults to a client of
-                its own per suspend, from the default credential chain. The
-                listener closes that client after the call. The listener
-                stops the client's attempts once a ``resume`` hook arrived.
+                returns, and uses it as it is with its own user agent.
+                Defaults to a client of its own per suspend, from the default
+                credential chain. The listener closes that client after the
+                call. The listener stops the client's attempts once a ``resume`` hook arrived.
                 Give the client one attempt, as the default client has. A
                 retry that starts before the ``resume`` hook arrives can
                 still suspend the MicroVM after it resumed. A client that

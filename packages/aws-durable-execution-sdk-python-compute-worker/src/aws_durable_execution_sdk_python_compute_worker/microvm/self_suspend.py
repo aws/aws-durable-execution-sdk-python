@@ -24,6 +24,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
+from aws_durable_execution_sdk_python_compute_worker.__about__ import __version__
 from aws_durable_execution_sdk_python_compute_worker.microvm.callback_reporter import (
     TRANSIENT_4XX_CODES,
     error_code,
@@ -143,6 +144,10 @@ def create_microvms_client(region: str) -> LambdaMicrovmsClient:
                 # total_max_attempts counts the first attempt too.
                 "total_max_attempts": _CLIENT_ATTEMPTS,
             },
+            user_agent_extra=(
+                "aws-durable-execution-sdk-python-compute-worker/"
+                f"{__version__} md/microvm"
+            ),
         ),
     )
 

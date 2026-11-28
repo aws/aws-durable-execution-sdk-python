@@ -8,10 +8,13 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import boto3
 import pytest
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.exceptions import ValidationError
+from botocore.config import Config
 
+from aws_durable_execution_sdk_python_extensions.__about__ import __version__
 from aws_durable_execution_sdk_python_extensions.compute.microvm import (
     MAX_JOB_INPUT_BYTES,
     MicrovmConfig,
@@ -298,6 +301,37 @@ def test_creates_one_default_client_per_region(
     # botocore's defaults are 60 seconds each, with legacy retries.
     assert (configs[0].connect_timeout, configs[0].read_timeout) == (5, 30)
     assert configs[0].retries == {"mode": "standard", "total_max_attempts": 3}
+
+
+def test_default_client_sets_user_agent() -> None:
+    clients = operation._DefaultClients()  # noqa: SLF001
+    client: Any = clients.get("us-east-1")
+    try:
+        assert client.meta.config.user_agent_extra == (
+            f"aws-durable-execution-sdk-python-extensions/{__version__} md/microvm"
+        )
+    finally:
+        client.close()
+
+
+def test_passed_client_keeps_its_user_agent() -> None:
+    custom: Any = boto3.session.Session().client(
+        "lambda-microvms",
+        region_name="us-west-2",
+        config=Config(user_agent_extra="custom-agent/1.0"),
+    )
+    try:
+        scope = operation._OperationScope.create(  # noqa: SLF001
+            context=NoOperations(),  # type: ignore[arg-type]
+            name="build",
+            job_input={},
+            config=config(client=custom),
+        )
+        assert scope._client() is custom  # noqa: SLF001
+        client_config: Any = custom.meta.config
+        assert client_config.user_agent_extra == "custom-agent/1.0"
+    finally:
+        custom.close()
 
 
 def test_takes_the_input_and_the_config_by_keyword_only() -> None:

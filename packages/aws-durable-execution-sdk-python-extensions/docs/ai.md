@@ -74,7 +74,7 @@ on_a_server = decider(
 ```
 
 - A `transport` takes precedence. When it is set, `endpoint` and `headers` are not used. Without either, `decider()` uses the `STRANDS_DECIDER_ENDPOINT` environment variable. It raises `TypeError` when that is not set, because it then has nowhere to send the request.
-- The AWS transports use boto3, which this package already depends on. They sign the call with the function's credentials. Each one takes `client=` to replace the default boto3 client, for example to set a Region.
+- The AWS transports use boto3, which this package already depends on. They sign the call with the function's credentials. Each one takes `client=` to replace the default boto3 client, for example to set a Region. A client that you pass is used as it is and keeps its own user agent.
 - A transport is any callable that takes a `DeciderRequest` dict and returns the JSON reply. An exception it raises goes to the step retry strategy. The step calls it directly, so a transport that can hang needs its own timeout.
 - On SageMaker and AgentCore Runtime, the call reaches the server's `POST /invocations` route. The Strands Decider server answers that route like `/v1/systemone`. The 0.2.0 release on PyPI has no `/invocations` route, so deploy a later version.
 - On SageMaker, an HTTP error from the server becomes a `DeciderError` with the server's status.
@@ -93,7 +93,7 @@ short = model.ask(context, "Summarize.", text, bedrock=BedrockCallOptions(max_to
 - The default model is Claude Haiku 5.5 (`global.anthropic.claude-haiku-5-5`, exported as `DEFAULT_LLM_MODEL_ID`). Bedrock has no alias that follows the newest model of a family. So the default is pinned, and a later release moves it to a newer model. Set `model_id` to keep one model.
 - `llm()` takes one destination. This release supports `BedrockConfig` only.
 - `ask` sends a temperature only when you set one, because some newer models, such as Claude Haiku 5.5, reject it.
-- `system` adds your own instructions after the built-in system prompt. `guardrail=BedrockGuardrail(identifier=..., version=...)` applies a Bedrock guardrail. `client` replaces the default `bedrock-runtime` client.
+- `system` adds your own instructions after the built-in system prompt. `guardrail=BedrockGuardrail(identifier=..., version=...)` applies a Bedrock guardrail. `client` replaces the default `bedrock-runtime` client, and a client that you pass is used as it is and keeps its own user agent.
 - `bedrock=BedrockCallOptions(...)` changes `model_id`, `temperature`, or `max_tokens` for one call.
 - `ask` sends the input inside `<input>` tags, and its system prompt says that the input is data, not instructions. An instruction in the input can still change the reply. So do not use a reply alone to authorize an action.
 
